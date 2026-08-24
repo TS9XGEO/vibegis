@@ -66,7 +66,7 @@ import ClassifyLayer from './ClassifyLayer'
 import LegendSymbols from './Legend'
 import UploadLayer from './UploadLayer'
 import type { LayerState } from './wms'
-import { LAYERS_URL, collectionFor, isDeletable, useApp } from './wms'
+import { LAYERS_URL, collectionFor, isManaged, useApp } from './wms'
 
 function DeleteLayerButton({ layer }: { layer: LayerState }) {
   const load = useApp((s) => s.load)
@@ -131,7 +131,11 @@ function LayerRow({ layer, onOpenTable }: { layer: LayerState; onOpenTable: (lay
   const [legendOpen, setLegendOpen] = useState(false)
   const [classifyOpen, setClassifyOpen] = useState(false)
   const dynamicCollections = useApp((s) => s.dynamicCollections)
+  const managedLayers = useApp((s) => s.managedLayers)
   const collection = collectionFor(layer.name, dynamicCollections)
+  // Uploaded and registered layers are the same thing as far as the UI is
+  // concerned: both have a block in uploads.map, so both get the full set.
+  const deletable = isManaged(layer.name, managedLayers)
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: layer.name,
@@ -238,7 +242,7 @@ function LayerRow({ layer, onOpenTable }: { layer: LayerState; onOpenTable: (lay
           </Tooltip>
         )}
 
-        {isDeletable(layer.name) && <DeleteLayerButton layer={layer} />}
+        {deletable && <DeleteLayerButton layer={layer} />}
 
         <ActionIcon variant="subtle" color="gray" size="sm" onClick={() => move(layer.name, -1)}>
           <IconChevronUp size={13} />

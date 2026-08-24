@@ -28,9 +28,22 @@ export const DISTINCT_VALUES_URL = '/distinct-values'  // upload-api: filter bui
 export const LAYER_CONFIG_URL = '/layer-config'  // upload-api: per-layer classification/etc, GET all or PATCH one
 export const COLUMN_STATS_URL = '/column-stats'  // upload-api: min/max for the graduated classification editor
 
-/** Layers created via upload-api (file upload or DB-table registration) — the only ones deletable. */
-export function isDeletable(layerName: string): boolean {
-  return layerName.startsWith('upload_') || layerName.startsWith('dbtable_')
+/**
+ * Layers upload-api manages, i.e. everything with a LAYER block in
+ * uploads.map — file uploads and registered database tables alike. These are
+ * the ones it can delete; layers written by hand into webgis.map or
+ * osm-layers.map have no block for it to remove and would 404.
+ *
+ * Membership comes from upload-api's own /layers listing rather than from a
+ * name prefix. Guessing from `upload_`/`dbtable_` prefixes meant capability
+ * was decided two different ways — delete by prefix, the attribute table,
+ * filter and classification by whether /layers reported a collection — so the
+ * two could disagree and a layer could end up deletable but not filterable, or
+ * the reverse. One source of truth removes the whole class of mismatch, and
+ * keeps working if the naming scheme ever changes.
+ */
+export function isManaged(layerName: string, managedLayers: ReadonlySet<string>): boolean {
+  return managedLayers.has(layerName)
 }
 
 /**
@@ -84,22 +97,34 @@ export function collectionFor(layerName: string, dynamicCollections: Record<stri
 interface DynamicLayerInfo {
   collections: Record<string, string>
   geometryTypes: Record<string, string>
+  /** Every layer upload-api reported, whether uploaded or registered. */
+  managed: Set<string>
 }
+
+const noDynamicLayers = (): DynamicLayerInfo => ({
+  collections: {},
+  geometryTypes: {},
+  managed: new Set(),
+})
 
 async function loadDynamicLayerInfo(): Promise<DynamicLayerInfo> {
   try {
     const res = await fetch(LAYERS_URL, { cache: 'no-store' })
-    if (!res.ok) return { collections: {}, geometryTypes: {} }
+    if (!res.ok) return noDynamicLayers()
     const body = await res.json()
     const collections: Record<string, string> = {}
     const geometryTypes: Record<string, string> = {}
+    const managed = new Set<string>()
     for (const l of body.layers ?? []) {
+      managed.add(l.name)
       collections[l.name] = `${l.schema}.${l.table}`
       if (l.geometry_type) geometryTypes[l.name] = l.geometry_type
     }
-    return { collections, geometryTypes }
+    return { collections, geometryTypes, managed }
   } catch {
-    return { collections: {}, geometryTypes: {} }
+    // upload-api unreachable: no layer is manageable, which is the truth —
+    // delete, classification and the rest all go through it.
+    return noDynamicLayers()
   }
 }
 
@@ -353,6 +378,9 @@ interface AppState {
   // Mapfile TYPE (POINT/LINE/POLYGON) for the same layers — resolveLegend
   // needs a geometry kind for a classified layer that has no LEGENDS entry.
   dynamicGeometry: Record<string, string>
+  // Which layers upload-api can delete: every block in uploads.map, uploaded
+  // and registered alike. See isManaged.
+  managedLayers: Set<string>
 
   // Per-layer config (classification, and more to come) from upload-api.
   // Applies to every layer, static ones included — see resolveLegend.
@@ -437,6 +465,7 @@ export const useApp = create<AppState>((set, get) => ({
 
   dynamicCollections: {},
   dynamicGeometry: {},
+  managedLayers: new Set<string>(),
 
   layerConfigs: {},
 
@@ -479,6 +508,7 @@ export const useApp = create<AppState>((set, get) => ({
         layers: flattenLeaves(root).reverse(),
         dynamicCollections: dynamicInfo.collections,
         dynamicGeometry: dynamicInfo.geometryTypes,
+        managedLayers: dynamicInfo.managed,
         layerConfigs,
         loading: false,
       })
