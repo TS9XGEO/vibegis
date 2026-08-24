@@ -6,7 +6,7 @@
  */
 import { useEffect, useState } from 'react'
 import {
-  ActionIcon, Autocomplete, Button, Group, NumberInput, Popover, SegmentedControl, Select, Stack, Text, Tooltip,
+  ActionIcon, Alert, Autocomplete, Button, Group, NumberInput, Popover, SegmentedControl, Select, Stack, Text, Tooltip,
 } from '@mantine/core'
 import { IconFilter, IconX } from '@tabler/icons-react'
 
@@ -125,6 +125,19 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
 
   const hasActive = (active?.conditions ?? []).some((c) => c.column && c.value.trim() !== '')
 
+  // Two `=` conditions on one column can never both hold, so UND yields an empty
+  // layer. Nothing about the map says why — it just goes blank — and the old
+  // per-gap toggle made it easy to land here by accident, so name it instead.
+  const contradictory =
+    logic === 'and' &&
+    [...draft
+      .filter((c) => c.op === 'eq' && c.column && c.value.trim() !== '')
+      .reduce((acc, c) => {
+        acc.set(c.column, (acc.get(c.column) ?? new Set<string>()).add(c.value))
+        return acc
+      }, new Map<string, Set<string>>())
+      .values()].some((vals) => vals.size > 1)
+
   function addCondition() {
     setDraft((d) => [...d, { column: columns[0]?.key ?? '', op: 'eq', value: '' }])
   }
@@ -202,6 +215,16 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
               onRemove={() => setDraft((d) => d.filter((_, j) => j !== i))}
             />
           ))}
+
+          {contradictory && (
+            <Alert color="yellow" variant="light" p="xs">
+              <Text size="xs">
+                Mit UND können diese Bedingungen nie gleichzeitig zutreffen — eine Spalte
+                kann nur einen Wert haben. Der Layer bleibt leer. Für „einer der Werte"
+                ODER wählen.
+              </Text>
+            </Alert>
+          )}
 
           <Button size="xs" variant="subtle" disabled={columns.length === 0} onClick={addCondition}>
             + Bedingung

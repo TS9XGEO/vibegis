@@ -121,6 +121,21 @@ function WmsLayer({ name, alpha, show }: { name: string; alpha: number; show: bo
       }),
     [name, sldBody, filterXml],
   )
+  // A GetMap that MapServer rejects looks exactly like a filter that matched
+  // nothing: Cesium draws no tile and says nothing. Given how much of this stack
+  // reports failure with HTTP 200 — an error page from MapServer, an empty list
+  // from /layers — the request that failed is worth naming.
+  //
+  // Console only, deliberately. Cesium retries tiles, so errorEvent also fires
+  // for transient failures that resolve on their own; promoting those to a
+  // banner would cry wolf. The layer name and message are what make a silent
+  // blank layer diagnosable.
+  useEffect(() => {
+    return provider.errorEvent.addEventListener((err: { message?: string }) => {
+      console.warn(`GetMap fehlgeschlagen für "${name}":`, err?.message ?? err)
+    })
+  }, [provider, name])
+
   return <ImageryLayer imageryProvider={provider} alpha={alpha} show={show} />
 }
 

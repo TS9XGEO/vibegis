@@ -303,6 +303,55 @@ function symbolizerFor(
  * filters aren't pruned — a class could still satisfy some other branch of
  * the OR, so every rule has to stay in that case.
  */
+/**
+ * Which classes can still draw under an attribute filter, and whether narrowing
+ * them made the filter itself redundant.
+ *
+ * AND is the easy direction: a class is unreachable as soon as *one* condition
+ * contradicts it. OR needs the opposite test — a class survives if it satisfies
+ * *any* condition — which classUnreachable() cannot express, so this used to
+ * skip pruning entirely under OR and emit every class. Correct, but it meant a
+ * two-value filter over a 45-class legend produced 45 rules, 43 of which could
+ * never match.
+ *
+ * OR is only decidable here when every condition is an `eq` on the class column;
+ * anything else (a different column, a range, a LIKE) could still match any
+ * class, so every class is kept. Pruning must never drop a class that could draw.
+ */
+function reachableClasses(
+  layer: LegendLayer,
+  conditions: FilterCondition[],
+  logic: FilterLogic,
+): { classes: LegendClass[]; filterRedundant: boolean } {
+  if (conditions.length === 0) return { classes: layer.classes, filterRedundant: false }
+
+  if (logic === 'and') {
+    return {
+      classes: layer.classes.filter((cls) => !classUnreachable(layer.classItem, cls.match, conditions)),
+      filterRedundant: false,
+    }
+  }
+
+  const classItem = layer.classItem
+  const decidable =
+    classItem !== null && conditions.every((c) => c.column === classItem && c.op === 'eq')
+  if (!decidable) return { classes: layer.classes, filterRedundant: false }
+
+  const wanted = new Set(conditions.map((c) => c.value))
+  const classes = layer.classes.filter((cls) => {
+    const match = cls.match
+    if (match === null) return true // catch-all class: can always draw
+    if (typeof match === 'string') return wanted.has(match)
+    return [...wanted].some((v) => Number(v) >= match.min && Number(v) < match.max)
+  })
+  // Every surviving class matches one of the wanted values, so `classItem = <class>`
+  // already implies the OR — but only for string matches, where the equality is
+  // exact. A range class is wider than the value that selected it, so the filter
+  // still has to be carried.
+  const allExact = classes.every((cls) => cls.match === null || typeof cls.match === 'string')
+  return { classes, filterRedundant: allExact && classes.every((cls) => cls.match !== null) }
+}
+
 function classUnreachable(classItem: string | null, match: ClassMatch, conditions: FilterCondition[]): boolean {
   if (classItem === null || match === null) return false
   return conditions.some((c) => {
@@ -333,11 +382,23 @@ export function buildSld(
   extraConditions: FilterCondition[] | null = null,
   extraLogic: FilterLogic = 'and',
 ): string {
-  const conditions = extraLogic === 'and' ? (extraConditions ?? []) : []
-  let classes = layer.classes.filter((cls) => !classUnreachable(layer.classItem, cls.match, conditions))
-  if (classes.length === 0) classes = layer.classes // pruned to nothing — likely a filter mismatch; fall back rather than emit an empty, invalid ruleset
+  const conditions = extraConditions ?? []
+  const { classes: reachable, filterRedundant } = reachableClasses(layer, conditions, extraLogic)
 
-  const extraXml = extraConditions ? buildConditionsXml(extraConditions, extraLogic) : null
+  // Pruned to nothing means the filter genuinely cannot match anything. Emitting
+  // no rules would be an empty, invalid FeatureTypeStyle, and re-emitting every
+  // class (what this used to do) produces dozens of impossible rules and a huge
+  // request for a layer that will draw nothing either way. One rule carrying the
+  // filter is valid, matches nothing, and stays small.
+  const classes = reachable.length > 0 ? reachable : layer.classes.slice(0, 1)
+
+  // Once the classes have been narrowed to exactly those the filter selects, the
+  // class predicate already encodes the filter and repeating it in every rule is
+  // pure duplication — that is what turned a two-value filter over a 45-class
+  // legend into ~33KB of SLD on every single tile request.
+  const extraXml = filterRedundant || conditions.length === 0
+    ? null
+    : buildConditionsXml(conditions, extraLogic)
   const rules = classes
     .map((cls) => {
       const color = colorOf(cls, overrides[cls.name])

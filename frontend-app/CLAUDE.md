@@ -74,6 +74,15 @@ Legend.tsx 94  ZoomBar.tsx 65  StatusHud.tsx 62
   vanish again when it was removed, which reads as three unrelated bugs.
   MapServer rejects `FILTER` together with `SLD_BODY`, so when an SLD is in play the
   filter is spliced into every Rule by `filterFor()` instead of being sent separately.
+- **An attribute filter on a classified layer goes into the SLD, not the `FILTER`
+  parameter** — MapServer rejects the two together, so `filterFor()` splices the filter
+  into every Rule as `And(classItem = <class>, <filter>)`. `reachableClasses()` narrows
+  the rules first: under AND a class dies if any condition contradicts it; under OR a
+  class survives if it matches any, decidable only when every condition is an `eq` on
+  the class column. Getting this wrong is expensive rather than merely untidy — two
+  values over a 45-class legend emitted 45 rules and ~33KB of SLD per tile, now 2 rules
+  and 1.2KB. Pruning must never drop a class that could still draw; the tests cover a
+  filter on a different column and a non-`eq` operator for exactly that reason.
 - **The layer list comes from GetCapabilities**, never a hardcoded list. Add a `LAYER`
   to the mapfile and it appears on reload. Per-layer extras live in module-level maps
   in `wms.ts`: `CACHED_LAYERS` (which layers go through MapProxy),
