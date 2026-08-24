@@ -74,6 +74,10 @@ docker compose down        # keep data   |   down -v = DELETE the database
   `docker compose exec <svc> ls -la <mountpoint>`; if it is empty,
   `docker compose up -d --force-recreate <svc>`. Only if that fails is it the sharing
   layer itself: `wsl --shutdown`, then restart Docker Desktop.
+- **Every upload-api route needs its own nginx `location`.** The gateway proxies them
+  one by one; anything unlisted falls through to `/` and returns the React
+  `index.html`, so a missing route looks like a *successful* HTML response rather than
+  a 404. `/health` was unreachable for exactly this reason.
 - **Visual checks belong to Thomas.** For anything that has to be *looked at*, hand
   over http://localhost:8080/ rather than driving a headless browser.
 

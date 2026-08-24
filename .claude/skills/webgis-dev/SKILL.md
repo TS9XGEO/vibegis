@@ -35,7 +35,7 @@ curl -s -o /dev/null -w "app %{http_code}\n"  http://localhost:8080/
 curl -s "http://localhost:8080/mapserver?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities" | grep -o '<Name>[^<]*</Name>' | head
 curl -s -o /dev/null -w "terrain %{http_code}\n" http://localhost:8080/terrain/layer.json
 curl -s -o /dev/null -w "features %{http_code}\n" http://localhost:8080/features/collections
-curl -s http://localhost:8080/health          # upload-api
+curl -s http://localhost:8080/health          # upload-api; mapfile_volume must be true
 docker compose exec frontend npm run typecheck
 ```
 
