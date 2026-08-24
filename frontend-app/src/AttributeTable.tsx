@@ -5,12 +5,13 @@
  * already deployed for the search box (see tools.ts).
  */
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Drawer, Group, Loader, ScrollArea, Table, Text } from '@mantine/core'
+import { Alert, Button, Drawer, Group, Loader, ScrollArea, Select, Table, Text } from '@mantine/core'
 
 import { FEATURES_URL } from './tools'
 import { collectionFor, useApp, type LayerState } from './wms'
 
-const PAGE_SIZE = 25
+const DEFAULT_PAGE_SIZE = 100
+const PAGE_SIZE_OPTIONS = ['25', '50', '100', '250', '500']
 
 interface AttrFeature {
   id: string
@@ -20,11 +21,12 @@ interface AttrFeature {
 async function fetchPage(
   collection: string,
   offset: number,
+  limit: number,
   signal?: AbortSignal,
 ): Promise<AttrFeature[]> {
   const url =
     `${FEATURES_URL}/collections/${encodeURIComponent(collection)}/items` +
-    `?limit=${PAGE_SIZE}&offset=${offset}`
+    `?limit=${limit}&offset=${offset}`
   const res = await fetch(url, { signal })
   if (!res.ok) throw new Error(`Sachdaten: HTTP ${res.status}`)
   const json = await res.json()
@@ -45,6 +47,7 @@ export default function AttributeTable({
   const collection = layer ? collectionFor(layer.name, dynamicCollections) : undefined
 
   const [offset, setOffset] = useState(0)
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const [rows, setRows] = useState<AttrFeature[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -54,12 +57,19 @@ export default function AttributeTable({
     setOffset(0)
   }, [layer?.name])
 
+  function changePageSize(size: number) {
+    setPageSize(size)
+    // A mid-page offset from the old page size lines up with a different row
+    // range once the size changes, so start over rather than show a mismatch.
+    setOffset(0)
+  }
+
   useEffect(() => {
     if (!collection) return
     const controller = new AbortController()
     setLoading(true)
     setError(null)
-    fetchPage(collection, offset, controller.signal)
+    fetchPage(collection, offset, pageSize, controller.signal)
       .then((r) => {
         setRows(r)
         setLoading(false)
@@ -70,7 +80,7 @@ export default function AttributeTable({
         setLoading(false)
       })
     return () => controller.abort()
-  }, [collection, offset])
+  }, [collection, offset, pageSize])
 
   // pg_featureserv doesn't report a total count, so columns come from
   // whatever the current page actually returned.
@@ -90,6 +100,15 @@ export default function AttributeTable({
       styles={{
         content: { backgroundColor: 'rgba(20,22,28,0.98)' },
         header: { backgroundColor: 'rgba(20,22,28,0.98)' },
+        // The Drawer's own body is what scrolls by default, which is exactly
+        // what breaks stickyHeader below: `position: sticky` only pins within
+        // its nearest *scrolling* ancestor, and a ScrollArea with no bounded
+        // height never becomes one — it just grows to fit every row, so the
+        // header scrolls away with the rest of the table. Turning the body
+        // into a column flex container and giving the ScrollArea `flex: 1`
+        // makes the ScrollArea the one that scrolls instead, which is what
+        // stickyHeader needs to have something to stick to.
+        body: { display: 'flex', flexDirection: 'column', height: '100%' },
       }}
     >
       {!collection && (
@@ -115,7 +134,12 @@ export default function AttributeTable({
 
           {!loading && !error && (
             <>
-              <ScrollArea>
+              {/* h={0} forces the flex item to ignore its content's intrinsic
+                  height and take `flex: 1` from the column above instead —
+                  without it a flex child sizes to its content by default and
+                  never actually becomes bounded, which is the same failure
+                  mode as leaving the height unset entirely. */}
+              <ScrollArea style={{ flex: 1 }} h={0}>
                 <Table striped withTableBorder stickyHeader fz="xs">
                   <Table.Thead>
                     <Table.Tr>
@@ -145,18 +169,27 @@ export default function AttributeTable({
                     size="xs"
                     variant="default"
                     disabled={offset === 0}
-                    onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+                    onClick={() => setOffset((o) => Math.max(0, o - pageSize))}
                   >
                     Zurück
                   </Button>
                   <Button
                     size="xs"
                     variant="default"
-                    disabled={rows.length < PAGE_SIZE}
-                    onClick={() => setOffset((o) => o + PAGE_SIZE)}
+                    disabled={rows.length < pageSize}
+                    onClick={() => setOffset((o) => o + pageSize)}
                   >
                     Weiter
                   </Button>
+                  <Select
+                    size="xs"
+                    w={90}
+                    data={PAGE_SIZE_OPTIONS}
+                    value={String(pageSize)}
+                    onChange={(v) => changePageSize(Number(v ?? DEFAULT_PAGE_SIZE))}
+                    allowDeselect={false}
+                    comboboxProps={{ withinPortal: false }}
+                  />
                 </Group>
               </Group>
             </>
