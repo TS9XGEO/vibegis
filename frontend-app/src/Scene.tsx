@@ -61,6 +61,7 @@ function InitialView() {
 
 import { buildConditionsXml, buildFilterXml } from './filter'
 import { buildSld, resolveLegend } from './legend'
+import { cesiumContextOptions, webglSupport } from './webgl'
 import { TERRAIN_URL, TILES3D_URL, WMS_URL, renderUrlFor, useApp } from './wms'
 
 function WmsLayer({ name, alpha, show }: { name: string; alpha: number; show: boolean }) {
@@ -118,7 +119,53 @@ function WmsLayer({ name, alpha, show }: { name: string; alpha: number; show: bo
 
 const flatTerrain = new EllipsoidTerrainProvider()
 
+/**
+ * Shown instead of the Viewer when the browser can give us no WebGL context at
+ * all. Constructing the Viewer anyway would throw asynchronously inside Resium,
+ * which an error boundary cannot catch — the user would just get a black
+ * rectangle and have to open the console to find out why.
+ */
+function NoWebGL() {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100%',
+        padding: 24,
+        background: '#0f1115',
+        color: '#c1c2c5',
+        fontFamily: 'system-ui, sans-serif',
+      }}
+    >
+      <div style={{ maxWidth: 460, lineHeight: 1.6 }}>
+        <h2 style={{ margin: '0 0 12px', fontSize: 18 }}>Karte nicht darstellbar</h2>
+        <p style={{ margin: '0 0 12px' }}>
+          Dieser Browser stellt keinen WebGL-Kontext bereit, den Cesium für die
+          3D-Ansicht benötigt.
+        </p>
+        <p style={{ margin: 0, fontSize: 13, color: '#909296' }}>
+          In Firefox: <code>about:config</code> → <code>webgl.disabled</code> auf{' '}
+          <code>false</code> und <code>webgl.enable-webgl2</code> auf <code>true</code>.
+          Hilft das nicht, ist meist der Grafiktreiber auf der Blockliste des
+          Browsers — ein Treiber-Update oder ein anderer Browser löst es.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Hook-free wrapper, so the "no WebGL at all" branch never sits above a hook
+ * call. Everything below this point can assume a context is obtainable.
+ */
 export default function Scene({ children }: { children?: ReactNode }) {
+  if (webglSupport === 'none') return <NoWebGL />
+  return <CesiumScene>{children}</CesiumScene>
+}
+
+function CesiumScene({ children }: { children?: ReactNode }) {
   const layers = useApp((s) => s.layers)
   const osmVisible = useApp((s) => s.osmVisible)
   const terrainOn = useApp((s) => s.terrainOn)
@@ -152,6 +199,10 @@ export default function Scene({ children }: { children?: ReactNode }) {
   return (
     <Viewer
       full
+      // Cesium asks for a WebGL2 context by default and throws instead of
+      // falling back, which is what made the globe fail to construct in
+      // Firefox wherever WebGL2 is blocked. See webgl.ts.
+      contextOptions={cesiumContextOptions}
       baseLayer={false}
       baseLayerPicker={false}
       geocoder={false}

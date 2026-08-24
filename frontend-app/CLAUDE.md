@@ -30,6 +30,17 @@ Legend.tsx 94  ZoomBar.tsx 65  StatusHud.tsx 62
   row reorders the array, and React does the rest. Never reach for `raiseToTop`.
 - **`terrainProvider` goes on `<Globe>`, not `<Viewer>`.** Resium applies Viewer's only
   once at construction; Globe's has a working setter (`Scene.tsx:168`).
+- **Never construct the Viewer without `contextOptions` from `webgl.ts`.** Cesium asks
+  for a WebGL2 context by default and *throws* rather than falling back: it tests
+  `typeof WebGL2RenderingContext !== "undefined"`, which is true in every current
+  browser, then dies if `getContext("webgl2")` returns null. Firefox returns null
+  whenever WebGL2 is off or the driver is blocklisted (`AllowWebgl2:false restricts
+  context creation on this system`), so the globe silently failed to construct there
+  while Chrome was fine. `webgl.ts` probes for real and sets `requestWebgl1` only when
+  needed. Cesium's changelog claims an automatic fallback — it only covers browsers
+  that don't define the constructor at all, which is not this case.
+  On WebGL1, billboards and labels need `ANGLE_instanced_arrays`, and voxels are
+  unavailable — neither is used here.
 - **UI that needs the camera must render inside `<Scene>`** to use `useCesium()`.
   `LayerPanel` sits outside and reaches the camera through the store, which `Scene`
   stashes it in (`App.tsx:44`).
