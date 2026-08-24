@@ -22,6 +22,15 @@ endpoint needs a matching `location` block in `nginx/nginx.conf`** or it 404s.
 
 ## Contracts
 
+- **Every read and write of `/mapfiles` goes through `check_mapfile_volume()` first.**
+  It tests for `webgis.map`, which ships with the repo and is never written here, so
+  its absence means the bind mount is dead. That failure is otherwise completely
+  silent: the container sees an empty directory, `append_layer_block()` creates
+  `uploads.map` from scratch inside it, the API returns 200, and the layer never
+  reaches MapServer — which reads the real directory. `/layers` was equally bad,
+  answering 200 with an empty list. Now every such path 503s with the fix
+  (`docker compose up -d --force-recreate upload-api`) and `/health` reports
+  `mapfile_volume`.
 - **It owns `/mapfiles/uploads.map` and `/mapfiles/layer_config.json`** (bind-mounted
   from `mapserver/mapfiles/`). All reads and writes go through `read_layers()`,
   `append_layer_block()` and `remove_layer_block()`, which take an `fcntl.flock`.

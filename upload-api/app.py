@@ -45,6 +45,30 @@ MAPFILE_DIR = Path("/mapfiles")
 UPLOADS_MAP = MAPFILE_DIR / "uploads.map"
 LAYER_CONFIG_PATH = MAPFILE_DIR / "layer_config.json"
 
+# Sentinel for "is the mapfile volume actually mounted?". webgis.map is the root
+# mapfile, ships with the repo and is never written by this service, so it is
+# present whenever the bind mount is live.
+#
+# This exists because a bind mount can die while still looking healthy: Docker
+# keeps reporting the right Source, but the container sees an empty directory.
+# Without this check every write here still "succeeds" — append_layer_block()
+# creates uploads.map from scratch in the void, the API returns 200, and the
+# layer never reaches MapServer, which reads the real directory. Reads are just
+# as bad: /layers answers 200 with an empty list, indistinguishable from having
+# no layers. Fail loudly instead; the fix is
+# `docker compose up -d --force-recreate upload-api`.
+MOUNT_SENTINEL = MAPFILE_DIR / "webgis.map"
+
+
+def check_mapfile_volume() -> None:
+    if not MOUNT_SENTINEL.exists():
+        raise HTTPException(
+            503,
+            f"Mapfile volume not mounted: {MOUNT_SENTINEL} is missing, so nothing "
+            "written here would reach MapServer. Recreate the container: "
+            "docker compose up -d --force-recreate upload-api",
+        )
+
 HEADER = (
     "# Appended to by upload-api (see /webgis/upload-api/app.py) — every upload\n"
     "# or table registration adds one LAYER block here. Do not hand-edit while\n"
@@ -161,6 +185,7 @@ def parse_layers(content: str) -> list[dict]:
 
 
 def read_layers() -> list[dict]:
+    check_mapfile_volume()
     if not UPLOADS_MAP.exists():
         return []
     with open(UPLOADS_MAP, "r") as f:
@@ -172,6 +197,7 @@ def read_layers() -> list[dict]:
 
 
 def append_layer_block(block: str) -> None:
+    check_mapfile_volume()
     MAPFILE_DIR.mkdir(parents=True, exist_ok=True)
     if not UPLOADS_MAP.exists():
         UPLOADS_MAP.write_text(HEADER)
@@ -187,6 +213,7 @@ def append_layer_block(block: str) -> None:
 def remove_layer_block(name: str) -> dict:
     """Removes the LAYER block named `name`. Returns its parsed info (for the
     caller to optionally drop the underlying table). 404s if not found."""
+    check_mapfile_volume()
     MAPFILE_DIR.mkdir(parents=True, exist_ok=True)
     if not UPLOADS_MAP.exists():
         UPLOADS_MAP.write_text(HEADER)
@@ -590,6 +617,7 @@ class LayerConfigPatch(BaseModel):
 
 
 def read_layer_config() -> dict:
+    check_mapfile_volume()
     if not LAYER_CONFIG_PATH.exists():
         return {}
     with open(LAYER_CONFIG_PATH, "r") as f:
@@ -602,6 +630,7 @@ def read_layer_config() -> dict:
 
 
 def write_layer_config(config: dict) -> None:
+    check_mapfile_volume()
     MAPFILE_DIR.mkdir(parents=True, exist_ok=True)
     with open(LAYER_CONFIG_PATH, "a+") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
@@ -645,4 +674,6 @@ def delete_layer_config(name: str):
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    # Reports the mount explicitly rather than a bare ok: a dead bind mount is
+    # the one failure that leaves this service running and answering normally.
+    return {"ok": MOUNT_SENTINEL.exists(), "mapfile_volume": MOUNT_SENTINEL.exists()}

@@ -124,19 +124,28 @@ interface DynamicLayerInfo {
   managed: Set<string>
   /** False when upload-api could not be reached or answered with an error. */
   ok: boolean
+  /** What upload-api said went wrong, when it said anything. */
+  error: string | null
 }
 
-const noDynamicLayers = (ok: boolean): DynamicLayerInfo => ({
+const noDynamicLayers = (ok: boolean, error: string | null = null): DynamicLayerInfo => ({
   collections: {},
   geometryTypes: {},
   managed: new Set(),
   ok,
+  error,
 })
 
 async function loadDynamicLayerInfo(): Promise<DynamicLayerInfo> {
   try {
     const res = await fetch(LAYERS_URL, { cache: 'no-store' })
-    if (!res.ok) return noDynamicLayers(false)
+    if (!res.ok) {
+      // upload-api answers 503 with an actionable detail when its mapfile
+      // volume is not mounted — pass it through rather than flattening every
+      // failure into the same generic warning.
+      const body = await res.json().catch(() => null)
+      return noDynamicLayers(false, body?.detail ?? `HTTP ${res.status}`)
+    }
     const body = await res.json()
     const collections: Record<string, string> = {}
     const geometryTypes: Record<string, string> = {}
@@ -146,12 +155,12 @@ async function loadDynamicLayerInfo(): Promise<DynamicLayerInfo> {
       collections[l.name] = `${l.schema}.${l.table}`
       if (l.geometry_type) geometryTypes[l.name] = l.geometry_type
     }
-    return { collections, geometryTypes, managed, ok: true }
+    return { collections, geometryTypes, managed, ok: true, error: null }
   } catch {
     // Report the failure rather than folding it into "no managed layers".
     // Those two look identical from an empty result, and treating them the
     // same is what let a working delete button vanish without a word.
-    return noDynamicLayers(false)
+    return noDynamicLayers(false, 'Upload-Dienst nicht erreichbar')
   }
 }
 
@@ -472,6 +481,8 @@ interface AppState {
   // classification all need the schema.table it provides, so the panel warns
   // rather than silently rendering fewer buttons.
   layersServiceDown: boolean
+  /** Detail from upload-api explaining why, when it gave one. */
+  layersServiceError: string | null
 
   // Per-layer config (classification, and more to come) from upload-api.
   // Applies to every layer, static ones included — see resolveLegend.
@@ -558,6 +569,7 @@ export const useApp = create<AppState>((set, get) => ({
   dynamicGeometry: {},
   managedLayers: new Set<string>(),
   layersServiceDown: false,
+  layersServiceError: null,
 
   layerConfigs: {},
 
@@ -620,6 +632,7 @@ export const useApp = create<AppState>((set, get) => ({
         dynamicGeometry: { ...capGeometry, ...dynamicInfo.geometryTypes },
         managedLayers: dynamicInfo.managed,
         layersServiceDown,
+        layersServiceError: dynamicInfo.error,
         layerConfigs,
         loading: false,
       })

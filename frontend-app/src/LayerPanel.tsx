@@ -285,6 +285,7 @@ export default function LayerPanel() {
   const loading = useApp((s) => s.loading)
   const error = useApp((s) => s.error)
   const layersServiceDown = useApp((s) => s.layersServiceDown)
+  const layersServiceError = useApp((s) => s.layersServiceError)
   const reorder = useApp((s) => s.reorder)
   const [opened, { toggle: toggleOpen }] = useDisclosure(true)
 
@@ -386,10 +387,15 @@ export default function LayerPanel() {
               {!loading && layersServiceDown && (
                 <Alert color="yellow" variant="light" p="xs">
                   <Text size="xs">
-                    Upload-Dienst nicht erreichbar — Filter und Klassifizierung stehen
-                    derzeit nicht zur Verfügung. Sachdatentabelle und Löschen
-                    funktionieren weiterhin.
+                    Upload-Dienst nicht verfügbar — Hochladen, Registrieren, Filter und
+                    Klassifizierung funktionieren derzeit nicht. Sachdatentabelle und
+                    Löschen funktionieren weiterhin.
                   </Text>
+                  {layersServiceError && (
+                    <Text size="xs" c="dimmed" mt={4} style={{ wordBreak: 'break-word' }}>
+                      {layersServiceError}
+                    </Text>
+                  )}
                 </Alert>
               )}
 
