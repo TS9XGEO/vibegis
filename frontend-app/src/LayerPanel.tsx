@@ -135,7 +135,9 @@ function LayerRow({ layer, onOpenTable }: { layer: LayerState; onOpenTable: (lay
   const collection = collectionFor(layer.name, dynamicCollections)
   // Uploaded and registered layers are the same thing as far as the UI is
   // concerned: both have a block in uploads.map, so both get the full set.
-  const deletable = isManaged(layer.name, managedLayers)
+  // This reads the group out of capabilities, so it survives upload-api being
+  // down — deleting only ever needed the layer name.
+  const deletable = isManaged(layer, managedLayers)
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: layer.name,
@@ -282,6 +284,7 @@ export default function LayerPanel() {
   const layers = useApp((s) => s.layers)
   const loading = useApp((s) => s.loading)
   const error = useApp((s) => s.error)
+  const layersServiceDown = useApp((s) => s.layersServiceDown)
   const reorder = useApp((s) => s.reorder)
   const [opened, { toggle: toggleOpen }] = useDisclosure(true)
 
@@ -372,6 +375,18 @@ export default function LayerPanel() {
               {error && (
                 <Alert color="red" variant="light" p="xs">
                   <Text size="xs">{error}</Text>
+                </Alert>
+              )}
+
+              {/* Said out loud rather than expressed as missing buttons: the
+                  three functions below all need the schema.table that only
+                  /layers can supply for a registered layer. */}
+              {!loading && layersServiceDown && (
+                <Alert color="yellow" variant="light" p="xs">
+                  <Text size="xs">
+                    Sachdaten-Dienst nicht erreichbar — Tabelle, Filter und Klassifizierung
+                    stehen derzeit nicht zur Verfügung. Löschen funktioniert weiterhin.
+                  </Text>
                 </Alert>
               )}
 

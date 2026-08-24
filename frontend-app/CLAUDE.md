@@ -44,12 +44,17 @@ Legend.tsx 94  ZoomBar.tsx 65  StatusHud.tsx 62
 - **UI that needs the camera must render inside `<Scene>`** to use `useCesium()`.
   `LayerPanel` sits outside and reaches the camera through the store, which `Scene`
   stashes it in (`App.tsx:44`).
-- **Capability is decided by upload-api's `/layers`, never by a name prefix.** A layer
+- **Never gate an existing control on a signal that can come back empty.** A layer
   uploaded from a file and one registered from an existing table are the same thing:
-  both get a block in `uploads.map`, so both get delete, attribute table, filter and
-  classification. `isManaged()` tests membership in the `/layers` listing; if
-  `/layers` returns nothing the whole set correctly disappears, because every one of
-  those functions goes through upload-api anyway.
+  both get a block in `uploads.map`, so both should offer delete, attribute table,
+  filter and classification. `isManaged()` unions three signals and subtracts none —
+  the `GROUP "uploads"` that capabilities carry (primary, travels with the layer),
+  membership in upload-api's `/layers`, and the `upload_`/`dbtable_` name prefix as a
+  floor. Deleting needs only the layer name, so it must keep working when upload-api
+  is unreachable. Gating it on `/layers` alone once made a working delete button
+  vanish silently. When `/layers` *is* down, the panel says so
+  (`layersServiceDown`) instead of quietly rendering fewer buttons — a control that
+  disappears without explanation is worse than one that errors when pressed.
 - **The layer list comes from GetCapabilities**, never a hardcoded list. Add a `LAYER`
   to the mapfile and it appears on reload. Per-layer extras live in module-level maps
   in `wms.ts`: `CACHED_LAYERS` (which layers go through MapProxy),

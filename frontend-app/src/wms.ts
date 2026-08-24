@@ -28,22 +28,37 @@ export const DISTINCT_VALUES_URL = '/distinct-values'  // upload-api: filter bui
 export const LAYER_CONFIG_URL = '/layer-config'  // upload-api: per-layer classification/etc, GET all or PATCH one
 export const COLUMN_STATS_URL = '/column-stats'  // upload-api: min/max for the graduated classification editor
 
+/** MapServer GROUP that upload-api puts every layer it creates into. */
+export const MANAGED_GROUP = 'uploads'
+
 /**
  * Layers upload-api manages, i.e. everything with a LAYER block in
  * uploads.map — file uploads and registered database tables alike. These are
  * the ones it can delete; layers written by hand into webgis.map or
  * osm-layers.map have no block for it to remove and would 404.
  *
- * Membership comes from upload-api's own /layers listing rather than from a
- * name prefix. Guessing from `upload_`/`dbtable_` prefixes meant capability
- * was decided two different ways — delete by prefix, the attribute table,
- * filter and classification by whether /layers reported a collection — so the
- * two could disagree and a layer could end up deletable but not filterable, or
- * the reverse. One source of truth removes the whole class of mismatch, and
- * keeps working if the naming scheme ever changes.
+ * The primary signal travels with the layer itself: build_layer_block() writes
+ * GROUP "uploads" into every block it generates, and MapServer publishes that
+ * group in GetCapabilities. So if a layer is in the tree at all, MapServer read
+ * its block out of uploads.map, which is exactly the condition for upload-api
+ * being able to delete it by name.
+ *
+ * `managedLayers` (from /layers) is unioned in only as a safety net. It must
+ * never be the sole source: deleting needs nothing but the layer name, and
+ * gating on /layers meant an unreachable upload-api silently removed a working
+ * delete button rather than reporting a problem.
  */
-export function isManaged(layerName: string, managedLayers: ReadonlySet<string>): boolean {
-  return managedLayers.has(layerName)
+export function isManaged(layer: LayerState, managedLayers: ReadonlySet<string>): boolean {
+  return (
+    layer.groupName === MANAGED_GROUP ||
+    managedLayers.has(layer.name) ||
+    // Floor, kept deliberately. This name-prefix guess is the weakest of the
+    // three and would be the wrong sole signal, but the three are unioned and
+    // never subtract, so keeping it means this check can only ever grant more
+    // than the version that worked before — which is the point.
+    layer.name.startsWith('upload_') ||
+    layer.name.startsWith('dbtable_')
+  )
 }
 
 /**
@@ -91,7 +106,15 @@ export const FEATURE_COLLECTIONS: Record<string, string> = {
  */
 export function collectionFor(layerName: string, dynamicCollections: Record<string, string> = {}): string | undefined {
   if (layerName in FEATURE_COLLECTIONS) return FEATURE_COLLECTIONS[layerName]
-  return dynamicCollections[layerName]
+  const dynamic = dynamicCollections[layerName]
+  if (dynamic) return dynamic
+  // Last resort when /layers is unavailable: a file upload always lands in
+  // schema "raw" with the table named after the layer (app.py's /upload passes
+  // the same string as both), so it is derivable. A registered table is not —
+  // dbtable_<slug(schema_table)> flattens the schema/table boundary and cannot
+  // be reversed — so those still need /layers.
+  if (layerName.startsWith('upload_')) return `raw.${layerName}`
+  return undefined
 }
 
 interface DynamicLayerInfo {
@@ -99,18 +122,21 @@ interface DynamicLayerInfo {
   geometryTypes: Record<string, string>
   /** Every layer upload-api reported, whether uploaded or registered. */
   managed: Set<string>
+  /** False when upload-api could not be reached or answered with an error. */
+  ok: boolean
 }
 
-const noDynamicLayers = (): DynamicLayerInfo => ({
+const noDynamicLayers = (ok: boolean): DynamicLayerInfo => ({
   collections: {},
   geometryTypes: {},
   managed: new Set(),
+  ok,
 })
 
 async function loadDynamicLayerInfo(): Promise<DynamicLayerInfo> {
   try {
     const res = await fetch(LAYERS_URL, { cache: 'no-store' })
-    if (!res.ok) return noDynamicLayers()
+    if (!res.ok) return noDynamicLayers(false)
     const body = await res.json()
     const collections: Record<string, string> = {}
     const geometryTypes: Record<string, string> = {}
@@ -120,11 +146,12 @@ async function loadDynamicLayerInfo(): Promise<DynamicLayerInfo> {
       collections[l.name] = `${l.schema}.${l.table}`
       if (l.geometry_type) geometryTypes[l.name] = l.geometry_type
     }
-    return { collections, geometryTypes, managed }
+    return { collections, geometryTypes, managed, ok: true }
   } catch {
-    // upload-api unreachable: no layer is manageable, which is the truth —
-    // delete, classification and the rest all go through it.
-    return noDynamicLayers()
+    // Report the failure rather than folding it into "no managed layers".
+    // Those two look identical from an empty result, and treating them the
+    // same is what let a working delete button vanish without a word.
+    return noDynamicLayers(false)
   }
 }
 
@@ -157,7 +184,10 @@ export interface LayerState {
   name: string
   title: string
   bbox: Bbox | null
+  /** Group title, for display in the tree. */
   group: string | null
+  /** Group *name* — the stable identifier. See MANAGED_GROUP / isManaged. */
+  groupName: string | null
   visible: boolean
   opacity: number
 }
@@ -244,8 +274,16 @@ export async function fetchCapabilities(signal?: AbortSignal): Promise<CapNode> 
   return parseNode(rootLayer)
 }
 
-/** Flatten to drawable leaves, remembering which group each came from. */
-export function flattenLeaves(node: CapNode, group: string | null = null): LayerState[] {
+/**
+ * Flatten to drawable leaves, remembering which group each came from — both the
+ * title (shown in the tree) and the name (identifies the group; isManaged keys
+ * off it, so it must not be a display string).
+ */
+export function flattenLeaves(
+  node: CapNode,
+  group: string | null = null,
+  groupName: string | null = null,
+): LayerState[] {
   if (node.children.length === 0) {
     if (!node.name) return []
     return [{
@@ -253,13 +291,15 @@ export function flattenLeaves(node: CapNode, group: string | null = null): Layer
       title: node.title,
       bbox: node.bbox,
       group,
+      groupName,
       visible: !DEFAULT_OFF.has(node.name),
       opacity: 1,
     }]
   }
   // the outermost node is the service itself, not a real group
   const nextGroup = node.name ? node.title : group
-  return node.children.flatMap((c) => flattenLeaves(c, nextGroup))
+  const nextGroupName = node.name ? node.name : groupName
+  return node.children.flatMap((c) => flattenLeaves(c, nextGroup, nextGroupName))
 }
 
 const DEFAULT_OFF = new Set(['dem'])
@@ -381,6 +421,10 @@ interface AppState {
   // Which layers upload-api can delete: every block in uploads.map, uploaded
   // and registered alike. See isManaged.
   managedLayers: Set<string>
+  // Set when /layers could not be reached. The attribute table, filter and
+  // classification all need the schema.table it provides, so the panel warns
+  // rather than silently rendering fewer buttons.
+  layersServiceDown: boolean
 
   // Per-layer config (classification, and more to come) from upload-api.
   // Applies to every layer, static ones included — see resolveLegend.
@@ -466,6 +510,7 @@ export const useApp = create<AppState>((set, get) => ({
   dynamicCollections: {},
   dynamicGeometry: {},
   managedLayers: new Set<string>(),
+  layersServiceDown: false,
 
   layerConfigs: {},
 
@@ -509,6 +554,7 @@ export const useApp = create<AppState>((set, get) => ({
         dynamicCollections: dynamicInfo.collections,
         dynamicGeometry: dynamicInfo.geometryTypes,
         managedLayers: dynamicInfo.managed,
+        layersServiceDown: !dynamicInfo.ok,
         layerConfigs,
         loading: false,
       })
