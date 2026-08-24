@@ -58,7 +58,7 @@ Legend.tsx 94  ZoomBar.tsx 65  StatusHud.tsx 62
 - **The layer list comes from GetCapabilities**, never a hardcoded list. Add a `LAYER`
   to the mapfile and it appears on reload. Per-layer extras live in module-level maps
   in `wms.ts`: `CACHED_LAYERS` (which layers go through MapProxy),
-  `FEATURE_COLLECTIONS` (WMS layer → OGC API collection), `isDeletable()`.
+  `FEATURE_COLLECTIONS` (WMS layer → OGC API collection), `MANAGED_GROUP`.
 - UI strings are German. Match that when adding any.
 
 ## Requests
