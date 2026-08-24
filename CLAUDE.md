@@ -28,7 +28,7 @@ Dagster (`:3000`, ETL assets) and PostGIS (`:5432`) bind to `127.0.0.1` only.
 | Edited | To see it |
 |---|---|
 | `frontend-app/src/**` | nothing, Vite HMR. Not picked up? set `VITE_USE_POLLING=1` |
-| `mapserver/mapfiles/*.map` | nothing — MapServer re-reads the mapfile per request. If a change won't show, `restart mapserver` |
+| `mapserver/mapfiles/*.map` | nothing — MapServer re-reads the mapfile per request. If a change won't show, `up -d --force-recreate mapserver` (see stale mounts below) |
 | `mapproxy/mapproxy.yaml` | `restart mapproxy`; if styling changed, also `docker volume rm webgis_mapproxy-cache` or tiles stay stale |
 | `nginx/nginx.conf` | `restart gateway` |
 | `upload-api/app.py` | `restart upload-api` — uvicorn runs without `--reload` |
@@ -65,6 +65,15 @@ docker compose down        # keep data   |   down -v = DELETE the database
 - **`mapserver/mapfiles/uploads.map` and `layer_config.json` are machine-written** by
   upload-api at runtime. A dirty diff there is normal, not a bug to fix. Don't
   hand-edit while the stack is up.
+- **Bind mounts go stale on this setup, and `restart` will not fix it.** Docker
+  resolves a bind mount when the container is *created*, so a mount can end up
+  pointing at nothing while `docker inspect` still reports the correct `Source`. The
+  giveaway is a container that cannot see files that plainly exist on the host —
+  e.g. `msLoadMap(): Unable to access file (/etc/mapserver/webgis.map)` with the
+  mapfile sitting right there, 644. Confirm with
+  `docker compose exec <svc> ls -la <mountpoint>`; if it is empty,
+  `docker compose up -d --force-recreate <svc>`. Only if that fails is it the sharing
+  layer itself: `wsl --shutdown`, then restart Docker Desktop.
 - **Visual checks belong to Thomas.** For anything that has to be *looked at*, hand
   over http://localhost:8080/ rather than driving a headless browser.
 

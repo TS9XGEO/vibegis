@@ -139,6 +139,7 @@ frontend. See `frontend-app/README.md`.
 
 ```bash
 docker compose logs -f mapserver      # follow one service
+docker compose up -d --force-recreate mapserver   # if the container can't see the mapfile
 docker compose restart mapserver      # rarely needed; the mapfile is re-read per request
 docker compose exec postgis psql -U gis -d gis
 docker compose exec frontend npm run typecheck

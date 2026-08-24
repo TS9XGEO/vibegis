@@ -59,6 +59,8 @@ docker compose --profile tools   up -d               # pgAdmin
 | Symptom | Look at |
 |---|---|
 | Globe blank, no layers in the panel | `GetCapabilities` failing. `docker compose logs mapserver` — usually a mapfile syntax error or PostGIS not healthy yet |
+| `msLoadMap(): Unable to access file` while the mapfile plainly exists on the host | The bind mount went stale. `docker compose exec mapserver ls -la /etc/mapserver/` — if empty, `docker compose up -d --force-recreate mapserver`. A plain `restart` reuses the broken mount and will not help |
+| Layer panel says "Kein &lt;Capability&gt;-Element gefunden" | MapServer returned an error page with HTTP 200. Open `/mapserver?SERVICE=WMS&REQUEST=GetCapabilities` directly and read it — the frontend now quotes the message, but the raw response is still fastest |
 | Layer listed but tiles are blank/broken | `GetMap` returns a MapServer error image. Curl it (above) and read the body; typically a bad `DATA` clause or a missing `PGPASSWORD` |
 | Edits to `src/` don't reload | HMR websocket. Check nginx passes `Upgrade`/`Connection` on `location /`, then set `VITE_USE_POLLING=1` in compose — inotify is unreliable on WSL bind mounts |
 | Style change doesn't appear on a cached layer | MapProxy is serving old tiles: `docker compose down mapproxy && docker volume rm webgis_mapproxy-cache && docker compose up -d mapproxy` |
