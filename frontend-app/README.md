@@ -1,7 +1,6 @@
 # WebGIS Frontend (React + TypeScript + Resium + Mantine)
 
-Replaces the hand-written `frontend/index.html`. Runs as its own container
-with hot module reload.
+Runs as its own container with hot module reload.
 
 ## Start
 
@@ -11,24 +10,25 @@ docker compose up -d --build frontend
 docker compose logs -f frontend      # wait for "ready in ... ms"
 ```
 
-Then open **http://localhost:5173/**
+Then open **http://localhost:8080/**. Vite's own port is not published — the
+container only `expose`s 5173 on the internal network and the nginx gateway proxies
+to it, so `localhost:5173` will not answer.
 
 Edit anything under `frontend-app/src/` and the browser updates within a
 second. No copying files, no hard refresh.
 
-The old static page stays reachable at http://localhost:8080/ until you decide
-to retire it.
-
 ## How the pieces fit
+
+`CLAUDE.md` in this directory has the full module map. The short version:
 
 ```
 src/
   main.tsx        Mantine provider, dark theme, mounts App
-  App.tsx         loads capabilities, composes Scene + UI
+  App.tsx         composes Scene + LayerPanel
   Scene.tsx       the Cesium globe (Resium components)
-  LayerPanel.tsx  layer tree, opacity, drag-to-reorder, 3D toggles
-  StatusHud.tsx   camera readout
-  wms.ts          capabilities parsing + zustand store
+  LayerPanel.tsx  layer tree, opacity, drag-to-reorder, terrain/3D toggles
+  wms.ts          capabilities parsing, endpoint URLs, the zustand store
+  legend.ts       legend types and SLD generation
 ```
 
 **Draw order is state, not imperative calls.** The store holds `layers[]`

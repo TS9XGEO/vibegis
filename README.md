@@ -1,32 +1,38 @@
 # WebGIS Docker Stack
 
-PostGIS · MapServer · QGIS Server · Dagster · CesiumJS
+PostGIS · MapServer · QGIS Server · MapProxy · pg_featureserv · Dagster · React + CesiumJS
 
 ```
-Browser ──► nginx :8080 ──┬──► /            Cesium frontend
+Browser ──► nginx :8080 ──┬──► /            React frontend (Vite, Resium, Mantine)
                           ├──► /mapserver   MapServer (WMS/WMTS/OGC API)
+                          ├──► /tiles/      MapProxy (disk-cached tiles)
+                          ├──► /features    pg_featureserv (OGC API Features)
                           ├──► /qgis        QGIS Server (headless WMS/WFS)
-                          └──► /terrain     baked quantized-mesh tiles
+                          ├──► /terrain/    baked quantized-mesh tiles
+                          ├──► /3dtiles/    pg2b3dm output
+                          └──► /upload …    upload-api (publish a layer)
                                    │
-Dagster :3000 ──► ETL assets ──► PostGIS :5432 ◄── MapServer / QGIS Server
+Dagster :3000 ──► ETL assets ──► PostGIS :5432 ◄── MapServer / QGIS Server / featureserv
 ```
 
 ---
 
 ## 1. First run
 
-```powershell
+```bash
 cd webgis
-copy .env.example .env      # then edit the passwords
-docker compose pull         # verify image tags resolve (see note below)
-docker compose build        # builds the Dagster/GDAL image
+cp .env.example .env         # then edit the passwords
+docker compose pull          # verify image tags resolve (see note below)
+docker compose build         # builds the Dagster/GDAL, upload-api, mapproxy and frontend images
 docker compose up -d
 ```
 
 | What | Where |
 |---|---|
-| Cesium frontend | http://localhost:8080/ |
+| The app | http://localhost:8080/ |
 | MapServer capabilities | http://localhost:8080/mapserver?SERVICE=WMS&REQUEST=GetCapabilities |
+| MapProxy demo | http://localhost:8080/tiles/demo/ |
+| OGC API Features | http://localhost:8080/features/collections |
 | QGIS Server | http://localhost:8080/qgis?MAP=/io/data/demo.qgs&SERVICE=WMS&REQUEST=GetCapabilities |
 | Dagster UI | http://localhost:3000/ |
 | PostGIS | `localhost:5432` (db `gis`) |
@@ -37,26 +43,50 @@ docker compose up -d
 > tag, check Docker Hub and update the corresponding `*_IMAGE` line in `.env`.
 > Nothing else needs to change.
 
-## 2. Terrain
+> **The database password never appears in a mapfile.** `CONNECTION` omits
+> `password=` on purpose; libpq reads it from `PGPASSWORD`, which compose sets on the
+> container from `.env`. The mapfiles are in git — don't paste one back in.
+
+## 2. Loading data
+
+Three ways in, in increasing order of effort:
+
+**From the browser.** Drag a shapefile, GeoPackage, GeoJSON, KML or GML onto the
+upload panel. `upload-api` loads it into schema `raw`, appends a `LAYER` block to
+`mapserver/mapfiles/uploads.map`, and it appears in the layer list on reload — no
+restart, because MapServer re-reads its mapfile on every request. The same panel can
+publish a table that is already in the database.
+
+**Via the ETL.** Drop vector files into `mapserver/data/` and materialize the
+`raw_vectors` asset in the Dagster UI. It loads everything into schema `raw`,
+reprojects to EPSG:4326 and builds GIST indexes.
+
+**By hand.** Add a `LAYER` block to `mapserver/mapfiles/webgis.map` (or
+`osm-layers.map`) pointing at the table. See `mapserver/CLAUDE.md` for the
+conventions and `docs/classification.md` for where a classification rule belongs.
+
+To serve a layer from the tile cache instead of rendering it live, add it to
+`mapproxy/mapproxy.yaml` **and** to `CACHED_LAYERS` in `frontend-app/src/wms.ts`.
+
+## 3. Terrain and 3D buildings
 
 MapServer cannot generate quantized-mesh, so terrain is baked once:
 
-```powershell
+```bash
 # put a GeoTIFF DEM at terrain/dem/dem.tif, then
 docker compose --profile terrain run --rm ctb
 ```
 
-Details and DEM sources: `terrain/README.md`.
+3D buildings come from **pg2b3dm**, which generates 3D Tiles from PostGIS polygons
+with a height attribute (table `gis.buildings3d`):
 
-## 3. Loading data
+```bash
+docker compose --profile tiles3d run --rm pg2b3dm
+```
 
-Drop vector files (`.gpkg`, `.shp`, `.geojson`, …) into `mapserver/data/`,
-then in the Dagster UI materialize the `raw_vectors` asset. It loads
-everything into schema `raw`, reprojects to EPSG:4326, and builds GIST
-indexes.
-
-Publish a layer by adding a `LAYER` block to `mapserver/mapfiles/webgis.map`
-pointing at the table, then `docker compose restart mapserver`.
+Both are optional. Terrain and 3D tiles are toggles in the layer panel, and the
+frontend falls back gracefully when the tiles do not exist yet. Details and DEM
+sources: `terrain/README.md`.
 
 ## 4. Where things live
 
@@ -64,57 +94,54 @@ pointing at the table, then `docker compose restart mapserver`.
 webgis/
 ├─ docker-compose.yml
 ├─ .env                       ← passwords + image tags (not in git)
-├─ postgis/initdb/            ← runs once on first DB creation
+├─ CLAUDE.md                  ← operational notes (also read by Claude Code)
+├─ postgis/initdb/            ← runs once, on first DB creation only
 ├─ mapserver/
-│  ├─ mapfiles/webgis.map     ← layer definitions
+│  ├─ mapfiles/webgis.map     ← root mapfile; INCLUDEs the two below
+│  ├─ mapfiles/osm-layers.map ← hand-written OSM layers
+│  ├─ mapfiles/uploads.map    ← generated by upload-api
 │  └─ data/                   ← rasters + drop-zone for the ETL
+├─ mapproxy/mapproxy.yaml     ← which layers get cached, and how
 ├─ qgis-server/projects/      ← .qgs / .qgz files
+├─ upload-api/app.py          ← file → PostGIS table → published layer
 ├─ dagster/
 │  ├─ Dockerfile              ← GDAL base + Dagster + GeoPandas
 │  └─ defs/__init__.py        ← the ETL assets
 ├─ terrain/
-│  ├─ dem/                    ← your source DEM
-│  ├─ tiles/                  ← generated quantized-mesh
+│  ├─ dem/ tiles/             ← source DEM, generated quantized-mesh
 │  └─ build-terrain.sh
+├─ bin/build-3d.sh            ← helper around the 3D Tiles build
 ├─ nginx/nginx.conf           ← single-origin reverse proxy
-└─ frontend/index.html        ← Cesium client
+└─ frontend-app/              ← React client (see frontend-app/README.md)
 ```
 
-## 5. The 3D behaviour
+## 5. The frontend
 
-`frontend/index.html` switches level of detail by camera height:
-
-| Height | Mode |
-|---|---|
-| > 300 km | flat ellipsoid globe (cheap, fast rotation) |
-| 15–300 km | quantized-mesh terrain from `/terrain` |
-| < 15 km | terrain + 3D Tiles buildings (if present) |
-
-Thresholds are the `H_TERRAIN` / `H_3DTILES` constants near the top of the
-script. Both heavy providers load lazily and fall back gracefully if the
-tiles do not exist yet.
-
-3D buildings are optional and come from **pg2b3dm**, which generates 3D Tiles
-from PostGIS polygons with a height attribute. Output goes to
-`frontend/3dtiles/`.
+React + TypeScript + Resium + Mantine, running as its own container with hot module
+reload. Edit anything under `frontend-app/src/` and the browser updates within a
+second — no copying files, no hard refresh. The layer list is built from
+`GetCapabilities`, so a new mapfile layer shows up on reload without touching the
+frontend. See `frontend-app/README.md`.
 
 ## 6. Windows / WSL notes
 
-- Keep this folder **inside WSL** (`\\wsl$\Ubuntu\home\<you>\webgis`), not
-  under `C:\Users\`. Bind mounts across the boundary are slow enough to hurt
-  with PostGIS.
-- Give Docker enough RAM via `C:\Users\Thomas\.wslconfig` — see
-  `wslconfig-example.txt`. Apply with `wsl --shutdown`.
-- PostGIS and Dagster ports are bound to `127.0.0.1` only, so nothing is
-  exposed on your network. The gateway on 8080 is bound to all interfaces;
-  change it in `docker-compose.yml` if you want it local-only too.
+- Keep this folder **inside WSL** (`\\wsl$\Ubuntu\home\<you>\webgis`), not under
+  `C:\Users\`. Bind mounts across the boundary are slow enough to hurt with PostGIS.
+- Give Docker enough RAM via `C:\Users\<you>\.wslconfig` — see `wslconfig-example.txt`.
+  Apply with `wsl --shutdown`.
+- If edits stop triggering hot reload, set `VITE_USE_POLLING=1` on the `frontend`
+  service — inotify is unreliable over WSL bind mounts.
+- PostGIS and Dagster ports bind to `127.0.0.1` only, so nothing is exposed on your
+  network. The gateway on 8080 binds to all interfaces; change it in
+  `docker-compose.yml` if you want it local-only too.
 
 ## 7. Useful commands
 
-```powershell
+```bash
 docker compose logs -f mapserver      # follow one service
-docker compose restart mapserver      # after editing the mapfile
+docker compose restart mapserver      # rarely needed; the mapfile is re-read per request
 docker compose exec postgis psql -U gis -d gis
+docker compose exec frontend npm run typecheck
 docker compose down                   # stop, keep data
 docker compose down -v                # stop and DELETE the database volume
 ```
