@@ -308,8 +308,14 @@ export async function fetchCapabilities(signal?: AbortSignal): Promise<CapNode> 
     const root = doc.documentElement?.nodeName ?? '(leer)'
     throw new Error(`Kein <Capability>-Element gefunden. Wurzelelement: <${root}> — ${snippet(body)}`)
   }
+  // MapServer always wraps the real layers in a root container Layer, so a
+  // missing root — or one with no children — means the service simply publishes
+  // nothing at the moment. That is an empty tree, not a failure: throwing here
+  // would put an error where "no layers" belongs.
   const rootLayer = childrenNamed(cap, 'Layer')[0]
-  if (!rootLayer) throw new Error('Kein Wurzel-Layer gefunden')
+  if (!rootLayer || childrenNamed(rootLayer, 'Layer').length === 0) {
+    return { name: null, title: '', bbox: null, keywords: [], children: [] }
+  }
   return parseNode(rootLayer)
 }
 

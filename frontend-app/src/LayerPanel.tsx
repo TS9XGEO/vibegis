@@ -410,7 +410,11 @@ export default function LayerPanel() {
               )}
 
               {!loading && !error && filteredLayers.length === 0 && (
-                <Text size="xs" c="dimmed" ta="center" mt={4}>Keine Treffer</Text>
+                <Text size="xs" c="dimmed" ta="center" mt={4}>
+                  {layers.length === 0
+                    ? 'Keine Layer veröffentlicht'
+                    : 'Keine Treffer'}
+                </Text>
               )}
 
               {!loading && !error && filteredLayers.length > 0 && (
