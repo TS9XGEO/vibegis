@@ -65,6 +65,15 @@ Legend.tsx 94  ZoomBar.tsx 65  StatusHud.tsx 62
   collection with no second request and keeps working when upload-api is down. Filter
   and classification cannot — they need `/distinct-values`, `/column-stats` and
   `/layer-config`, which only upload-api serves.
+- **A user classification only exists in `layer_config.json`.** The mapfile still holds
+  the single default `CLASS` the layer was created with, so the classification reaches
+  the map only as an `SLD_BODY` on the GetMap request. `Scene.tsx` must therefore treat
+  a saved classification as a trigger for building the SLD, alongside colour overrides
+  and attribute filters — `departsFromMapfile`. Omitting it made a saved classification
+  do nothing on its own, then appear the moment a filter or recolor was added and
+  vanish again when it was removed, which reads as three unrelated bugs.
+  MapServer rejects `FILTER` together with `SLD_BODY`, so when an SLD is in play the
+  filter is spliced into every Rule by `filterFor()` instead of being sent separately.
 - **The layer list comes from GetCapabilities**, never a hardcoded list. Add a `LAYER`
   to the mapfile and it appears on reload. Per-layer extras live in module-level maps
   in `wms.ts`: `CACHED_LAYERS` (which layers go through MapProxy),

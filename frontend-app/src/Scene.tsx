@@ -73,14 +73,21 @@ function WmsLayer({ name, alpha, show }: { name: string; alpha: number; show: bo
   const hasOverrides = !!overrides && Object.keys(overrides).length > 0
   const conditionsXml = layerFilter ? buildConditionsXml(layerFilter.conditions, layerFilter.logic) : null
 
-  // MapServer rejects FILTER combined with SLD/SLD_BODY, so when the layer
-  // has a legend config (i.e. we know how to reproduce its default styling)
-  // and either recoloring or an attribute filter is active, everything goes
-  // through one SLD: filterFor() ANDs/ORs conditionsXml into every rule, so
-  // the filter still applies even when no class has actually been recolored.
-  // Only layers with no legend entry (uploads, etc.) fall back to the plain
-  // FILTER parameter.
-  const sldBody = legend && (hasOverrides || conditionsXml)
+  // MapServer rejects FILTER combined with SLD/SLD_BODY, so when the layer has
+  // a legend config (i.e. we know how to reproduce its default styling) and
+  // anything at all departs from the mapfile's own styling, everything goes
+  // through one SLD: filterFor() ANDs/ORs conditionsXml into every rule, so the
+  // filter still applies even when no class has actually been recolored.
+  // Only layers with no legend entry fall back to the plain FILTER parameter.
+  //
+  // `classification` has to be one of the triggers. A user-defined
+  // classification exists ONLY in layer_config.json — the mapfile still holds
+  // the single default CLASS the layer was created with — so an SLD_BODY is the
+  // only way it can reach the map. Leaving it out meant a saved classification
+  // did nothing on its own and then appeared out of nowhere the moment a filter
+  // or a recolor was added, and vanished again when that was removed.
+  const departsFromMapfile = !!classification || hasOverrides || !!conditionsXml
+  const sldBody = legend && departsFromMapfile
     ? buildSld(name, legend, overrides ?? {}, layerFilter?.conditions ?? null, layerFilter?.logic ?? 'and')
     : null
   const filterXml = !sldBody && conditionsXml && layerFilter
