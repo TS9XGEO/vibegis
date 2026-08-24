@@ -54,7 +54,17 @@ Legend.tsx 94  ZoomBar.tsx 65  StatusHud.tsx 62
   is unreachable. Gating it on `/layers` alone once made a working delete button
   vanish silently. When `/layers` *is* down, the panel says so
   (`layersServiceDown`) instead of quietly rendering fewer buttons — a control that
-  disappears without explanation is worse than one that errors when pressed.
+  disappears without explanation is worse than one that errors when pressed. That flag
+  also trips when `/layers` answers 200 with an *empty* list while capabilities show
+  layers in the uploads group: the mismatch proves a fault, and it is exactly how a
+  stale bind mount presents.
+- **A layer's source table arrives in capabilities.** upload-api writes
+  `"ows_keywordlist" "source:<schema>.<table>,geomtype:<kind>"` into every block it
+  generates, MapServer publishes it as `<KeywordList>`, and `flattenLeaves()` lifts it
+  into `LayerState.source` / `.geomType`. So the attribute table resolves its
+  collection with no second request and keeps working when upload-api is down. Filter
+  and classification cannot — they need `/distinct-values`, `/column-stats` and
+  `/layer-config`, which only upload-api serves.
 - **The layer list comes from GetCapabilities**, never a hardcoded list. Add a `LAYER`
   to the mapfile and it appears on reload. Per-layer extras live in module-level maps
   in `wms.ts`: `CACHED_LAYERS` (which layers go through MapProxy),

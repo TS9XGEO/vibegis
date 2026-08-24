@@ -20,6 +20,7 @@ LAYER
     "ows_group_title"   "Eigene Uploads"
     "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
     "gml_include_items" "all"
+    "ows_keywordlist"   "source:raw.upload_oberbayern,geomtype:point"
   END
   CLASS
     NAME "Oberbayer_Test_Filter"

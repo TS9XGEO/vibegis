@@ -176,6 +176,8 @@ export interface CapNode {
   name: string | null
   title: string
   bbox: Bbox | null
+  /** <KeywordList> contents. upload-api hides the layer's source table here. */
+  keywords: string[]
   children: CapNode[]
 }
 
@@ -188,6 +190,15 @@ export interface LayerState {
   group: string | null
   /** Group *name* — the stable identifier. See MANAGED_GROUP / isManaged. */
   groupName: string | null
+  /**
+   * `schema.table` backing this layer, published by upload-api as a keyword and
+   * read straight out of capabilities — so the attribute table keeps working
+   * when /layers is unavailable. Null for hand-authored layers, which are
+   * covered by FEATURE_COLLECTIONS instead.
+   */
+  source: string | null
+  /** Mapfile TYPE, lowercased, from the same keyword. resolveLegend needs it. */
+  geomType: string | null
   visible: boolean
   opacity: number
 }
@@ -216,11 +227,39 @@ function parseBbox(el: Element): Bbox | null {
   return Object.values(b).some(Number.isNaN) ? null : b
 }
 
+/** <KeywordList> contents, verbatim. Comma handling belongs to keywordValue. */
+function parseKeywords(el: Element): string[] {
+  const list = childrenNamed(el, 'KeywordList')[0]
+  if (!list) return []
+  return childrenNamed(list, 'Keyword')
+    .map((k) => k.textContent?.trim() ?? '')
+    .filter(Boolean)
+}
+
+/**
+ * Value of a `prefix:value` keyword, e.g. keywordValue(kw, 'source').
+ *
+ * MapServer is documented to split a comma-separated `ows_keywordlist` into one
+ * <Keyword> per entry, but this splits on commas again rather than trusting
+ * that: flattenLeaves is exported and takes any CapNode, so the parse must not
+ * depend on having come through parseKeywords.
+ */
+function keywordValue(keywords: string[], prefix: string): string | null {
+  for (const raw of keywords) {
+    for (const part of raw.split(',')) {
+      const k = part.trim()
+      if (k.startsWith(`${prefix}:`)) return k.slice(prefix.length + 1) || null
+    }
+  }
+  return null
+}
+
 function parseNode(el: Element): CapNode {
   return {
     name: textOf(el, 'Name'),
     title: textOf(el, 'Title') ?? textOf(el, 'Name') ?? '(ohne Titel)',
     bbox: parseBbox(el),
+    keywords: parseKeywords(el),
     children: childrenNamed(el, 'Layer').map(parseNode),
   }
 }
@@ -292,6 +331,8 @@ export function flattenLeaves(
       bbox: node.bbox,
       group,
       groupName,
+      source: keywordValue(node.keywords, 'source'),
+      geomType: keywordValue(node.keywords, 'geomtype'),
       visible: !DEFAULT_OFF.has(node.name),
       opacity: 1,
     }]
@@ -549,12 +590,30 @@ export const useApp = create<AppState>((set, get) => ({
       // MapServer convention: landcover, then roads, then buildings on top.
       // The store is top-first, so reverse it — otherwise land cover would
       // default to covering everything beneath it.
+      const layers = flattenLeaves(root).reverse()
+
+      // Everything capabilities could tell us on its own. /layers is layered on
+      // top where it has an answer, but is no longer required for the mapping:
+      // that is what keeps the attribute table alive when upload-api is down.
+      const capCollections: Record<string, string> = {}
+      const capGeometry: Record<string, string> = {}
+      for (const l of layers) {
+        if (l.source) capCollections[l.name] = l.source
+        if (l.geomType) capGeometry[l.name] = l.geomType
+      }
+
+      // A layer sitting in the uploads group is proof upload-api created it, so
+      // /layers reporting nothing is a fault even when the request succeeded —
+      // which is exactly how a stale bind mount presents: HTTP 200, empty list.
+      const managedInCapabilities = layers.some((l) => l.groupName === MANAGED_GROUP)
+      const layersServiceDown = !dynamicInfo.ok || (managedInCapabilities && dynamicInfo.managed.size === 0)
+
       set({
-        layers: flattenLeaves(root).reverse(),
-        dynamicCollections: dynamicInfo.collections,
-        dynamicGeometry: dynamicInfo.geometryTypes,
+        layers,
+        dynamicCollections: { ...capCollections, ...dynamicInfo.collections },
+        dynamicGeometry: { ...capGeometry, ...dynamicInfo.geometryTypes },
         managedLayers: dynamicInfo.managed,
-        layersServiceDown: !dynamicInfo.ok,
+        layersServiceDown,
         layerConfigs,
         loading: false,
       })

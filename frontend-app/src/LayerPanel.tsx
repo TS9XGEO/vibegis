@@ -378,14 +378,17 @@ export default function LayerPanel() {
                 </Alert>
               )}
 
-              {/* Said out loud rather than expressed as missing buttons: the
-                  three functions below all need the schema.table that only
-                  /layers can supply for a registered layer. */}
+              {/* Said out loud rather than expressed as missing buttons.
+                  Filter and classification go through upload-api's
+                  /distinct-values, /column-stats and /layer-config, so there is
+                  no substitute for it being up. The table and delete survive
+                  because both now work off GetCapabilities alone. */}
               {!loading && layersServiceDown && (
                 <Alert color="yellow" variant="light" p="xs">
                   <Text size="xs">
-                    Sachdaten-Dienst nicht erreichbar — Tabelle, Filter und Klassifizierung
-                    stehen derzeit nicht zur Verfügung. Löschen funktioniert weiterhin.
+                    Upload-Dienst nicht erreichbar — Filter und Klassifizierung stehen
+                    derzeit nicht zur Verfügung. Sachdatentabelle und Löschen
+                    funktionieren weiterhin.
                   </Text>
                 </Alert>
               )}

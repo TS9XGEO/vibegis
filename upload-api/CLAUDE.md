@@ -33,6 +33,10 @@ endpoint needs a matching `location` block in `nginx/nginx.conf`** or it 404s.
   Reuse it; do not hand-roll a second check.
 - **`mapfile_escape()` (line 112) for anything user-supplied that lands in a mapfile**
   string — titles especially.
+- **Every generated block carries `ows_keywordlist` with `source:<schema>.<table>`**
+  and `geomtype:`. MapServer republishes it as `<KeywordList>`, which is how the
+  frontend maps a WMS layer to its table without calling `/layers`. Keep it identical
+  for `/upload` and `/register-table`: the two must stay indistinguishable downstream.
 - **`build_layer_block()` (line 213) writes no `password=`.** libpq gets it from
   `PGPASSWORD` on the mapserver container. The mapfiles are in git — keep it that way.
 - `pg_env()` still returns the password because `engine()` needs it for the SQLAlchemy

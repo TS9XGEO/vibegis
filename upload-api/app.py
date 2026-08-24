@@ -233,6 +233,11 @@ def build_layer_block(name, title, ms_type, schema, table, geom_col, unique_col,
         '    "ows_group_title"   "Eigene Uploads"\n'
         '    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"\n'
         '    "gml_include_items" "all"\n'
+        # Published by MapServer as <KeywordList> on the layer, so the frontend
+        # learns which table backs this layer straight from GetCapabilities
+        # instead of having to ask /layers. Identical for uploads and
+        # registered tables — the two must stay indistinguishable downstream.
+        f'    "ows_keywordlist"   "source:{schema}.{table},geomtype:{ms_type.lower()}"\n'
         "  END\n"
         "  CLASS\n"
         f'    NAME "{mapfile_escape(title)}"\n'
