@@ -1,0 +1,283 @@
+{
+  "dbtable_raw_upload_oberbayern": {
+    "classification": {
+      "mode": "categorized",
+      "column": "fclass",
+      "classes": [
+        {
+          "value": "atm",
+          "label": "atm",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "bakery",
+          "label": "bakery",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "bank",
+          "label": "bank",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "beverages",
+          "label": "beverages",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "bookshop",
+          "label": "bookshop",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "butcher",
+          "label": "butcher",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "chemist",
+          "label": "chemist",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "clinic",
+          "label": "clinic",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "clothes",
+          "label": "clothes",
+          "color": "#3d9970"
+        },
+        {
+          "value": "college",
+          "label": "college",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "computer_shop",
+          "label": "computer_shop",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "convenience",
+          "label": "convenience",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "dentist",
+          "label": "dentist",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "department_store",
+          "label": "department_store",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "doctors",
+          "label": "doctors",
+          "color": "#3d9970"
+        },
+        {
+          "value": "doityourself",
+          "label": "doityourself",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "florist",
+          "label": "florist",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "furniture_shop",
+          "label": "furniture_shop",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "garden_centre",
+          "label": "garden_centre",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "general",
+          "label": "general",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "gift_shop",
+          "label": "gift_shop",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "greengrocer",
+          "label": "greengrocer",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "hairdresser",
+          "label": "hairdresser",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "kindergarten",
+          "label": "kindergarten",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "kiosk",
+          "label": "kiosk",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "laundry",
+          "label": "laundry",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "library",
+          "label": "library",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "mall",
+          "label": "mall",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "marketplace",
+          "label": "marketplace",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "mobile_phone_shop",
+          "label": "mobile_phone_shop",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "newsagent",
+          "label": "newsagent",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "optician",
+          "label": "optician",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "outdoor_shop",
+          "label": "outdoor_shop",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "pharmacy",
+          "label": "pharmacy",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "post_box",
+          "label": "post_box",
+          "color": "#3d9970"
+        },
+        {
+          "value": "post_office",
+          "label": "post_office",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "school",
+          "label": "school",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "shoe_shop",
+          "label": "shoe_shop",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "sports_shop",
+          "label": "sports_shop",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "stationery",
+          "label": "stationery",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "supermarket",
+          "label": "supermarket",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "toy_shop",
+          "label": "toy_shop",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "travel_agent",
+          "label": "travel_agent",
+          "color": "#3d9970"
+        },
+        {
+          "value": "university",
+          "label": "university",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "veterinary",
+          "label": "veterinary",
+          "color": "#d65f8a"
+        }
+      ]
+    }
+  },
+  "osm_buildings": {
+    "classification": {
+      "mode": "categorized",
+      "column": "kind",
+      "classes": [
+        {
+          "value": "gewerbe",
+          "label": "gewerbe",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "grossbau",
+          "label": "grossbau",
+          "color": "#3d9970"
+        },
+        {
+          "value": "industrie",
+          "label": "industrie",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "landwirtschaft",
+          "label": "landwirtschaft",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "nebengebaeude",
+          "label": "nebengebaeude",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "oeffentlich",
+          "label": "oeffentlich",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "sakral",
+          "label": "sakral",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "wohnen",
+          "label": "wohnen",
+          "color": "#7a9e3d"
+        }
+      ]
+    }
+  }
+}

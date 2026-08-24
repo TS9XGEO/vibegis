@@ -1,0 +1,12 @@
+dagster
+dagster-webserver
+dagster-postgres
+geopandas
+shapely
+pyproj
+rasterio
+psycopg[binary]
+sqlalchemy
+geoalchemy2
+requests
+pandas

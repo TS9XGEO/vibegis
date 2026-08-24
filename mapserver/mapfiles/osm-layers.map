@@ -1,0 +1,306 @@
+# OpenStreetMap layers, classified.
+# Included from webgis.map via:   INCLUDE "osm-layers.map"
+#
+# Palette follows CORINE Land Cover conventions, darkened for a night basemap:
+#   vegetation   green        agriculture  olive / yellow-green
+#   urban fabric red          commercial   orange-red
+#   industry     violet       extraction   plum
+#   water        blue         bare ground  grey
+#
+# Every CLASS has a NAME, which is what makes it show up in GetLegendGraphic.
+#
+# CONNECTION carries no password: libpq takes it from PGPASSWORD, which compose
+# sets on the mapserver container from .env. Do not paste one back in — this
+# file is in git.
+
+# ================================================================ landcover
+LAYER
+  NAME        "osm_landcover"
+  GROUP       "osm"
+  TYPE        POLYGON
+  STATUS      ON
+  MAXSCALEDENOM 3000000
+  CONNECTIONTYPE POSTGIS
+  CONNECTION  "host=postgis dbname=gis user=gis port=5432"
+  DATA        "geom FROM gis.landcover USING UNIQUE gid USING SRID=4326"
+  PROCESSING  "CLOSE_CONNECTION=DEFER"
+  CLASSITEM   "kind"
+  PROJECTION
+    "init=epsg:4326"
+  END
+  METADATA
+    "ows_title"         "Landbedeckung (OSM)"
+    "ows_group_title"   "OpenStreetMap"
+    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
+    "gml_include_items" "all"
+  END
+
+  # ---- water ------------------------------------------------------------
+  CLASS
+    NAME "Wasser"
+    EXPRESSION "water"
+    STYLE  COLOR 52 96 148   OUTLINECOLOR 76 126 180  WIDTH 0.4  END
+  END
+  CLASS
+    NAME "Feuchtgebiet"
+    EXPRESSION "wetland"
+    STYLE  COLOR 58 116 116  END
+  END
+
+  # ---- vegetation -------------------------------------------------------
+  CLASS
+    NAME "Wald"
+    EXPRESSION "forest"
+    STYLE  COLOR 38 82 48    END
+  END
+  CLASS
+    NAME "Gebuesch / Heide"
+    EXPRESSION "scrub"
+    STYLE  COLOR 62 100 58   END
+  END
+  CLASS
+    NAME "Gruenland"
+    EXPRESSION "grassland"
+    STYLE  COLOR 78 116 62   END
+  END
+  CLASS
+    NAME "Park / Schutzgebiet"
+    EXPRESSION "park"
+    STYLE  COLOR 50 104 60   END
+  END
+
+  # ---- agriculture ------------------------------------------------------
+  CLASS
+    NAME "Ackerland"
+    EXPRESSION "farmland"
+    STYLE  COLOR 108 116 58  END
+  END
+  CLASS
+    NAME "Dauerkultur (Wein / Obst)"
+    EXPRESSION "permanent_crop"
+    STYLE  COLOR 128 132 54  END
+  END
+  CLASS
+    NAME "Kleingaerten"
+    EXPRESSION "allotments"
+    STYLE  COLOR 92 124 68   END
+  END
+
+  # ---- managed green ----------------------------------------------------
+  CLASS
+    NAME "Sportflaeche"
+    EXPRESSION "sport"
+    STYLE  COLOR 66 118 88   END
+  END
+  CLASS
+    NAME "Friedhof"
+    EXPRESSION "cemetery"
+    STYLE  COLOR 70 100 78   END
+  END
+
+  # ---- artificial surfaces ---------------------------------------------
+  CLASS
+    NAME "Siedlungsflaeche"
+    EXPRESSION "urban_fabric"
+    STYLE  COLOR 150 74 68   OUTLINECOLOR 172 96 88  WIDTH 0.3  END
+  END
+  CLASS
+    NAME "Handel / Dienstleistung"
+    EXPRESSION "commercial"
+    STYLE  COLOR 172 96 58   END
+  END
+  CLASS
+    NAME "Industrie"
+    EXPRESSION "industrial"
+    STYLE  COLOR 118 74 148  END
+  END
+  CLASS
+    NAME "Abbau / Deponie"
+    EXPRESSION "extraction"
+    STYLE  COLOR 132 92 140  END
+  END
+  CLASS
+    NAME "Baustelle"
+    EXPRESSION "construction"
+    STYLE  COLOR 140 118 78  END
+  END
+  CLASS
+    NAME "Militaer"
+    EXPRESSION "military"
+    STYLE  COLOR 122 84 84   END
+  END
+  CLASS
+    NAME "Verkehrsflaeche"
+    EXPRESSION "transport"
+    STYLE  COLOR 96 92 104   END
+  END
+
+  # ---- bare ground ------------------------------------------------------
+  CLASS
+    NAME "Gletscher"
+    EXPRESSION "glacier"
+    STYLE  COLOR 186 202 216 END
+  END
+  CLASS
+    NAME "Fels / Geroell"
+    EXPRESSION "bare"
+    STYLE  COLOR 118 120 126 END
+  END
+END
+
+# ==================================================================== roads
+LAYER
+  NAME        "osm_roads"
+  GROUP       "osm"
+  TYPE        LINE
+  STATUS      ON
+  MAXSCALEDENOM 2000000
+  CONNECTIONTYPE POSTGIS
+  CONNECTION  "host=postgis dbname=gis user=gis port=5432"
+  DATA        "geom FROM gis.roads USING UNIQUE gid USING SRID=4326"
+  PROCESSING  "CLOSE_CONNECTION=DEFER"
+  CLASSITEM   "cls"
+  LABELITEM   "name"
+  PROJECTION
+    "init=epsg:4326"
+  END
+  METADATA
+    "ows_title"         "Strassen (OSM)"
+    "ows_group_title"   "OpenStreetMap"
+    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
+    "gml_include_items" "all"
+  END
+
+  # Two STYLE blocks per class = casing underneath, fill on top.
+  CLASS
+    NAME "Autobahn"
+    EXPRESSION "1"
+    STYLE  COLOR 168 82 40    WIDTH 4.6  LINECAP ROUND  END
+    STYLE  COLOR 240 150 72   WIDTH 2.8  LINECAP ROUND  END
+  END
+  CLASS
+    NAME "Schnellstrasse"
+    EXPRESSION "2"
+    STYLE  COLOR 150 74 44    WIDTH 3.8  LINECAP ROUND  END
+    STYLE  COLOR 224 132 70   WIDTH 2.2  LINECAP ROUND  END
+  END
+  CLASS
+    NAME "Bundesstrasse"
+    EXPRESSION "3"
+    STYLE  COLOR 132 108 52   WIDTH 3.0  LINECAP ROUND  END
+    STYLE  COLOR 208 178 92   WIDTH 1.8  LINECAP ROUND  END
+  END
+  CLASS
+    NAME "Landstrasse"
+    EXPRESSION "4"
+    MAXSCALEDENOM 400000
+    STYLE  COLOR 96 96 88     WIDTH 2.4  LINECAP ROUND  END
+    STYLE  COLOR 186 184 168  WIDTH 1.4  LINECAP ROUND  END
+  END
+  CLASS
+    NAME "Kreisstrasse"
+    EXPRESSION "5"
+    MAXSCALEDENOM 200000
+    STYLE  COLOR 88 88 84     WIDTH 1.9  LINECAP ROUND  END
+    STYLE  COLOR 164 162 152  WIDTH 1.1  LINECAP ROUND  END
+  END
+  CLASS
+    NAME "Wohnstrasse"
+    EXPRESSION "6"
+    MAXSCALEDENOM 60000
+    STYLE  COLOR 78 78 76     WIDTH 1.6  LINECAP ROUND  END
+    STYLE  COLOR 142 142 138  WIDTH 0.9  LINECAP ROUND  END
+  END
+  CLASS
+    NAME "Wirtschaftsweg"
+    EXPRESSION "7"
+    MAXSCALEDENOM 25000
+    STYLE  COLOR 112 110 104  WIDTH 0.7  PATTERN 6 3 END  LINECAP BUTT  END
+  END
+
+  CLASS
+    NAME "Strassennamen"
+    EXPRESSION ( [cls] <= 6 )
+    MAXSCALEDENOM 30000
+    LABEL
+      FONT           "sans"
+      TYPE           TRUETYPE
+      SIZE           8
+      COLOR          228 232 238
+      OUTLINECOLOR   16 20 26
+      OUTLINEWIDTH   2
+      ANGLE          FOLLOW
+      POSITION       CC
+      PARTIALS       FALSE
+      MINDISTANCE    250
+      MINFEATURESIZE 60
+    END
+  END
+END
+
+# ================================================================ buildings
+LAYER
+  NAME        "osm_buildings"
+  GROUP       "osm"
+  TYPE        POLYGON
+  STATUS      ON
+  MAXSCALEDENOM 50000
+  CONNECTIONTYPE POSTGIS
+  CONNECTION  "host=postgis dbname=gis user=gis port=5432"
+  DATA        "geom FROM gis.buildings USING UNIQUE gid USING SRID=4326"
+  PROCESSING  "CLOSE_CONNECTION=DEFER"
+  CLASSITEM   "kind"
+  PROJECTION
+    "init=epsg:4326"
+  END
+  METADATA
+    "ows_title"         "Gebaeude (OSM)"
+    "ows_group_title"   "OpenStreetMap"
+    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
+    "gml_include_items" "all"
+  END
+
+  CLASS
+    NAME "Sakralbau"
+    EXPRESSION "sakral"
+    STYLE  COLOR 146 116 176  OUTLINECOLOR 186 158 212  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "Industrie"
+    EXPRESSION "industrie"
+    STYLE  COLOR 120 82 148   OUTLINECOLOR 152 112 180  WIDTH 0.4  END
+  END
+  CLASS
+    NAME "Gewerbe"
+    EXPRESSION "gewerbe"
+    STYLE  COLOR 176 104 62   OUTLINECOLOR 206 138 92   WIDTH 0.4  END
+  END
+  CLASS
+    NAME "Oeffentlich"
+    EXPRESSION "oeffentlich"
+    STYLE  COLOR 74 118 168   OUTLINECOLOR 110 152 200  WIDTH 0.4  END
+  END
+  CLASS
+    NAME "Landwirtschaft"
+    EXPRESSION "landwirtschaft"
+    STYLE  COLOR 128 122 74   OUTLINECOLOR 158 152 104  WIDTH 0.4  END
+  END
+  CLASS
+    NAME "Grossbau"
+    EXPRESSION "grossbau"
+    STYLE  COLOR 150 96 92    OUTLINECOLOR 184 128 122  WIDTH 0.4  END
+  END
+  CLASS
+    NAME "Nebengebaeude"
+    EXPRESSION "nebengebaeude"
+    MAXSCALEDENOM 15000
+    STYLE  COLOR 104 100 104  END
+  END
+  CLASS
+    NAME "Wohngebaeude"
+    EXPRESSION "wohnen"
+    STYLE  COLOR 138 96 92    OUTLINECOLOR 170 126 120  WIDTH 0.35 END
+  END
+END
+
+# =================================================================== legend

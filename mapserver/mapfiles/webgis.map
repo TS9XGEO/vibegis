@@ -1,0 +1,178 @@
+MAP
+  NAME          "webgis"
+  STATUS        ON
+  EXTENT        -180 -90 180 90
+  UNITS         DD
+  SIZE          256 256
+  IMAGETYPE     png
+  SHAPEPATH     "/data"
+  FONTSET       "/etc/mapserver/fonts.list"
+
+  PROJECTION
+    "init=epsg:4326"
+  END
+
+  OUTPUTFORMAT
+    NAME "png"
+    DRIVER AGG/PNG
+    MIMETYPE "image/png"
+    IMAGEMODE RGBA
+    EXTENSION "png"
+    TRANSPARENT ON
+  END
+
+  OUTPUTFORMAT
+    NAME "jpeg"
+    DRIVER AGG/JPEG
+    MIMETYPE "image/jpeg"
+    IMAGEMODE RGB
+    EXTENSION "jpg"
+    FORMATOPTION "QUALITY=85"
+  END
+
+  WEB
+    METADATA
+      "ows_title"                "WebGIS MapServer"
+      "ows_abstract"             "Imagery and vector services for the Cesium client"
+      "ows_onlineresource"       "http://localhost:8080/mapserver?"
+      "ows_srs"                  "EPSG:4326 EPSG:3857 CRS:84"
+      "ows_enable_request"       "*"
+      "wms_feature_info_mime_type" "application/json"
+      "ows_encoding"             "UTF-8"
+    END
+  END
+
+  # --------------------------------------------------------------- vector
+  LAYER
+    NAME        "poi"
+    TYPE        POINT
+    STATUS      ON
+    CONNECTIONTYPE POSTGIS
+    # NOTE: MapServer does not expand env vars here. Keep this string in
+    # sync with POSTGRES_* in .env (or template the mapfile at deploy time).
+    CONNECTION  "host=postgis dbname=gis user=gis port=5432"
+    DATA        "geom FROM gis.poi USING UNIQUE id USING SRID=4326"
+    PROJECTION
+      "init=epsg:4326"
+    END
+    METADATA
+      "ows_title"      "Points of interest"
+      "ows_srs"        "EPSG:4326 EPSG:3857 CRS:84"
+      "gml_include_items" "all"
+    END
+    CLASS
+      NAME "POI"
+      STYLE
+        SYMBOL   "circle"
+        SIZE     10
+        COLOR    220 60 40
+        OUTLINECOLOR 255 255 255
+        WIDTH    2
+      END
+    END
+  END
+
+  # ------------------------------------------------------------ terrain-rgb
+  # Optional: only needed if you ever want client-side meshing as a fallback.
+  # The baked quantized-mesh tiles are served by nginx at /terrain instead.
+  LAYER
+    NAME      "dem"
+    TYPE      RASTER
+    STATUS    OFF
+    DATA      "dem/dem.tif"
+    PROJECTION
+      "init=epsg:4326"
+    END
+    METADATA
+      "ows_title" "Digital elevation model"
+      "ows_srs"   "EPSG:4326 EPSG:3857 CRS:84"
+    END
+  END
+
+  # ------------------------------------------------- admin boundaries (ADM2)
+  # Two layers in one WMS GROUP: a simplified overview when zoomed out,
+  # the full-resolution table when zoomed in. Clients request "admin".
+
+  LAYER
+    NAME        "adm2_overview"
+    GROUP       "admin"
+    TYPE        POLYGON
+    STATUS      ON
+    MINSCALEDENOM 4000000
+    CONNECTIONTYPE POSTGIS
+    CONNECTION  "host=postgis dbname=gis user=gis port=5432"
+    DATA        "geom FROM gis.adm2_simple USING UNIQUE gid USING SRID=4326"
+    PROCESSING  "CLOSE_CONNECTION=DEFER"
+    PROJECTION
+      "init=epsg:4326"
+    END
+    METADATA
+      "ows_title"       "Admin level 2 (overview)"
+      "ows_group_title" "Administrative boundaries"
+      "ows_srs"         "EPSG:4326 EPSG:3857 CRS:84"
+      "gml_include_items" "all"
+    END
+    CLASS
+      NAME "ADM2"
+      STYLE
+        COLOR        70 105 145
+        OPACITY      25
+        OUTLINECOLOR 150 190 235
+        WIDTH        0.5
+      END
+    END
+  END
+
+  LAYER
+    NAME        "adm2_detail"
+    GROUP       "admin"
+    TYPE        POLYGON
+    STATUS      ON
+    MAXSCALEDENOM 4000000
+    CONNECTIONTYPE POSTGIS
+    CONNECTION  "host=postgis dbname=gis user=gis port=5432"
+    DATA        "geom FROM raw.adm2 USING UNIQUE gid USING SRID=4326"
+    PROCESSING  "CLOSE_CONNECTION=DEFER"
+    LABELITEM   "shapename"
+    PROJECTION
+      "init=epsg:4326"
+    END
+    METADATA
+      "ows_title"       "Admin level 2 (detail)"
+      "ows_group_title" "Administrative boundaries"
+      "ows_srs"         "EPSG:4326 EPSG:3857 CRS:84"
+      "gml_include_items" "all"
+    END
+    CLASS
+      NAME "ADM2"
+      STYLE
+        COLOR        70 105 145
+        OPACITY      25
+        OUTLINECOLOR 170 205 245
+        WIDTH        0.8
+      END
+      LABEL
+        FONT      "sans-bold"
+        TYPE      TRUETYPE
+        SIZE      9
+        COLOR     255 255 255
+        OUTLINECOLOR 20 25 35
+        OUTLINEWIDTH 2
+        POSITION  CC
+        PARTIALS  FALSE
+        MINDISTANCE 120
+        MINFEATURESIZE 40
+        MAXSCALEDENOM 1500000
+      END
+    END
+  END
+
+  SYMBOL
+    NAME "circle"
+    TYPE ELLIPSE
+    FILLED TRUE
+    POINTS 1 1 END
+  END
+  INCLUDE "osm-layers.map"
+  INCLUDE "uploads.map"
+END

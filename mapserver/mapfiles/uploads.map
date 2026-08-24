@@ -1,0 +1,35 @@
+# Appended to by upload-api (see /webgis/upload-api/app.py) — every upload
+# or table registration adds one LAYER block here. Do not hand-edit while
+# the service is running; it locks the file, but a concurrent manual edit
+# could still race.
+
+LAYER
+  NAME        "dbtable_raw_upload_oberbayern"
+  GROUP       "uploads"
+  TYPE        POINT
+  STATUS      ON
+  CONNECTIONTYPE POSTGIS
+  CONNECTION  "host=postgis dbname=gis user=gis port=5432"
+  DATA        "geometry FROM raw.upload_oberbayern USING UNIQUE gid USING SRID=4326"
+  PROCESSING  "CLOSE_CONNECTION=DEFER"
+  PROJECTION
+    "init=epsg:4326"
+  END
+  METADATA
+    "ows_title"         "Oberbayer_Test_Filter"
+    "ows_group_title"   "Eigene Uploads"
+    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
+    "gml_include_items" "all"
+  END
+  CLASS
+    NAME "Oberbayer_Test_Filter"
+    STYLE
+      SYMBOL "circle"
+      SIZE 9
+      COLOR 255 196 40
+      OUTLINECOLOR 40 30 10
+      WIDTH 1.5
+    END
+  END
+END
+

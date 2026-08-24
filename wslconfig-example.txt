@@ -1,0 +1,15 @@
+# Save this as  C:\Users\Thomas\.wslconfig  then run:  wsl --shutdown
+# Adjust to roughly 60-70% of your physical RAM.
+
+[wsl2]
+memory=12GB
+processors=6
+swap=4GB
+localhostForwarding=true
+
+# Keeps the vhdx from ballooning after large imports
+sparseVhd=true
+
+[experimental]
+autoMemoryReclaim=gradual
+networkingMode=mirrored

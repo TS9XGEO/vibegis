@@ -1,0 +1,132 @@
+# MapProxy: caches MapServer's output so panning does not re-query PostGIS.
+#
+# MapServer renders every tile from scratch — with 1.7M buildings that is the
+# single biggest performance limit in the stack. MapProxy sits in front, keeps
+# rendered tiles on disk, and only asks MapServer for what it has not seen.
+#
+# NOTE: layers must be listed explicitly here. Adding a LAYER to webgis.map
+# makes it appear in the app automatically (that comes from GetCapabilities),
+# but it will NOT be cached until you add it below and restart mapproxy.
+
+services:
+  demo:                      # http://localhost:8080/tiles/demo/
+  wms:
+    # Cesium's WebMapServiceImageryProvider requests WMS 1.3.0 tiles in
+    # CRS:84 by default (matches its geographic tiling scheme) — must be
+    # advertised explicitly, EPSG:4326 alone does not cover it.
+    srs: ['EPSG:4326', 'EPSG:3857', 'CRS:84']
+    image_formats: ['image/png']
+    md:
+      title: WebGIS Cache
+      abstract: Cached MapServer layers
+
+layers:
+  - name: osm_landcover
+    title: Landbedeckung (OSM)
+    sources: [cache_landcover]
+  - name: osm_roads
+    title: Strassen (OSM)
+    sources: [cache_roads]
+  - name: osm_buildings
+    title: Gebaeude (OSM)
+    sources: [cache_buildings]
+  - name: adm2_overview
+    title: Admin level 2 (overview)
+    sources: [cache_adm2_overview]
+  - name: adm2_detail
+    title: Admin level 2 (detail)
+    sources: [cache_adm2_detail]
+  - name: poi
+    title: Points of interest
+    sources: [cache_poi]
+
+caches:
+  # cache_dir (not cache.directory) is required here: with directory, MapProxy
+  # writes exactly that path with nothing appended, which two grids can't share
+  # — it refuses to boot rather than mix their tiles. cache_dir is just the base;
+  # MapProxy still appends a per-grid subdirectory underneath it.
+  cache_landcover:
+    grids: [webmercator, geodetic]
+    sources: [src_landcover]
+    format: image/png
+    cache_dir: /mapproxy/cache_data/landcover
+    cache: {type: file}
+  cache_roads:
+    grids: [webmercator, geodetic]
+    sources: [src_roads]
+    format: image/png
+    cache_dir: /mapproxy/cache_data/roads
+    cache: {type: file}
+  cache_buildings:
+    grids: [webmercator, geodetic]
+    sources: [src_buildings]
+    format: image/png
+    cache_dir: /mapproxy/cache_data/buildings
+    cache: {type: file}
+  cache_adm2_overview:
+    grids: [webmercator, geodetic]
+    sources: [src_adm2_overview]
+    format: image/png
+    cache_dir: /mapproxy/cache_data/adm2_overview
+    cache: {type: file}
+  cache_adm2_detail:
+    grids: [webmercator, geodetic]
+    sources: [src_adm2_detail]
+    format: image/png
+    cache_dir: /mapproxy/cache_data/adm2_detail
+    cache: {type: file}
+  cache_poi:
+    grids: [webmercator, geodetic]
+    sources: [src_poi]
+    format: image/png
+    cache_dir: /mapproxy/cache_data/poi
+    cache: {type: file}
+
+sources:
+  src_landcover: &ms
+    type: wms
+    req:
+      url: http://mapserver/
+      layers: osm_landcover
+      transparent: true
+    supported_srs: ['EPSG:4326', 'EPSG:3857']
+    wms_opts: {version: '1.3.0'}
+  src_roads:
+    <<: *ms
+    req: {url: 'http://mapserver/', layers: osm_roads, transparent: true}
+  src_buildings:
+    <<: *ms
+    req: {url: 'http://mapserver/', layers: osm_buildings, transparent: true}
+  src_adm2_overview:
+    <<: *ms
+    req: {url: 'http://mapserver/', layers: adm2_overview, transparent: true}
+  src_adm2_detail:
+    <<: *ms
+    req: {url: 'http://mapserver/', layers: adm2_detail, transparent: true}
+  src_poi:
+    <<: *ms
+    req: {url: 'http://mapserver/', layers: poi, transparent: true}
+
+grids:
+  webmercator:
+    base: GLOBAL_WEBMERCATOR
+  geodetic:
+    # Explicit CRS:84, not the GLOBAL_GEODETIC default of EPSG:4326: Cesium's
+    # WebMapServiceImageryProvider always requests WMS 1.3.0 tiles in CRS:84,
+    # and MapProxy's per-grid SRS routing (SRSConditional) matches on exact
+    # SRS identity, not axis-order-equivalent CRSes — EPSG:4326 here would
+    # never actually get hit and CRS:84 requests would KeyError.
+    base: GLOBAL_GEODETIC
+    srs: 'CRS:84'
+    bbox: [-180, -90, 180, 90]
+
+globals:
+  cache:
+    base_dir: /mapproxy/cache_data
+    lock_dir: /mapproxy/cache_data/locks
+    tile_lock_dir: /mapproxy/cache_data/tile_locks
+  image:
+    resampling_method: bilinear
+    paletted: false
+  http:
+    client_timeout: 120

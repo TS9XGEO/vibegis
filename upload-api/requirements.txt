@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+geopandas
+shapely
+pyproj
+psycopg[binary]
+sqlalchemy
+geoalchemy2

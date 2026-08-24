@@ -1,0 +1,276 @@
+# WebGIS stack: PostGIS + MapServer + QGIS Server + Dagster + Cesium
+# Start:  docker compose up -d
+# Tools:  docker compose --profile tools up -d      (adds pgAdmin)
+# Terrain: docker compose --profile terrain run --rm ctb   (one-shot build)
+
+name: webgis
+
+x-postgres-env: &postgres-env
+  POSTGRES_DB: ${POSTGRES_DB}
+  POSTGRES_USER: ${POSTGRES_USER}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+services:
+
+  # ---------------------------------------------------------------- database
+  postgis:
+    image: ${POSTGIS_IMAGE}
+    container_name: webgis-postgis
+    restart: unless-stopped
+    environment:
+      <<: *postgres-env
+      # Tuning; raise shared_buffers if you give Docker more RAM
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - postgres
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - work_mem=64MB
+      - -c
+      - maintenance_work_mem=512MB
+      - -c
+      - max_parallel_workers_per_gather=4
+    volumes:
+      - postgis-data:/var/lib/postgresql/data
+      - ./postgis/initdb:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [webgis]
+
+  # --------------------------------------------------------------- mapserver
+  # Fast WMS/WMTS/OGC-API rendering. Serves imagery + Terrain-RGB to Cesium.
+  mapserver:
+    image: ${MAPSERVER_IMAGE}
+    container_name: webgis-mapserver
+    restart: unless-stopped
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      MS_MAPFILE: /etc/mapserver/webgis.map
+      MS_DEBUGLEVEL: "1"
+      MS_ERRORFILE: stderr
+      # consumed inside the mapfile via CONNECTION
+      PGHOST: postgis
+      PGDATABASE: ${POSTGRES_DB}
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      # Apache's default (8190) is far too small for a GetMap carrying a full
+      # SLD_BODY once a layer has a user-defined classification (see
+      # upload-api's /layer-config): one rule per distinct value, so a
+      # 140-value column alone already runs ~88KB, well past the 65536 this
+      # was previously set to for the (much smaller) hand-authored legends.
+      # /distinct-values caps a classification at 500 classes; sized with
+      # comfortable headroom above that worst case.
+      APACHE_LIMIT_REQUEST_LINE: "2097152"
+    volumes:
+      - ./mapserver/mapfiles:/etc/mapserver:ro
+      - ./mapserver/data:/data:ro
+    networks: [webgis]
+
+  # ------------------------------------------------------------- qgis server
+  # Headless. Publish by dropping .qgs/.qgz files into ./qgis-server/projects
+  # and requesting  ?MAP=/io/data/<project>.qgs&SERVICE=WMS&...
+  qgis-server:
+    image: ${QGISSERVER_IMAGE}
+    container_name: webgis-qgis-server
+    restart: unless-stopped
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      QGIS_SERVER_LOG_LEVEL: "1"
+      QGIS_SERVER_LOG_STDERR: "1"
+      QGIS_SERVER_PARALLEL_RENDERING: "true"
+      QGIS_SERVER_MAX_THREADS: "4"
+      QGIS_SERVER_CACHE_SIZE: "500000000"
+      QGIS_PROJECT_FILE: ""
+      PGHOST: postgis
+      PGDATABASE: ${POSTGRES_DB}
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./qgis-server/projects:/io/data:ro
+    networks: [webgis]
+
+  # ------------------------------------------------------------------ dagster
+  dagster:
+    build:
+      context: ./dagster
+      args:
+        GDAL_IMAGE: ${GDAL_IMAGE}
+    container_name: webgis-dagster
+    restart: unless-stopped
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      <<: *postgres-env
+      POSTGRES_HOST: postgis
+      DAGSTER_HOME: /opt/dagster/home
+    volumes:
+      - ./dagster:/opt/dagster/app
+      - dagster-home:/opt/dagster/home
+      - ./mapserver/data:/data/raster
+      - ./terrain/dem:/data/dem
+    ports:
+      - "127.0.0.1:${DAGSTER_PORT}:3000"
+    networks: [webgis]
+
+  # -------------------------------------------------------------- upload-api
+  # Turns an uploaded shapefile/GeoPackage/GeoJSON/KML/GML into a PostGIS
+  # table (schema "raw") plus a LAYER block appended to
+  # mapserver/mapfiles/uploads.map — MapServer re-parses its mapfile on every
+  # request, so the new layer shows up in GetCapabilities immediately.
+  upload-api:
+    build:
+      context: ./upload-api
+      args:
+        GDAL_IMAGE: ${GDAL_IMAGE}
+    container_name: webgis-upload-api
+    restart: unless-stopped
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      PGHOST: postgis
+      PGDATABASE: ${POSTGRES_DB}
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./mapserver/mapfiles:/mapfiles
+    expose:
+      - "8000"
+    networks: [webgis]
+
+  # ------------------------------------------------------------------ gateway
+  # Single origin for the browser -> no CORS problems in Cesium.
+  gateway:
+    image: ${NGINX_IMAGE}
+    container_name: webgis-gateway
+    restart: unless-stopped
+    depends_on: [mapserver, qgis-server, frontend, upload-api]
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./terrain/tiles:/usr/share/nginx/terrain:ro
+      - ./frontend-app/public/3dtiles:/usr/share/nginx/tiles3d:ro
+    ports:
+      - "${GATEWAY_PORT}:80"
+    networks: [webgis]
+
+  # ------------------------------------------------------ tile cache (WMS)
+  # Caches MapServer output on disk. Adding a layer to the mapfile does NOT
+  # cache it automatically — add it to mapproxy/mapproxy.yaml too.
+  mapproxy:
+    build:
+      context: ./mapproxy
+    container_name: webgis-mapproxy
+    restart: unless-stopped
+    depends_on: [mapserver]
+    volumes:
+      - ./mapproxy/mapproxy.yaml:/mapproxy/mapproxy.yaml:ro
+      - mapproxy-cache:/mapproxy/cache_data
+    expose:
+      - "8080"
+    networks: [webgis]
+
+  # ------------------------------------------------- OGC API Features (JSON)
+  # Publishes PostGIS tables and functions as GeoJSON. Used by the search box.
+  featureserv:
+    image: ${FEATURESERV_IMAGE}
+    container_name: webgis-featureserv
+    restart: unless-stopped
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgis:5432/${POSTGRES_DB}"
+      PGFS_SERVER_HTTPPORT: "9000"
+      PGFS_SERVER_BASEPATH: "/features"
+      PGFS_PAGING_LIMITMAX: "1000"
+    expose:
+      - "9000"
+    networks: [webgis]
+
+  # --------------------------------------------- 3D Tiles builder (one-shot)
+  # docker compose --profile tiles3d run --rm pg2b3dm
+  pg2b3dm:
+    image: ${PG2B3DM_IMAGE}
+    profiles: [tiles3d]
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./frontend-app/public/3dtiles:/app/output
+    command: >
+      -h postgis -p 5432 -U ${POSTGRES_USER} -d ${POSTGRES_DB}
+      -t gis.buildings3d -c geom3d
+      -a kind,name,height
+      -o /app/output
+    networks: [webgis]
+
+  # ----------------------------------------------- frontend (Vite dev server)
+  # React + TypeScript + Resium + Mantine, with hot module reload.
+  # Open http://localhost:5173/
+  frontend:
+    build:
+      context: ./frontend-app
+    container_name: webgis-frontend
+    restart: unless-stopped
+    environment:
+      # set to 1 if edits are not picked up (inotify can be flaky on bind mounts)
+      VITE_USE_POLLING: "0"
+      # port the browser reaches the app on, used for the HMR websocket
+      VITE_HMR_PORT: "${GATEWAY_PORT}"
+    volumes:
+      - ./frontend-app:/app
+      - frontend-node-modules:/app/node_modules
+    # not published: the gateway proxies to it on the internal network
+    expose:
+      - "5173"
+    networks: [webgis]
+
+  # ------------------------------------------- terrain builder (one-shot job)
+  ctb:
+    image: ${CTB_IMAGE}
+    profiles: [terrain]
+    volumes:
+      - ./terrain:/work
+    working_dir: /work
+    entrypoint: ["/bin/bash", "/work/build-terrain.sh"]
+    networks: [webgis]
+
+  # ------------------------------------------------------ pgadmin (optional)
+  pgadmin:
+    image: ${PGADMIN_IMAGE}
+    profiles: [tools]
+    restart: unless-stopped
+    depends_on: [postgis]
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    ports:
+      - "127.0.0.1:${PGADMIN_PORT}:80"
+    networks: [webgis]
+
+volumes:
+  postgis-data:
+  dagster-home:
+  pgadmin-data:
+  frontend-node-modules:
+  mapproxy-cache:
+
+networks:
+  webgis:
+    driver: bridge

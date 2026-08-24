@@ -1,0 +1,4 @@
+# Minimal local config. Dagster stores run history in its own SQLite by
+# default; point it at PostGIS later if you want durable run history.
+telemetry:
+  enabled: false
