@@ -167,30 +167,40 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
           {error && <Text size="xs" c="red">{error}</Text>}
           {!error && columns.length === 0 && <Text size="xs" c="dimmed">lade Spalten…</Text>}
 
-          {draft.map((c, i) => (
-            <div key={i}>
-              <ConditionRow
-                condition={c}
-                columns={columns}
-                schema={schema}
-                table={table}
-                onChange={(next) => setDraft((d) => d.map((x, j) => (j === i ? next : x)))}
-                onRemove={() => setDraft((d) => d.filter((_, j) => j !== i))}
+          {/* One control, because there is one `logic` for the whole filter.
+              It used to be rendered between every pair of conditions, which
+              implied a per-pair setting that does not exist: with three
+              conditions you got two controls bound to the same state, so
+              switching one silently switched the other. Hidden below two
+              conditions because there is then nothing to combine — and
+              buildConditionsXml correctly emits no And/Or wrapper for one. */}
+          {draft.length > 1 && (
+            <Group gap={8} align="center" justify="center" my={2} wrap="nowrap">
+              <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
+                Bedingungen verknüpfen:
+              </Text>
+              <SegmentedControl
+                size="xs"
+                value={logic}
+                onChange={(v) => setLogic(v as FilterLogic)}
+                data={[
+                  { label: 'UND', value: 'and' },
+                  { label: 'ODER', value: 'or' },
+                ]}
               />
-              {i < draft.length - 1 && (
-                <Group justify="center" my={2}>
-                  <SegmentedControl
-                    size="xs"
-                    value={logic}
-                    onChange={(v) => setLogic(v as FilterLogic)}
-                    data={[
-                      { label: 'UND', value: 'and' },
-                      { label: 'ODER', value: 'or' },
-                    ]}
-                  />
-                </Group>
-              )}
-            </div>
+            </Group>
+          )}
+
+          {draft.map((c, i) => (
+            <ConditionRow
+              key={i}
+              condition={c}
+              columns={columns}
+              schema={schema}
+              table={table}
+              onChange={(next) => setDraft((d) => d.map((x, j) => (j === i ? next : x)))}
+              onRemove={() => setDraft((d) => d.filter((_, j) => j !== i))}
+            />
           ))}
 
           <Button size="xs" variant="subtle" disabled={columns.length === 0} onClick={addCondition}>

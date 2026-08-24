@@ -3,3 +3,87 @@
 # the service is running; it locks the file, but a concurrent manual edit
 # could still race.
 
+LAYER
+  NAME        "dbtable_gis_roads"
+  GROUP       "uploads"
+  TYPE        LINE
+  STATUS      ON
+  CONNECTIONTYPE POSTGIS
+  CONNECTION  "host=postgis dbname=gis user=gis port=5432"
+  DATA        "geom FROM gis.roads USING UNIQUE gid USING SRID=4326"
+  PROCESSING  "CLOSE_CONNECTION=DEFER"
+  PROJECTION
+    "init=epsg:4326"
+  END
+  METADATA
+    "ows_title"         "roads"
+    "ows_group_title"   "Eigene Uploads"
+    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
+    "gml_include_items" "all"
+  END
+  CLASS
+    NAME "roads"
+    STYLE
+      COLOR 255 110 60
+      WIDTH 2.4
+      LINECAP ROUND
+    END
+  END
+END
+LAYER
+  NAME        "dbtable_raw_osm_buildings"
+  GROUP       "uploads"
+  TYPE        POLYGON
+  STATUS      ON
+  CONNECTIONTYPE POSTGIS
+  CONNECTION  "host=postgis dbname=gis user=gis port=5432"
+  DATA        "geom FROM raw.osm_buildings USING UNIQUE gid USING SRID=4326"
+  PROCESSING  "CLOSE_CONNECTION=DEFER"
+  PROJECTION
+    "init=epsg:4326"
+  END
+  METADATA
+    "ows_title"         "osm_buildings"
+    "ows_group_title"   "Eigene Uploads"
+    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
+    "gml_include_items" "all"
+  END
+  CLASS
+    NAME "osm_buildings"
+    STYLE
+      COLOR 90 170 230
+      OPACITY 55
+      OUTLINECOLOR 130 200 255
+      WIDTH 0.6
+    END
+  END
+END
+LAYER
+  NAME        "dbtable_raw_upload_oberbayern"
+  GROUP       "uploads"
+  TYPE        POINT
+  STATUS      ON
+  CONNECTIONTYPE POSTGIS
+  CONNECTION  "host=postgis dbname=gis user=gis port=5432"
+  DATA        "geometry FROM raw.upload_oberbayern USING UNIQUE gid USING SRID=4326"
+  PROCESSING  "CLOSE_CONNECTION=DEFER"
+  PROJECTION
+    "init=epsg:4326"
+  END
+  METADATA
+    "ows_title"         "upload_oberbayern"
+    "ows_group_title"   "Eigene Uploads"
+    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
+    "gml_include_items" "all"
+  END
+  CLASS
+    NAME "upload_oberbayern"
+    STYLE
+      SYMBOL "circle"
+      SIZE 9
+      COLOR 255 196 40
+      OUTLINECOLOR 40 30 10
+      WIDTH 1.5
+    END
+  END
+END
