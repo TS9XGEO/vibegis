@@ -170,20 +170,53 @@ function parseNode(el: Element): CapNode {
   }
 }
 
+/** First 300 characters of a response body, for error messages. */
+function snippet(body: string): string {
+  const flat = body.replace(/\s+/g, ' ').trim()
+  return flat.length > 300 ? `${flat.slice(0, 300)}…` : flat
+}
+
+/**
+ * MapServer reports most failures — a mapfile it cannot parse, a layer it
+ * cannot open — as a ServiceExceptionReport carrying HTTP 200, so the response
+ * looks entirely ordinary until you read it. Pull the message out so the layer
+ * panel shows the actual fault instead of the "no <Capability>" that merely
+ * follows from it.
+ *
+ * Only ServiceException and ExceptionText are matched: a *valid* capabilities
+ * document contains <Capability><Exception><Format>, so matching a bare
+ * <Exception> would report a healthy response as broken.
+ */
+function serviceException(doc: Document): string | null {
+  for (const tag of ['ServiceException', 'ExceptionText']) {
+    const text = doc.getElementsByTagNameNS('*', tag)[0]?.textContent?.trim()
+    if (text) return text
+  }
+  return null
+}
+
 export async function fetchCapabilities(signal?: AbortSignal): Promise<CapNode> {
   const url = `${WMS_URL}?service=WMS&version=1.3.0&request=GetCapabilities`
   const res = await fetch(url, { signal })
-  if (!res.ok) throw new Error(`GetCapabilities: HTTP ${res.status}`)
+  const body = await res.text()
+  if (!res.ok) throw new Error(`GetCapabilities: HTTP ${res.status} — ${snippet(body)}`)
 
-  const doc = new DOMParser().parseFromString(await res.text(), 'text/xml')
+  const doc = new DOMParser().parseFromString(body, 'text/xml')
   if (doc.getElementsByTagName('parsererror').length) {
-    throw new Error('Capabilities ist kein gültiges XML')
+    throw new Error(`Capabilities ist kein gültiges XML — ${snippet(body)}`)
   }
+
+  const fault = serviceException(doc)
+  if (fault) throw new Error(`MapServer meldet: ${fault}`)
+
   const cap = doc.getElementsByTagNameNS('*', 'Capability')[0]
-  if (!cap) throw new Error('Kein <Capability>-Element gefunden')
-  const root = childrenNamed(cap, 'Layer')[0]
-  if (!root) throw new Error('Kein Wurzel-Layer gefunden')
-  return parseNode(root)
+  if (!cap) {
+    const root = doc.documentElement?.nodeName ?? '(leer)'
+    throw new Error(`Kein <Capability>-Element gefunden. Wurzelelement: <${root}> — ${snippet(body)}`)
+  }
+  const rootLayer = childrenNamed(cap, 'Layer')[0]
+  if (!rootLayer) throw new Error('Kein Wurzel-Layer gefunden')
+  return parseNode(rootLayer)
 }
 
 /** Flatten to drawable leaves, remembering which group each came from. */
