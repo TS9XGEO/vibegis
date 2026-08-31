@@ -7,6 +7,7 @@ import os
 
 from dagster import (
     AssetExecutionContext,
+    DefaultScheduleStatus,
     Definitions,
     MaterializeResult,
     MetadataValue,
@@ -95,16 +96,54 @@ def published_layers(context: AssetExecutionContext) -> MaterializeResult:
     return MaterializeResult(metadata={"layers": MetadataValue.int(len(tables))})
 
 
+@asset(
+    group_name="testing",
+    deps=[published_layers],
+    description=(
+        "Test-only: adds an rndm_int column to every existing published layer "
+        "table and fills it with random integers. Depends on published_layers, "
+        "not raw_vectors directly, so it always runs after raw_vectors' "
+        "to_postgis(if_exists='replace') within the same job — replacing a "
+        "table drops any column a previous run added."
+    ),
+)
+def rndm_int_column(context: AssetExecutionContext) -> MaterializeResult:
+    engine = create_engine(pg_url())
+    with engine.begin() as conn:
+        # geometry_columns also lists materialized views (e.g. gis.search_index)
+        # — ALTER TABLE ADD COLUMN rejects those outright, so relkind = 'r'
+        # (ordinary table) narrows this to things that can actually take one.
+        tables = conn.execute(
+            text(
+                "SELECT gc.f_table_schema, gc.f_table_name "
+                "FROM geometry_columns gc "
+                "JOIN pg_namespace n ON n.nspname = gc.f_table_schema "
+                "JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = gc.f_table_name AND c.relkind = 'r' "
+                "WHERE gc.f_table_schema IN ('gis','raw')"
+            )
+        ).all()
+        for schema, table in tables:
+            conn.execute(
+                text(f'ALTER TABLE "{schema}"."{table}" ADD COLUMN IF NOT EXISTS rndm_int integer')
+            )
+            conn.execute(
+                text(f'UPDATE "{schema}"."{table}" SET rndm_int = (random() * 100)::int')
+            )
+            context.log.info(f"filled {schema}.{table}.rndm_int")
+
+    return MaterializeResult(metadata={"tables": MetadataValue.int(len(tables))})
+
+
 refresh_job = define_asset_job("refresh_all", selection="*")
 
 defs = Definitions(
-    assets=[postgis_ready, raw_vectors, published_layers],
+    assets=[postgis_ready, raw_vectors, published_layers, rndm_int_column],
     jobs=[refresh_job],
     schedules=[
         ScheduleDefinition(
             job=refresh_job,
             cron_schedule="0 3 * * *",   # nightly 03:00
-            default_status_is_running=False,
+            default_status=DefaultScheduleStatus.STOPPED,
         )
     ],
 )

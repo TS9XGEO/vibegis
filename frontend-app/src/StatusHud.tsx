@@ -1,8 +1,10 @@
 /** Camera readout, driven by Resium's useCesium hook rather than globals. */
 import { useEffect, useState } from 'react'
-import { Group, Paper, Text } from '@mantine/core'
+import { Group, Paper, Text, useComputedColorScheme } from '@mantine/core'
 import { Math as CesiumMath } from 'cesium'
 import { useCesium } from 'resium'
+
+import { panelBg } from './colorScheme'
 
 function Readout() {
   const { scene } = useCesium()
@@ -33,17 +35,18 @@ function Readout() {
     <>
       <Group justify="space-between" gap="lg">
         <Text size="xs" c="dimmed">Höhe</Text>
-        <Text size="xs" fw={600} c="blue.3">{state.alt}</Text>
+        <Text size="xs" fw={600} c="teal.4">{state.alt}</Text>
       </Group>
       <Group justify="space-between" gap="lg">
         <Text size="xs" c="dimmed">Lat / Lon</Text>
-        <Text size="xs" fw={600} c="blue.3">{state.lat} / {state.lon}</Text>
+        <Text size="xs" fw={600} c="teal.4">{state.lat} / {state.lon}</Text>
       </Group>
     </>
   )
 }
 
 export default function StatusHud() {
+  const scheme = useComputedColorScheme('dark')
   return (
     <Paper
       withBorder
@@ -52,7 +55,7 @@ export default function StatusHud() {
       py={8}
       style={{
         minWidth: 190,
-        backgroundColor: 'rgba(20,22,28,0.92)',
+        backgroundColor: panelBg(scheme),
         backdropFilter: 'blur(8px)',
       }}
     >

@@ -1,5 +1,5 @@
 MAP
-  NAME          "webgis"
+  NAME          "vibegis"
   STATUS        ON
   EXTENT        -180 -90 180 90
   UNITS         DD

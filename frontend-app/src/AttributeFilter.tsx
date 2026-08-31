@@ -10,15 +10,19 @@ import {
 } from '@mantine/core'
 import { IconFilter, IconX } from '@tabler/icons-react'
 
-import { fetchColumns, fetchDistinctValues, type Column } from './columns'
-import { NUMERIC_OPS, OP_LABELS, TEXT_OPS, type FilterCondition, type FilterLogic, type FilterOp } from './filter'
+import { columnLabel, fetchColumns, fetchDistinctValues, type Column } from './columns'
+import { fetchFeaturesWithFilter } from './features'
+import { FRESH_LAYER_WAIT_MESSAGE, isFreshLayerWait } from './freshLayerRetry'
+import { buildCql, NUMERIC_OPS, OP_LABELS, TEXT_OPS, type FilterCondition, type FilterLogic, type FilterOp } from './filter'
+import { useSelection } from './selection'
 import { useApp } from './wms'
 
 function ConditionRow({
-  condition, columns, schema, table, onChange, onRemove,
+  condition, columns, aliases, schema, table, onChange, onRemove,
 }: {
   condition: FilterCondition
   columns: Column[]
+  aliases: Record<string, string> | undefined
   schema: string
   table: string
   onChange: (c: FilterCondition) => void
@@ -53,7 +57,7 @@ function ConditionRow({
     <Group gap={4} wrap="nowrap" align="flex-end">
       <Select
         size="xs"
-        data={columns.map((c) => c.key)}
+        data={columns.map((c) => ({ value: c.key, label: columnLabel(aliases, c.key) }))}
         value={condition.column}
         onChange={(v) => onChange({ ...condition, column: v ?? '', value: '' })}
         style={{ flex: 2, minWidth: 0 }}
@@ -99,11 +103,14 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
   const active = useApp((s) => s.attributeFilters[layerName])
   const setAttributeFilter = useApp((s) => s.setAttributeFilter)
   const cachedColumns = useApp((s) => s.layerColumns[layerName])
+  const aliases = useApp((s) => s.layerConfigs[layerName]?.columnAliases)
   const [opened, setOpened] = useState(false)
   const [columns, setColumns] = useState<Column[]>([])
   const [error, setError] = useState<string | null>(null)
   const [draft, setDraft] = useState<FilterCondition[]>(active?.conditions ?? [])
   const [logic, setLogic] = useState<FilterLogic>(active?.logic ?? 'and')
+  const [selecting, setSelecting] = useState(false)
+  const replaceSelectionForLayers = useSelection((s) => s.replaceSelectionForLayers)
 
   useEffect(() => {
     if (!opened) return
@@ -118,12 +125,14 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
       setColumns(cachedColumns)
       return
     }
-    fetchColumns(collection)
-      .then(setColumns)
+    fetchColumns(collection, () => setError(FRESH_LAYER_WAIT_MESSAGE))
+      .then((cols) => { setColumns(cols); setError(null) })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
-  }, [opened, collection, cachedColumns]) // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opened, collection, cachedColumns])
 
   const hasActive = (active?.conditions ?? []).some((c) => c.column && c.value.trim() !== '')
+  const draftUsable = draft.some((c) => c.column && c.value.trim() !== '')
 
   // Two `=` conditions on one column can never both hold, so UND yields an empty
   // layer. Nothing about the map says why — it just goes blank — and the old
@@ -153,13 +162,38 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
     setAttributeFilter(layerName, { logic: 'and', conditions: [] })
   }
 
+  // Selects the matching features instead of restyling the map — leaves
+  // attributeFilters/the WMS rendering untouched entirely. The server does
+  // the filtering (CQL, see filter.ts's buildCql) rather than fetching the
+  // whole layer to test client-side, which doesn't scale on this app's
+  // larger tables (some run into the millions of rows).
+  async function selectMatches() {
+    const cql = buildCql(draft, logic)
+    if (!cql) return
+    setSelecting(true)
+    setError(null)
+    try {
+      const { features, truncated } = await fetchFeaturesWithFilter(collection, cql)
+      replaceSelectionForLayers([layerName], features.map((feature) => ({ layer: layerName, feature })))
+      if (truncated) {
+        setError(`Zu viele Treffer (>${features.length}) — Filter weiter eingrenzen, um alle auszuwählen.`)
+      } else {
+        setOpened(false)
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSelecting(false)
+    }
+  }
+
   return (
     <Popover opened={opened} onChange={setOpened} position="bottom-end" withArrow shadow="md">
       <Popover.Target>
         <Tooltip label="Filtern" withArrow>
           <ActionIcon
             variant="subtle"
-            color={hasActive ? 'blue' : 'gray'}
+            color={hasActive ? 'teal' : 'gray'}
             size="sm"
             aria-label="Layer filtern"
             onClick={() => setOpened((o) => !o)}
@@ -175,9 +209,14 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
           otherwise get clipped away invisibly right here. */}
       <Popover.Dropdown miw={340} style={{ overflow: 'visible' }}>
         <Stack gap={6}>
-          <Text size="xs" fw={600}>Filter</Text>
+          <Group justify="space-between" wrap="nowrap">
+            <Text size="xs" fw={600}>Filter</Text>
+            <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Schliessen" onClick={() => setOpened(false)}>
+              <IconX size={14} />
+            </ActionIcon>
+          </Group>
 
-          {error && <Text size="xs" c="red">{error}</Text>}
+          {error && <Text size="xs" c={isFreshLayerWait(error) ? 'yellow' : 'red'}>{error}</Text>}
           {!error && columns.length === 0 && <Text size="xs" c="dimmed">lade Spalten…</Text>}
 
           {/* One control, because there is one `logic` for the whole filter.
@@ -209,6 +248,7 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
               key={i}
               condition={c}
               columns={columns}
+              aliases={aliases}
               schema={schema}
               table={table}
               onChange={(next) => setDraft((d) => d.map((x, j) => (j === i ? next : x)))}
@@ -232,7 +272,10 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
 
           <Group justify="space-between" mt={4}>
             <Button size="xs" variant="default" onClick={clear}>Zurücksetzen</Button>
-            <Button size="xs" onClick={apply}>Anwenden</Button>
+            <Group gap={6}>
+              <Button size="xs" variant="light" loading={selecting} disabled={!draftUsable} onClick={selectMatches}>Auswählen</Button>
+              <Button size="xs" onClick={apply}>Anwenden</Button>
+            </Group>
           </Group>
         </Stack>
       </Popover.Dropdown>

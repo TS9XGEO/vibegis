@@ -5,7 +5,7 @@ into the container; `data/` is also the drop-zone Dagster's `raw_vectors` asset 
 
 ## Mapfile layout
 
-`mapfiles/webgis.map` is the root (`MS_MAPFILE`). It holds the `MAP` header —
+`mapfiles/vibegis.map` is the root (`MS_MAPFILE`). It holds the `MAP` header —
 projection, `OUTPUTFORMAT` png/jpeg, `SHAPEPATH /data`, `FONTSET`, `SYMBOL`s — a few
 hand-written layers (`poi`, `dem`, `adm2_overview`, `adm2_detail`), then at the bottom:
 
@@ -31,8 +31,13 @@ upload-api). Both show up as dirty diffs during normal use; that is expected.
   evaluated once instead of per tile request. See `docs/classification.md`.
 - **`PROCESSING "CLOSE_CONNECTION=DEFER"`** on every PostGIS layer — it keeps the
   connection open across layers in one request. Keep it on new layers.
-- Adding a layer here does **not** cache it. To serve it from disk, add it to
-  `mapproxy/mapproxy.yaml` and to `CACHED_LAYERS` in `frontend-app/src/wms.ts`.
+- A layer upload-api created (in `uploads.map`) is cached automatically —
+  `generate_mapproxy_config()` there gives every such layer its own cache in
+  `mapproxy/mapproxy.yaml`, which is machine-written now, same as `uploads.map` and
+  `layer_config.json` (don't hand-edit it while the stack is up; it's overwritten on
+  the next layer change). A layer added here by hand still needs manual wiring: add it
+  to `mapproxy/mapproxy.yaml` and to `HAND_AUTHORED_CACHED_LAYERS` in
+  `frontend-app/src/wms.ts`.
 
 ## Applying changes
 

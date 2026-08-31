@@ -145,12 +145,12 @@ CREATE TABLE gis.buildings3d (
 
 -- psql does NOT interpolate :variables inside dollar-quoted blocks, so the
 -- batch size is handed to the DO block through a session setting instead.
-SELECT set_config('webgis.batch_size', :'batch_size', false);
+SELECT set_config('vibegis.batch_size', :'batch_size', false);
 
 DO $do$
 DECLARE
     total    bigint;
-    batch    int := current_setting('webgis.batch_size')::int;
+    batch    int := current_setting('vibegis.batch_size')::int;
     done     bigint := 0;
     inserted bigint := 0;
     lo       bigint := 1;

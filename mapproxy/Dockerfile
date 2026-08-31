@@ -16,10 +16,15 @@ RUN pip install --upgrade pip && \
 WORKDIR /mapproxy
 RUN mkdir -p /mapproxy/cache_data
 
-# The config is bind-mounted; this file just wires MapProxy into WSGI.
+# The config lives at /mapproxy/config (a directory mount, not a single-file
+# one) so upload-api can regenerate mapproxy.yaml there too — it needs write
+# access to add a layer/cache/source for every layer it publishes, which a
+# single-file :ro bind mount from this service alone couldn't allow. This
+# file just wires MapProxy into WSGI; reloader=True re-reads on the config's
+# mtime, so a regenerated file takes effect without restarting this service.
 RUN printf '%s\n' \
     "from mapproxy.wsgiapp import make_wsgi_app" \
-    "application = make_wsgi_app('/mapproxy/mapproxy.yaml', reloader=True)" \
+    "application = make_wsgi_app('/mapproxy/config/mapproxy.yaml', reloader=True)" \
     > /mapproxy/wsgi.py
 
 EXPOSE 8080

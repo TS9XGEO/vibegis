@@ -7,197 +7,197 @@
         {
           "value": "atm",
           "label": "atm",
-          "color": "#a06cd5"
+          "color": "#e07a5f"
         },
         {
           "value": "bakery",
           "label": "bakery",
-          "color": "#d65f8a"
+          "color": "#3d9970"
         },
         {
           "value": "bank",
           "label": "bank",
-          "color": "#7a9e3d"
+          "color": "#5b8dd6"
         },
         {
           "value": "beverages",
           "label": "beverages",
-          "color": "#5b8dd6"
+          "color": "#e0b03d"
         },
         {
           "value": "bookshop",
           "label": "bookshop",
-          "color": "#d65f8a"
+          "color": "#a06cd5"
         },
         {
           "value": "butcher",
           "label": "butcher",
-          "color": "#7a9e3d"
+          "color": "#4fb0c6"
         },
         {
           "value": "chemist",
           "label": "chemist",
-          "color": "#c67d4f"
+          "color": "#d65f8a"
         },
         {
           "value": "clinic",
           "label": "clinic",
-          "color": "#e07a5f"
+          "color": "#7a9e3d"
         },
         {
           "value": "clothes",
           "label": "clothes",
-          "color": "#3d9970"
+          "color": "#c67d4f"
         },
         {
           "value": "college",
           "label": "college",
-          "color": "#5b8dd6"
+          "color": "#6a6ed6"
         },
         {
           "value": "computer_shop",
           "label": "computer_shop",
-          "color": "#4fb0c6"
+          "color": "#e07a5f"
         },
         {
           "value": "convenience",
           "label": "convenience",
-          "color": "#7a9e3d"
+          "color": "#3d9970"
         },
         {
           "value": "dentist",
           "label": "dentist",
-          "color": "#6a6ed6"
+          "color": "#5b8dd6"
         },
         {
           "value": "department_store",
           "label": "department_store",
-          "color": "#e07a5f"
+          "color": "#e0b03d"
         },
         {
           "value": "doctors",
           "label": "doctors",
-          "color": "#3d9970"
+          "color": "#a06cd5"
         },
         {
           "value": "doityourself",
           "label": "doityourself",
-          "color": "#e0b03d"
+          "color": "#4fb0c6"
         },
         {
           "value": "florist",
           "label": "florist",
-          "color": "#c67d4f"
+          "color": "#d65f8a"
         },
         {
           "value": "furniture_shop",
           "label": "furniture_shop",
-          "color": "#5b8dd6"
+          "color": "#7a9e3d"
         },
         {
           "value": "garden_centre",
           "label": "garden_centre",
-          "color": "#e0b03d"
+          "color": "#c67d4f"
         },
         {
           "value": "general",
           "label": "general",
-          "color": "#a06cd5"
+          "color": "#6a6ed6"
         },
         {
           "value": "gift_shop",
           "label": "gift_shop",
-          "color": "#4fb0c6"
+          "color": "#e07a5f"
         },
         {
           "value": "greengrocer",
           "label": "greengrocer",
-          "color": "#c67d4f"
+          "color": "#3d9970"
         },
         {
           "value": "hairdresser",
           "label": "hairdresser",
-          "color": "#e07a5f"
+          "color": "#5b8dd6"
         },
         {
           "value": "kindergarten",
           "label": "kindergarten",
-          "color": "#7a9e3d"
+          "color": "#e0b03d"
         },
         {
           "value": "kiosk",
           "label": "kiosk",
-          "color": "#c67d4f"
+          "color": "#a06cd5"
         },
         {
           "value": "laundry",
           "label": "laundry",
-          "color": "#6a6ed6"
+          "color": "#4fb0c6"
         },
         {
           "value": "library",
           "label": "library",
-          "color": "#e07a5f"
+          "color": "#d65f8a"
         },
         {
           "value": "mall",
           "label": "mall",
-          "color": "#5b8dd6"
+          "color": "#7a9e3d"
         },
         {
           "value": "marketplace",
           "label": "marketplace",
-          "color": "#e0b03d"
+          "color": "#c67d4f"
         },
         {
           "value": "mobile_phone_shop",
           "label": "mobile_phone_shop",
-          "color": "#4fb0c6"
+          "color": "#6a6ed6"
         },
         {
           "value": "newsagent",
           "label": "newsagent",
-          "color": "#6a6ed6"
+          "color": "#e07a5f"
         },
         {
           "value": "optician",
           "label": "optician",
-          "color": "#e0b03d"
+          "color": "#3d9970"
         },
         {
           "value": "outdoor_shop",
           "label": "outdoor_shop",
-          "color": "#a06cd5"
+          "color": "#5b8dd6"
         },
         {
           "value": "pharmacy",
           "label": "pharmacy",
-          "color": "#d65f8a"
+          "color": "#e0b03d"
         },
         {
           "value": "post_box",
           "label": "post_box",
-          "color": "#3d9970"
+          "color": "#a06cd5"
         },
         {
           "value": "post_office",
           "label": "post_office",
-          "color": "#5b8dd6"
+          "color": "#4fb0c6"
         },
         {
           "value": "school",
           "label": "school",
-          "color": "#5b8dd6"
+          "color": "#d65f8a"
         },
         {
           "value": "shoe_shop",
           "label": "shoe_shop",
-          "color": "#a06cd5"
+          "color": "#7a9e3d"
         },
         {
           "value": "sports_shop",
           "label": "sports_shop",
-          "color": "#7a9e3d"
+          "color": "#c67d4f"
         },
         {
           "value": "stationery",
@@ -212,115 +212,596 @@
         {
           "value": "toy_shop",
           "label": "toy_shop",
-          "color": "#6a6ed6"
+          "color": "#3d9970"
         },
         {
           "value": "travel_agent",
           "label": "travel_agent",
-          "color": "#3d9970"
+          "color": "#5b8dd6"
         },
         {
           "value": "university",
           "label": "university",
-          "color": "#5b8dd6"
+          "color": "#e0b03d"
         },
         {
           "value": "veterinary",
           "label": "veterinary",
-          "color": "#d65f8a"
-        }
-      ]
-    }
-  },
-  "osm_buildings": {
-    "classification": {
-      "mode": "categorized",
-      "column": "kind",
-      "classes": [
-        {
-          "value": "gewerbe",
-          "label": "gewerbe",
-          "color": "#e07a5f"
-        },
-        {
-          "value": "grossbau",
-          "label": "grossbau",
-          "color": "#3d9970"
-        },
-        {
-          "value": "industrie",
-          "label": "industrie",
-          "color": "#5b8dd6"
-        },
-        {
-          "value": "landwirtschaft",
-          "label": "landwirtschaft",
-          "color": "#e0b03d"
-        },
-        {
-          "value": "nebengebaeude",
-          "label": "nebengebaeude",
           "color": "#a06cd5"
-        },
-        {
-          "value": "oeffentlich",
-          "label": "oeffentlich",
-          "color": "#4fb0c6"
-        },
-        {
-          "value": "sakral",
-          "label": "sakral",
-          "color": "#d65f8a"
-        },
-        {
-          "value": "wohnen",
-          "label": "wohnen",
-          "color": "#7a9e3d"
         }
-      ]
-    }
+      ],
+      "size": 10.0
+    },
+    "columnAliases": {
+      "fclass": "Klasse",
+      "gid": "ID"
+    },
+    "styleVersion": 5
   },
   "dbtable_gis_roads": {
     "classification": {
+      "mode": "single",
+      "color": "#e07a5f",
+      "size": 2.0
+    },
+    "maxScaleDenom": 2000000,
+    "styleVersion": 13
+  },
+  "dbtable_raw_osm_buildings": {
+    "maxScaleDenom": 50000
+  },
+  "dbtable_raw_osm_landuse": {
+    "classification": {
       "mode": "categorized",
-      "column": "cls",
+      "column": "landuse",
       "classes": [
         {
-          "value": "1",
-          "label": "1",
+          "value": "allotments",
+          "label": "allotments",
           "color": "#e07a5f"
         },
         {
-          "value": "2",
-          "label": "2",
+          "value": "animal_enclosure",
+          "label": "animal_enclosure",
           "color": "#3d9970"
         },
         {
-          "value": "3",
-          "label": "3",
+          "value": "animal_keeping",
+          "label": "animal_keeping",
           "color": "#5b8dd6"
         },
         {
-          "value": "4",
-          "label": "4",
+          "value": "apiary",
+          "label": "apiary",
           "color": "#e0b03d"
         },
         {
-          "value": "5",
-          "label": "5",
+          "value": "aquaculture",
+          "label": "aquaculture",
           "color": "#a06cd5"
         },
         {
-          "value": "6",
-          "label": "6",
+          "value": "basin",
+          "label": "basin",
           "color": "#4fb0c6"
         },
         {
-          "value": "7",
-          "label": "7",
+          "value": "brownfield",
+          "label": "brownfield",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "cemetery",
+          "label": "cemetery",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "civic",
+          "label": "civic",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "civic_admin",
+          "label": "civic_admin",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "civiv_admin",
+          "label": "civiv_admin",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "commercial",
+          "label": "commercial",
+          "color": "#3d9970"
+        },
+        {
+          "value": "commercial;greenfield",
+          "label": "commercial;greenfield",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "common",
+          "label": "common",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "composting_plant",
+          "label": "composting_plant",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "conservation",
+          "label": "conservation",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "construction",
+          "label": "construction",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "cutting",
+          "label": "cutting",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "depot",
+          "label": "depot",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "education",
+          "label": "education",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "f",
+          "label": "f",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "fairground",
+          "label": "fairground",
+          "color": "#3d9970"
+        },
+        {
+          "value": "fallow",
+          "label": "fallow",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "farmland",
+          "label": "farmland",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "farmyard",
+          "label": "farmyard",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "fary",
+          "label": "fary",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "flowerbed",
+          "label": "flowerbed",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "forest",
+          "label": "forest",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "garages",
+          "label": "garages",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "garden",
+          "label": "garden",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "gardening",
+          "label": "gardening",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "grass",
+          "label": "grass",
+          "color": "#3d9970"
+        },
+        {
+          "value": "grassland",
+          "label": "grassland",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "grave_yard",
+          "label": "grave_yard",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "greefield",
+          "label": "greefield",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "greenery",
+          "label": "greenery",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "greenfield",
+          "label": "greenfield",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "greenhouse_horticulture",
+          "label": "greenhouse_horticulture",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "harbour",
+          "label": "harbour",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "highway",
+          "label": "highway",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "industrial",
+          "label": "industrial",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "institutional",
+          "label": "institutional",
+          "color": "#3d9970"
+        },
+        {
+          "value": "kindergarten",
+          "label": "kindergarten",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "landfill",
+          "label": "landfill",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "logging",
+          "label": "logging",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "meadow",
+          "label": "meadow",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "military",
+          "label": "military",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "orchard",
+          "label": "orchard",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "paddock",
+          "label": "paddock",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "parking",
+          "label": "parking",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "piste",
+          "label": "piste",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "plantation",
+          "label": "plantation",
+          "color": "#3d9970"
+        },
+        {
+          "value": "plant_nursery",
+          "label": "plant_nursery",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "practice_yard",
+          "label": "practice_yard",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "proposed",
+          "label": "proposed",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "public",
+          "label": "public",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "quarry",
+          "label": "quarry",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "railway",
+          "label": "railway",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "recreation_ground",
+          "label": "recreation_ground",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "religious",
+          "label": "religious",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "research",
+          "label": "research",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "reservoir",
+          "label": "reservoir",
+          "color": "#3d9970"
+        },
+        {
+          "value": "reservoir_watershed",
+          "label": "reservoir_watershed",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "residential",
+          "label": "residential",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "retail",
+          "label": "retail",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "road",
+          "label": "road",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "rough_pasture",
+          "label": "rough_pasture",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "sport",
+          "label": "sport",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "storage",
+          "label": "storage",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "traffic_island",
+          "label": "traffic_island",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "tree_pit",
+          "label": "tree_pit",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "uncultivated_land",
+          "label": "uncultivated_land",
+          "color": "#3d9970"
+        },
+        {
+          "value": "village_green",
+          "label": "village_green",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "vineyard",
+          "label": "vineyard",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "warehouse",
+          "label": "warehouse",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "winter_sports",
+          "label": "winter_sports",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "yes",
+          "label": "yes",
           "color": "#d65f8a"
         }
       ]
-    }
-  }
+    },
+    "styleVersion": 4,
+    "columnAliases": {},
+    "maxScaleDenom": 50000
+  },
+  "upload_otherpointstest": {},
+  "upload_test": {
+    "classification": {
+      "mode": "categorized",
+      "column": "fclass",
+      "classes": [
+        {
+          "value": "bicycle_repair_station",
+          "label": "bicycle_repair_station",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "dam",
+          "label": "dam",
+          "color": "#3d9970"
+        },
+        {
+          "value": "fuel",
+          "label": "fuel",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "lock_gate",
+          "label": "lock_gate",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "marina",
+          "label": "marina",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "mini_roundabout",
+          "label": "mini_roundabout",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "motorway_junction",
+          "label": "motorway_junction",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "parking",
+          "label": "parking",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "parking_bicycle",
+          "label": "parking_bicycle",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "pedestrian_crossing",
+          "label": "pedestrian_crossing",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "pier",
+          "label": "pier",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "railway_crossing",
+          "label": "railway_crossing",
+          "color": "#3d9970"
+        },
+        {
+          "value": "service",
+          "label": "service",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "slipway",
+          "label": "slipway",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "speed_camera",
+          "label": "speed_camera",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "stop",
+          "label": "stop",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "street_lamp",
+          "label": "street_lamp",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "traffic_signals",
+          "label": "traffic_signals",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "turning_circle",
+          "label": "turning_circle",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "waterfall",
+          "label": "waterfall",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "weir",
+          "label": "weir",
+          "color": "#e07a5f"
+        }
+      ]
+    },
+    "styleVersion": 1
+  },
+  "dbtable_raw_upload_buffer_geotest_a": {},
+  "dbtable_raw_upload_dissolve_geotest_a": {},
+  "dbtable_raw_upload_intersect_geotest_a": {},
+  "dbtable_raw_upload_join_geotest_a": {},
+  "dbtable_raw_upload_buffer_adm2": {},
+  "raster_t32upu_20260115t101401_b11": {},
+  "raster_echtfarben_test": {},
+  "raster_mixed_res_test": {},
+  "raster_2026_08_15_00_00_2026_08_15_23_59_sentin": {},
+  "raster_2026_08_15_00_00_2026_08_15_23_59_sentin_2": {},
+  "raster_2026_08_15_00_00_2026_08_15_23_59_sentin_3": {},
+  "raster_echt": {},
+  "raster_2026_08_15_00_00_2026_08_15_23_59_sentin_4": {},
+  "raster_2026_08_15_00_00_2026_08_15_23_59_sentin_5": {},
+  "raster_2026_08_15_00_00_2026_08_15_23_59_sentin_6": {},
+  "raster_2026_08_15_00_00_2026_08_15_23_59_sentin_7": {},
+  "raster_2026_08_15_00_00_2026_08_15_23_59_sentin_8": {},
+  "raster_2026_08_15_00_00_2026_08_15_23_59_sentin_9": {},
+  "raster_2026_08_15_00_00_2026_08_15_23_59_sentin_10": {},
+  "raster_2026_08_15_00_00_2026_08_15_23_59_sentin_11": {},
+  "raster_2026_08_15_00_00_2026_08_15_23_59_sentin_12": {},
+  "raster_sentinel_2_l2a_b01_raw": {},
+  "raster_sentinel_2_l2a_b02_raw": {},
+  "raster_sentinel_2_l2a_b03_raw": {},
+  "raster_sentinel_2_l2a_b04_raw": {},
+  "raster_sentinel_2_l2a_b05_raw": {},
+  "raster_sentinel_2_l2a_b06_raw": {},
+  "raster_sentinel_2_l2a_b07_raw": {},
+  "raster_sentinel_2_l2a_b08_raw": {},
+  "raster_sentinel_2_l2a_b09_raw": {},
+  "raster_sentinel_2_l2a_b11_raw": {},
+  "raster_sentinel_2_l2a_b12_raw": {},
+  "raster_sentinel_2_l2a_b8a_raw": {},
+  "dbtable_raw_upload_buffer_upload_test": {
+    "maxScaleDenom": 50000
+  },
+  "upload_lau_eu": {},
+  "upload_lau_rg_01m_2024_3035": {},
+  "upload_sadfasdasdsdf": {},
+  "upload_testy_mc_testface": {},
+  "upload_testy_mctestface": {},
+  "raster_echtfarbe": {},
+  "raster_fasdasda": {}
 }

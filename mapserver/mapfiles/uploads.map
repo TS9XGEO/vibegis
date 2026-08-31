@@ -1,4 +1,4 @@
-# Appended to by upload-api (see /webgis/upload-api/app.py) — every upload
+# Appended to by upload-api (see /vibegis/upload-api/app.py) — every upload
 # or table registration adds one LAYER block here. Do not hand-edit while
 # the service is running; it locks the file, but a concurrent manual edit
 # could still race.
@@ -8,6 +8,7 @@ LAYER
   GROUP       "uploads"
   TYPE        LINE
   STATUS      ON
+  MAXSCALEDENOM 2000000
   CONNECTIONTYPE POSTGIS
   CONNECTION  "host=postgis dbname=gis user=gis port=5432"
   DATA        "geom FROM gis.roads USING UNIQUE gid USING SRID=4326"
@@ -20,44 +21,14 @@ LAYER
     "ows_group_title"   "Eigene Uploads"
     "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
     "gml_include_items" "all"
+    "ows_keywordlist"   "source:gis.roads,geomtype:line"
   END
   CLASS
     NAME "roads"
-    STYLE
-      COLOR 255 110 60
-      WIDTH 2.4
-      LINECAP ROUND
-    END
+    STYLE  COLOR 224 122 95  WIDTH 2.0  LINECAP ROUND  END
   END
 END
-LAYER
-  NAME        "dbtable_raw_osm_buildings"
-  GROUP       "uploads"
-  TYPE        POLYGON
-  STATUS      ON
-  CONNECTIONTYPE POSTGIS
-  CONNECTION  "host=postgis dbname=gis user=gis port=5432"
-  DATA        "geom FROM raw.osm_buildings USING UNIQUE gid USING SRID=4326"
-  PROCESSING  "CLOSE_CONNECTION=DEFER"
-  PROJECTION
-    "init=epsg:4326"
-  END
-  METADATA
-    "ows_title"         "osm_buildings"
-    "ows_group_title"   "Eigene Uploads"
-    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
-    "gml_include_items" "all"
-  END
-  CLASS
-    NAME "osm_buildings"
-    STYLE
-      COLOR 90 170 230
-      OPACITY 55
-      OUTLINECOLOR 130 200 255
-      WIDTH 0.6
-    END
-  END
-END
+
 LAYER
   NAME        "dbtable_raw_upload_oberbayern"
   GROUP       "uploads"
@@ -75,15 +46,836 @@ LAYER
     "ows_group_title"   "Eigene Uploads"
     "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
     "gml_include_items" "all"
+    "ows_keywordlist"   "source:raw.upload_oberbayern,geomtype:point"
+  END
+  CLASSITEM   "fclass"
+  CLASS
+    NAME "atm"
+    EXPRESSION "atm"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 224 122 95  OUTLINECOLOR 255 255 255  WIDTH 1  END
   END
   CLASS
-    NAME "upload_oberbayern"
+    NAME "bakery"
+    EXPRESSION "bakery"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 61 153 112  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "bank"
+    EXPRESSION "bank"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 91 141 214  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "beverages"
+    EXPRESSION "beverages"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 224 176 61  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "bookshop"
+    EXPRESSION "bookshop"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 160 108 213  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "butcher"
+    EXPRESSION "butcher"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 79 176 198  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "chemist"
+    EXPRESSION "chemist"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 214 95 138  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "clinic"
+    EXPRESSION "clinic"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 122 158 61  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "clothes"
+    EXPRESSION "clothes"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 198 125 79  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "college"
+    EXPRESSION "college"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 106 110 214  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "computer_shop"
+    EXPRESSION "computer_shop"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 224 122 95  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "convenience"
+    EXPRESSION "convenience"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 61 153 112  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "dentist"
+    EXPRESSION "dentist"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 91 141 214  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "department_store"
+    EXPRESSION "department_store"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 224 176 61  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "doctors"
+    EXPRESSION "doctors"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 160 108 213  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "doityourself"
+    EXPRESSION "doityourself"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 79 176 198  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "florist"
+    EXPRESSION "florist"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 214 95 138  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "furniture_shop"
+    EXPRESSION "furniture_shop"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 122 158 61  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "garden_centre"
+    EXPRESSION "garden_centre"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 198 125 79  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "general"
+    EXPRESSION "general"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 106 110 214  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "gift_shop"
+    EXPRESSION "gift_shop"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 224 122 95  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "greengrocer"
+    EXPRESSION "greengrocer"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 61 153 112  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "hairdresser"
+    EXPRESSION "hairdresser"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 91 141 214  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "kindergarten"
+    EXPRESSION "kindergarten"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 224 176 61  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "kiosk"
+    EXPRESSION "kiosk"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 160 108 213  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "laundry"
+    EXPRESSION "laundry"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 79 176 198  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "library"
+    EXPRESSION "library"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 214 95 138  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "mall"
+    EXPRESSION "mall"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 122 158 61  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "marketplace"
+    EXPRESSION "marketplace"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 198 125 79  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "mobile_phone_shop"
+    EXPRESSION "mobile_phone_shop"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 106 110 214  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "newsagent"
+    EXPRESSION "newsagent"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 224 122 95  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "optician"
+    EXPRESSION "optician"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 61 153 112  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "outdoor_shop"
+    EXPRESSION "outdoor_shop"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 91 141 214  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "pharmacy"
+    EXPRESSION "pharmacy"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 224 176 61  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "post_box"
+    EXPRESSION "post_box"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 160 108 213  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "post_office"
+    EXPRESSION "post_office"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 79 176 198  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "school"
+    EXPRESSION "school"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 214 95 138  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "shoe_shop"
+    EXPRESSION "shoe_shop"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 122 158 61  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "sports_shop"
+    EXPRESSION "sports_shop"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 198 125 79  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "stationery"
+    EXPRESSION "stationery"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 106 110 214  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "supermarket"
+    EXPRESSION "supermarket"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 224 122 95  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "toy_shop"
+    EXPRESSION "toy_shop"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 61 153 112  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "travel_agent"
+    EXPRESSION "travel_agent"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 91 141 214  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "university"
+    EXPRESSION "university"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 224 176 61  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "veterinary"
+    EXPRESSION "veterinary"
+    STYLE  SYMBOL "circle"  SIZE 10.0  COLOR 160 108 213  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+END
+
+LAYER
+  NAME        "dbtable_raw_osm_landuse"
+  GROUP       "uploads"
+  TYPE        POLYGON
+  STATUS      ON
+  MAXSCALEDENOM 50000
+  CONNECTIONTYPE POSTGIS
+  CONNECTION  "host=postgis dbname=gis user=gis port=5432"
+  DATA        "geom FROM raw.osm_landuse USING UNIQUE gid USING SRID=4326"
+  PROCESSING  "CLOSE_CONNECTION=DEFER"
+  PROJECTION
+    "init=epsg:4326"
+  END
+  METADATA
+    "ows_title"         "Landuse"
+    "ows_group_title"   "Eigene Uploads"
+    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
+    "gml_include_items" "all"
+    "ows_keywordlist"   "source:raw.osm_landuse,geomtype:polygon"
+  END
+  CLASSITEM   "landuse"
+  CLASS
+    NAME "allotments"
+    EXPRESSION "allotments"
+    STYLE  COLOR 224 122 95  OUTLINECOLOR 224 122 95  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "animal_enclosure"
+    EXPRESSION "animal_enclosure"
+    STYLE  COLOR 61 153 112  OUTLINECOLOR 61 153 112  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "animal_keeping"
+    EXPRESSION "animal_keeping"
+    STYLE  COLOR 91 141 214  OUTLINECOLOR 91 141 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "apiary"
+    EXPRESSION "apiary"
+    STYLE  COLOR 224 176 61  OUTLINECOLOR 224 176 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "aquaculture"
+    EXPRESSION "aquaculture"
+    STYLE  COLOR 160 108 213  OUTLINECOLOR 160 108 213  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "basin"
+    EXPRESSION "basin"
+    STYLE  COLOR 79 176 198  OUTLINECOLOR 79 176 198  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "brownfield"
+    EXPRESSION "brownfield"
+    STYLE  COLOR 214 95 138  OUTLINECOLOR 214 95 138  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "cemetery"
+    EXPRESSION "cemetery"
+    STYLE  COLOR 122 158 61  OUTLINECOLOR 122 158 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "civic"
+    EXPRESSION "civic"
+    STYLE  COLOR 198 125 79  OUTLINECOLOR 198 125 79  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "civic_admin"
+    EXPRESSION "civic_admin"
+    STYLE  COLOR 106 110 214  OUTLINECOLOR 106 110 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "civiv_admin"
+    EXPRESSION "civiv_admin"
+    STYLE  COLOR 224 122 95  OUTLINECOLOR 224 122 95  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "commercial"
+    EXPRESSION "commercial"
+    STYLE  COLOR 61 153 112  OUTLINECOLOR 61 153 112  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "commercial;greenfield"
+    EXPRESSION "commercial;greenfield"
+    STYLE  COLOR 91 141 214  OUTLINECOLOR 91 141 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "common"
+    EXPRESSION "common"
+    STYLE  COLOR 224 176 61  OUTLINECOLOR 224 176 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "composting_plant"
+    EXPRESSION "composting_plant"
+    STYLE  COLOR 160 108 213  OUTLINECOLOR 160 108 213  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "conservation"
+    EXPRESSION "conservation"
+    STYLE  COLOR 79 176 198  OUTLINECOLOR 79 176 198  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "construction"
+    EXPRESSION "construction"
+    STYLE  COLOR 214 95 138  OUTLINECOLOR 214 95 138  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "cutting"
+    EXPRESSION "cutting"
+    STYLE  COLOR 122 158 61  OUTLINECOLOR 122 158 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "depot"
+    EXPRESSION "depot"
+    STYLE  COLOR 198 125 79  OUTLINECOLOR 198 125 79  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "education"
+    EXPRESSION "education"
+    STYLE  COLOR 106 110 214  OUTLINECOLOR 106 110 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "f"
+    EXPRESSION "f"
+    STYLE  COLOR 224 122 95  OUTLINECOLOR 224 122 95  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "fairground"
+    EXPRESSION "fairground"
+    STYLE  COLOR 61 153 112  OUTLINECOLOR 61 153 112  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "fallow"
+    EXPRESSION "fallow"
+    STYLE  COLOR 91 141 214  OUTLINECOLOR 91 141 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "farmland"
+    EXPRESSION "farmland"
+    STYLE  COLOR 224 176 61  OUTLINECOLOR 224 176 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "farmyard"
+    EXPRESSION "farmyard"
+    STYLE  COLOR 160 108 213  OUTLINECOLOR 160 108 213  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "fary"
+    EXPRESSION "fary"
+    STYLE  COLOR 79 176 198  OUTLINECOLOR 79 176 198  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "flowerbed"
+    EXPRESSION "flowerbed"
+    STYLE  COLOR 214 95 138  OUTLINECOLOR 214 95 138  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "forest"
+    EXPRESSION "forest"
+    STYLE  COLOR 122 158 61  OUTLINECOLOR 122 158 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "garages"
+    EXPRESSION "garages"
+    STYLE  COLOR 198 125 79  OUTLINECOLOR 198 125 79  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "garden"
+    EXPRESSION "garden"
+    STYLE  COLOR 106 110 214  OUTLINECOLOR 106 110 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "gardening"
+    EXPRESSION "gardening"
+    STYLE  COLOR 224 122 95  OUTLINECOLOR 224 122 95  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "grass"
+    EXPRESSION "grass"
+    STYLE  COLOR 61 153 112  OUTLINECOLOR 61 153 112  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "grassland"
+    EXPRESSION "grassland"
+    STYLE  COLOR 91 141 214  OUTLINECOLOR 91 141 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "grave_yard"
+    EXPRESSION "grave_yard"
+    STYLE  COLOR 224 176 61  OUTLINECOLOR 224 176 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "greefield"
+    EXPRESSION "greefield"
+    STYLE  COLOR 160 108 213  OUTLINECOLOR 160 108 213  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "greenery"
+    EXPRESSION "greenery"
+    STYLE  COLOR 79 176 198  OUTLINECOLOR 79 176 198  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "greenfield"
+    EXPRESSION "greenfield"
+    STYLE  COLOR 214 95 138  OUTLINECOLOR 214 95 138  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "greenhouse_horticulture"
+    EXPRESSION "greenhouse_horticulture"
+    STYLE  COLOR 122 158 61  OUTLINECOLOR 122 158 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "harbour"
+    EXPRESSION "harbour"
+    STYLE  COLOR 198 125 79  OUTLINECOLOR 198 125 79  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "highway"
+    EXPRESSION "highway"
+    STYLE  COLOR 106 110 214  OUTLINECOLOR 106 110 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "industrial"
+    EXPRESSION "industrial"
+    STYLE  COLOR 224 122 95  OUTLINECOLOR 224 122 95  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "institutional"
+    EXPRESSION "institutional"
+    STYLE  COLOR 61 153 112  OUTLINECOLOR 61 153 112  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "kindergarten"
+    EXPRESSION "kindergarten"
+    STYLE  COLOR 91 141 214  OUTLINECOLOR 91 141 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "landfill"
+    EXPRESSION "landfill"
+    STYLE  COLOR 224 176 61  OUTLINECOLOR 224 176 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "logging"
+    EXPRESSION "logging"
+    STYLE  COLOR 160 108 213  OUTLINECOLOR 160 108 213  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "meadow"
+    EXPRESSION "meadow"
+    STYLE  COLOR 79 176 198  OUTLINECOLOR 79 176 198  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "military"
+    EXPRESSION "military"
+    STYLE  COLOR 214 95 138  OUTLINECOLOR 214 95 138  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "orchard"
+    EXPRESSION "orchard"
+    STYLE  COLOR 122 158 61  OUTLINECOLOR 122 158 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "paddock"
+    EXPRESSION "paddock"
+    STYLE  COLOR 198 125 79  OUTLINECOLOR 198 125 79  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "parking"
+    EXPRESSION "parking"
+    STYLE  COLOR 106 110 214  OUTLINECOLOR 106 110 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "piste"
+    EXPRESSION "piste"
+    STYLE  COLOR 224 122 95  OUTLINECOLOR 224 122 95  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "plantation"
+    EXPRESSION "plantation"
+    STYLE  COLOR 61 153 112  OUTLINECOLOR 61 153 112  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "plant_nursery"
+    EXPRESSION "plant_nursery"
+    STYLE  COLOR 91 141 214  OUTLINECOLOR 91 141 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "practice_yard"
+    EXPRESSION "practice_yard"
+    STYLE  COLOR 224 176 61  OUTLINECOLOR 224 176 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "proposed"
+    EXPRESSION "proposed"
+    STYLE  COLOR 160 108 213  OUTLINECOLOR 160 108 213  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "public"
+    EXPRESSION "public"
+    STYLE  COLOR 79 176 198  OUTLINECOLOR 79 176 198  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "quarry"
+    EXPRESSION "quarry"
+    STYLE  COLOR 214 95 138  OUTLINECOLOR 214 95 138  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "railway"
+    EXPRESSION "railway"
+    STYLE  COLOR 122 158 61  OUTLINECOLOR 122 158 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "recreation_ground"
+    EXPRESSION "recreation_ground"
+    STYLE  COLOR 198 125 79  OUTLINECOLOR 198 125 79  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "religious"
+    EXPRESSION "religious"
+    STYLE  COLOR 106 110 214  OUTLINECOLOR 106 110 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "research"
+    EXPRESSION "research"
+    STYLE  COLOR 224 122 95  OUTLINECOLOR 224 122 95  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "reservoir"
+    EXPRESSION "reservoir"
+    STYLE  COLOR 61 153 112  OUTLINECOLOR 61 153 112  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "reservoir_watershed"
+    EXPRESSION "reservoir_watershed"
+    STYLE  COLOR 91 141 214  OUTLINECOLOR 91 141 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "residential"
+    EXPRESSION "residential"
+    STYLE  COLOR 224 176 61  OUTLINECOLOR 224 176 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "retail"
+    EXPRESSION "retail"
+    STYLE  COLOR 160 108 213  OUTLINECOLOR 160 108 213  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "road"
+    EXPRESSION "road"
+    STYLE  COLOR 79 176 198  OUTLINECOLOR 79 176 198  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "rough_pasture"
+    EXPRESSION "rough_pasture"
+    STYLE  COLOR 214 95 138  OUTLINECOLOR 214 95 138  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "sport"
+    EXPRESSION "sport"
+    STYLE  COLOR 122 158 61  OUTLINECOLOR 122 158 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "storage"
+    EXPRESSION "storage"
+    STYLE  COLOR 198 125 79  OUTLINECOLOR 198 125 79  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "traffic_island"
+    EXPRESSION "traffic_island"
+    STYLE  COLOR 106 110 214  OUTLINECOLOR 106 110 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "tree_pit"
+    EXPRESSION "tree_pit"
+    STYLE  COLOR 224 122 95  OUTLINECOLOR 224 122 95  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "uncultivated_land"
+    EXPRESSION "uncultivated_land"
+    STYLE  COLOR 61 153 112  OUTLINECOLOR 61 153 112  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "village_green"
+    EXPRESSION "village_green"
+    STYLE  COLOR 91 141 214  OUTLINECOLOR 91 141 214  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "vineyard"
+    EXPRESSION "vineyard"
+    STYLE  COLOR 224 176 61  OUTLINECOLOR 224 176 61  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "warehouse"
+    EXPRESSION "warehouse"
+    STYLE  COLOR 160 108 213  OUTLINECOLOR 160 108 213  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "winter_sports"
+    EXPRESSION "winter_sports"
+    STYLE  COLOR 79 176 198  OUTLINECOLOR 79 176 198  WIDTH 0.5  END
+  END
+  CLASS
+    NAME "yes"
+    EXPRESSION "yes"
+    STYLE  COLOR 214 95 138  OUTLINECOLOR 214 95 138  WIDTH 0.5  END
+  END
+END
+
+LAYER
+  NAME        "upload_test"
+  GROUP       "uploads"
+  TYPE        POINT
+  STATUS      ON
+  CONNECTIONTYPE POSTGIS
+  CONNECTION  "host=postgis dbname=gis user=gis port=5432"
+  DATA        "geometry FROM raw.upload_test USING UNIQUE gid USING SRID=4326"
+  PROCESSING  "CLOSE_CONNECTION=DEFER"
+  PROJECTION
+    "init=epsg:4326"
+  END
+  METADATA
+    "ows_title"         "test"
+    "ows_group_title"   "Eigene Uploads"
+    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
+    "gml_include_items" "all"
+    "ows_keywordlist"   "source:raw.upload_test,geomtype:point"
+  END
+  CLASSITEM   "fclass"
+  CLASS
+    NAME "bicycle_repair_station"
+    EXPRESSION "bicycle_repair_station"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 224 122 95  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "dam"
+    EXPRESSION "dam"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 61 153 112  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "fuel"
+    EXPRESSION "fuel"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 91 141 214  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "lock_gate"
+    EXPRESSION "lock_gate"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 224 176 61  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "marina"
+    EXPRESSION "marina"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 160 108 213  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "mini_roundabout"
+    EXPRESSION "mini_roundabout"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 79 176 198  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "motorway_junction"
+    EXPRESSION "motorway_junction"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 214 95 138  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "parking"
+    EXPRESSION "parking"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 122 158 61  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "parking_bicycle"
+    EXPRESSION "parking_bicycle"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 198 125 79  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "pedestrian_crossing"
+    EXPRESSION "pedestrian_crossing"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 106 110 214  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "pier"
+    EXPRESSION "pier"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 224 122 95  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "railway_crossing"
+    EXPRESSION "railway_crossing"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 61 153 112  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "service"
+    EXPRESSION "service"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 91 141 214  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "slipway"
+    EXPRESSION "slipway"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 224 176 61  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "speed_camera"
+    EXPRESSION "speed_camera"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 160 108 213  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "stop"
+    EXPRESSION "stop"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 79 176 198  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "street_lamp"
+    EXPRESSION "street_lamp"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 214 95 138  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "traffic_signals"
+    EXPRESSION "traffic_signals"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 122 158 61  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "turning_circle"
+    EXPRESSION "turning_circle"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 198 125 79  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "waterfall"
+    EXPRESSION "waterfall"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 106 110 214  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+  CLASS
+    NAME "weir"
+    EXPRESSION "weir"
+    STYLE  SYMBOL "circle"  SIZE 10  COLOR 224 122 95  OUTLINECOLOR 255 255 255  WIDTH 1  END
+  END
+END
+
+LAYER
+  NAME        "upload_lau_rg_01m_2024_3035"
+  GROUP       "uploads"
+  TYPE        POLYGON
+  STATUS      ON
+  CONNECTIONTYPE POSTGIS
+  CONNECTION  "host=postgis dbname=gis user=gis port=5432"
+  DATA        "geometry FROM raw.upload_lau_rg_01m_2024_3035 USING UNIQUE gid USING SRID=4326"
+  PROCESSING  "CLOSE_CONNECTION=DEFER"
+  PROJECTION
+    "init=epsg:4326"
+  END
+  METADATA
+    "ows_title"         "LAU_RG_01M_2024_3035"
+    "ows_group_title"   "Eigene Uploads"
+    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
+    "gml_include_items" "all"
+    "ows_keywordlist"   "source:raw.upload_lau_rg_01m_2024_3035,geomtype:polygon"
+  END
+  CLASS
+    NAME "LAU_RG_01M_2024_3035"
     STYLE
-      SYMBOL "circle"
-      SIZE 9
-      COLOR 255 196 40
-      OUTLINECOLOR 40 30 10
-      WIDTH 1.5
+      COLOR 90 170 230
+      OPACITY 55
+      OUTLINECOLOR 130 200 255
+      WIDTH 0.6
     END
   END
 END
+
+LAYER
+  NAME        "raster_echtfarbe"
+  GROUP       "uploads"
+  TYPE        RASTER
+  STATUS      ON
+  DATA        "/rasters/raster_echtfarbe.vrt"
+  PROCESSING  "RESAMPLE=AVERAGE"
+  PROCESSING  "SCALE=AUTO"
+  PROJECTION
+    "init=epsg:4326"
+  END
+  METADATA
+    "ows_title"         "Echtfarbe"
+    "ows_group_title"   "Eigene Uploads"
+    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
+    "ows_keywordlist"   "geomtype:raster,bands:3"
+  END
+END
+
+LAYER
+  NAME        "raster_fasdasda"
+  GROUP       "uploads"
+  TYPE        RASTER
+  STATUS      ON
+  DATA        "/rasters/raster_fasdasda.vrt"
+  PROCESSING  "RESAMPLE=AVERAGE"
+  PROCESSING  "SCALE=AUTO"
+  PROJECTION
+    "init=epsg:4326"
+  END
+  METADATA
+    "ows_title"         "fasdasda"
+    "ows_group_title"   "Eigene Uploads"
+    "ows_srs"           "EPSG:4326 EPSG:3857 CRS:84"
+    "ows_keywordlist"   "geomtype:raster,bands:3"
+  END
+END
+

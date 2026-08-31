@@ -1,11 +1,11 @@
-# WebGIS Frontend (React + TypeScript + Resium + Mantine)
+# VibeGIS Frontend (React + TypeScript + Resium + Mantine)
 
 Runs as its own container with hot module reload.
 
 ## Start
 
 ```bash
-cd /webgis
+cd /vibegis
 docker compose up -d --build frontend
 docker compose logs -f frontend      # wait for "ready in ... ms"
 ```
@@ -39,7 +39,7 @@ to a framework: the ordering bug that plagued the vanilla version cannot be
 expressed here.
 
 **The layer list still comes from GetCapabilities.** Add a `LAYER` to
-`webgis.map`, restart MapServer, reload — it appears.
+`vibegis.map`, restart MapServer, reload — it appears.
 
 ## Requests
 

@@ -75,3 +75,38 @@ export function buildFilterXml(conditions: FilterCondition[], logic: FilterLogic
   const inner = buildConditionsXml(conditions, logic)
   return inner ? `<ogc:Filter xmlns:ogc="http://www.opengis.net/ogc">${inner}</ogc:Filter>` : null
 }
+
+const CQL_OP: Record<Exclude<FilterOp, 'like'>, string> = {
+  eq: '=',
+  neq: '<>',
+  gt: '>',
+  lt: '<',
+  gte: '>=',
+  lte: '<=',
+}
+
+function cqlLiteral(value: string): string {
+  const num = Number(value)
+  const numeric = value.trim() !== '' && !Number.isNaN(num)
+  return numeric ? value : `'${value.replace(/'/g, "''")}'`
+}
+
+function cqlCondition(c: FilterCondition): string {
+  if (c.op === 'like') return `${c.column} LIKE '%${c.value.replace(/'/g, "''")}%'`
+  return `${c.column} ${CQL_OP[c.op]} ${cqlLiteral(c.value)}`
+}
+
+/**
+ * CQL filter string for pg_featureserv's `filter=` query param — the
+ * attribute filter's "Auswählen" button selects matching features via a
+ * real server-side query (see features.ts's fetchFeaturesWithFilter) rather
+ * than fetching a whole layer to test client-side, which doesn't scale on
+ * this app's larger tables (some run into the millions of rows). Same
+ * operator set and AND/OR join as buildConditionsXml(), just CQL text
+ * instead of OGC Filter XML. null when there's nothing to filter on.
+ */
+export function buildCql(conditions: FilterCondition[], logic: FilterLogic = 'and'): string | null {
+  const usable = conditions.filter((c) => c.column && c.value.trim() !== '')
+  if (usable.length === 0) return null
+  return usable.map(cqlCondition).join(logic === 'or' ? ' OR ' : ' AND ')
+}

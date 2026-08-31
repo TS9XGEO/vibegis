@@ -1,6 +1,6 @@
 /**
  * Client-side mirror of the CLASS/STYLE blocks in the MapServer mapfiles
- * (mapserver/mapfiles/webgis.map, osm-layers.map). There is no API that
+ * (mapserver/mapfiles/vibegis.map, osm-layers.map). There is no API that
  * exposes per-class geometry type and color to a WMS client, so this list is
  * kept in sync by hand — the same convention FEATURE_COLLECTIONS and
  * CACHED_LAYERS already use in wms.ts. Update it whenever a CLASS is added,
@@ -30,6 +30,8 @@ export interface LegendLayer {
   /** Mapfile CLASSITEM for this layer, or null when classes have no EXPRESSION (match all). */
   classItem: string | null
   classes: LegendClass[]
+  /** Point size / line width for the whole layer. Undefined = the renderer's own default. */
+  size?: number
 }
 
 // ------------------------------------------------------- user classification
@@ -56,18 +58,22 @@ export interface GraduatedBreak {
 export interface SingleSymbol {
   mode: 'single'
   color: string
+  /** Point size / line width for the whole layer. Undefined = the renderer's own default. */
+  size?: number
 }
 
 export interface CategorizedClassification {
   mode: 'categorized'
   column: string
   classes: ClassDef[]
+  size?: number
 }
 
 export interface GraduatedClassification {
   mode: 'graduated'
   column: string
   breaks: GraduatedBreak[]
+  size?: number
 }
 
 export type Classification = SingleSymbol | CategorizedClassification | GraduatedClassification
@@ -170,6 +176,7 @@ export function resolveLegend(
         geometry,
         classItem: null,
         classes: [{ name: 'Alle', match: null, color: hexToRgb(classification.color) }],
+        size: classification.size,
       }
     }
     if (classification.mode === 'categorized') {
@@ -181,6 +188,7 @@ export function resolveLegend(
           match: c.value,
           color: hexToRgb(c.color),
         })),
+        size: classification.size,
       }
     }
     // graduated
@@ -192,6 +200,7 @@ export function resolveLegend(
         match: { min: b.min, max: b.max },
         color: hexToRgb(b.color),
       })),
+      size: classification.size,
     }
   }
   return LEGENDS[layerName]
@@ -252,6 +261,7 @@ function symbolizerFor(
   geometry: GeometryKind,
   cls: LegendClass,
   color: string,
+  size?: number,
 ): string {
   const opacity = cls.fillOpacity ?? 1
 
@@ -266,6 +276,8 @@ function symbolizerFor(
   }
 
   if (geometry === 'line') {
+    // The casing (when present) is a fixed-width backdrop stroke, not part of
+    // this size control — only the main stroke width is user-configurable.
     const casing = cls.casingColor
       ? `<LineSymbolizer><Stroke><CssParameter name="stroke">${rgbToHex(cls.casingColor)}</CssParameter>` +
         `<CssParameter name="stroke-width">4</CssParameter><CssParameter name="stroke-linecap">round</CssParameter></Stroke></LineSymbolizer>`
@@ -273,7 +285,7 @@ function symbolizerFor(
     return (
       casing +
       `<LineSymbolizer><Stroke><CssParameter name="stroke">${color}</CssParameter>` +
-      `<CssParameter name="stroke-width">2.2</CssParameter><CssParameter name="stroke-linecap">round</CssParameter></Stroke></LineSymbolizer>`
+      `<CssParameter name="stroke-width">${size ?? 2.2}</CssParameter><CssParameter name="stroke-linecap">round</CssParameter></Stroke></LineSymbolizer>`
     )
   }
 
@@ -282,8 +294,8 @@ function symbolizerFor(
   return (
     `<PointSymbolizer><Graphic><Mark><WellKnownName>circle</WellKnownName>` +
     `<Fill><CssParameter name="fill">${color}</CssParameter></Fill>` +
-    `<Stroke><CssParameter name="stroke">${outline}</CssParameter><CssParameter name="stroke-width">2</CssParameter></Stroke>` +
-    `</Mark><Size>10</Size></Graphic></PointSymbolizer>`
+    `<Stroke><CssParameter name="stroke">${outline}</CssParameter><CssParameter name="stroke-width">1</CssParameter></Stroke>` +
+    `</Mark><Size>${size ?? 10}</Size></Graphic></PointSymbolizer>`
   )
 }
 
@@ -318,7 +330,7 @@ function symbolizerFor(
  * anything else (a different column, a range, a LIKE) could still match any
  * class, so every class is kept. Pruning must never drop a class that could draw.
  */
-function reachableClasses(
+export function reachableClasses(
   layer: LegendLayer,
   conditions: FilterCondition[],
   logic: FilterLogic,
@@ -350,6 +362,25 @@ function reachableClasses(
   // still has to be carried.
   const allExact = classes.every((cls) => cls.match === null || typeof cls.match === 'string')
   return { classes, filterRedundant: allExact && classes.every((cls) => cls.match !== null) }
+}
+
+/**
+ * Whether `match` is satisfied by at least one value in `values` — the
+ * shared test Legend.tsx applies twice: once against every distinct value
+ * that occurs anywhere in the layer's data (fetchDistinctValues), and once
+ * against just the values found among features in the current map extent
+ * (fetchFeaturesInBbox) — so a class with no matching feature at all, or
+ * simply none in view right now, drops out of the legend. A catch-all class
+ * (`match === null`) always passes — it's not tied to any one value.
+ */
+export function classSatisfiedBy(match: ClassMatch, values: Set<string>): boolean {
+  if (match === null) return true
+  if (typeof match === 'string') return values.has(match)
+  for (const v of values) {
+    const n = Number(v)
+    if (!Number.isNaN(n) && n >= match.min && n < match.max) return true
+  }
+  return false
 }
 
 function classUnreachable(classItem: string | null, match: ClassMatch, conditions: FilterCondition[]): boolean {
@@ -405,7 +436,7 @@ export function buildSld(
       return (
         `<Rule>` +
         filterFor(layer.classItem, cls.match, extraXml) +
-        symbolizerFor(layer.geometry, cls, color) +
+        symbolizerFor(layer.geometry, cls, color, layer.size) +
         `</Rule>`
       )
     })

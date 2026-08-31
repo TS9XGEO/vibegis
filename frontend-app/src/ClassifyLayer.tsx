@@ -24,9 +24,10 @@ import {
   ActionIcon, Alert, Button, ColorPicker, Group, Modal, NumberInput, Popover,
   ScrollArea, SegmentedControl, Select, Stack, Text, TextInput, Tooltip,
 } from '@mantine/core'
-import { IconAlertCircle, IconTags, IconTrash } from '@tabler/icons-react'
+import { IconAlertCircle, IconTags, IconTrash, IconX } from '@tabler/icons-react'
 
-import { fetchColumns, fetchColumnStats, fetchDistinctValues, type Column } from './columns'
+import { columnLabel, fetchColumns, fetchColumnStats, fetchDistinctValues, type Column } from './columns'
+import { FRESH_LAYER_WAIT_MESSAGE, isFreshLayerWait } from './freshLayerRetry'
 import {
   hexToRgb, isValidHex, rgbToHex, type ClassDef, type Classification,
   type GraduatedBreak, type Rgb,
@@ -79,14 +80,20 @@ function equalIntervalBounds(min: number, max: number, n: number): [number, numb
 }
 
 function Swatch({ color, onChange }: { color: string; onChange: (hex: string) => void }) {
+  const [opened, setOpened] = useState(false)
   return (
-    <Popover position="right-start" withArrow shadow="md">
+    <Popover opened={opened} onChange={setOpened} position="right-start" withArrow shadow="md">
       <Popover.Target>
-        <ActionIcon variant="subtle" size="sm" aria-label="Farbe aendern">
+        <ActionIcon variant="subtle" size="sm" aria-label="Farbe aendern" onClick={() => setOpened((o) => !o)}>
           <div style={{ width: 16, height: 16, borderRadius: 4, background: color, border: '1px solid rgba(255,255,255,.35)' }} />
         </ActionIcon>
       </Popover.Target>
       <Popover.Dropdown>
+        <Group justify="flex-end" mb={4}>
+          <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Schliessen" onClick={() => setOpened(false)}>
+            <IconX size={14} />
+          </ActionIcon>
+        </Group>
         <ColorPicker format="hex" value={color} onChange={onChange} />
       </Popover.Dropdown>
     </Popover>
@@ -138,9 +145,13 @@ export default function ClassifyLayer({
 }) {
   const [schema, table] = collection.split(/\.(.+)/)
   const existing = useApp((s) => s.layerConfigs[layerName]?.classification)
+  const aliases = useApp((s) => s.layerConfigs[layerName]?.columnAliases)
   const cachedColumns = useApp((s) => s.layerColumns[layerName])
   const saveClassification = useApp((s) => s.saveClassification)
   const clearClassification = useApp((s) => s.clearClassification)
+  // Same field Scene.tsx reads for WMS rendering — the size control only
+  // makes sense for point/line geometries, not polygons.
+  const geomType = useApp((s) => s.dynamicGeometry[layerName])?.toLowerCase()
 
   const [columns, setColumns] = useState<Column[]>([])
   const [column, setColumn] = useState<string | null>(
@@ -152,6 +163,7 @@ export default function ClassifyLayer({
   const [singleColor, setSingleColor] = useState(existing?.mode === 'single' ? existing.color : PALETTE[0])
   const [classes, setClasses] = useState<ClassDef[]>(existing?.mode === 'categorized' ? existing.classes : [])
   const [breaks, setBreaks] = useState<GraduatedBreak[]>(existing?.mode === 'graduated' ? existing.breaks : [])
+  const [size, setSize] = useState<number | undefined>(existing?.size)
   const [numClasses, setNumClasses] = useState(existing?.mode === 'graduated' ? existing.breaks.length : 5)
   const [rampColor, setRampColor] = useState(DEFAULT_RAMP_COLOR)
   const [stats, setStats] = useState<{ min: number; max: number } | null>(null)
@@ -168,7 +180,9 @@ export default function ClassifyLayer({
     if (!opened) return
     setError(null)
     if (cachedColumns) { setColumns(cachedColumns); return }
-    fetchColumns(collection).then(setColumns).catch((e) => setError(e instanceof Error ? e.message : String(e)))
+    fetchColumns(collection, () => setError(FRESH_LAYER_WAIT_MESSAGE))
+      .then((cols) => { setColumns(cols); setError(null) })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
   }, [opened, collection, cachedColumns])
 
   // A column that turns out not to be numeric can't stay graduated/ranges.
@@ -240,12 +254,13 @@ export default function ClassifyLayer({
   }
 
   function buildClassification(): Classification | null {
-    if (mode === 'single') return { mode: 'single', color: singleColor }
+    const sizeField = size !== undefined ? { size } : {}
+    if (mode === 'single') return { mode: 'single', color: singleColor, ...sizeField }
     if (!column) return null
     if (mode === 'categorized' && categorizedStyle === 'values') {
-      return classes.length ? { mode: 'categorized', column, classes } : null
+      return classes.length ? { mode: 'categorized', column, classes, ...sizeField } : null
     }
-    return breaks.length ? { mode: 'graduated', column, breaks } : null
+    return breaks.length ? { mode: 'graduated', column, breaks, ...sizeField } : null
   }
 
   const draft = buildClassification()
@@ -296,7 +311,7 @@ export default function ClassifyLayer({
           <Select
             label="Spalte"
             placeholder="Spalte auswählen"
-            data={columns.map((c) => c.key)}
+            data={columns.map((c) => ({ value: c.key, label: columnLabel(aliases, c.key) }))}
             value={column}
             onChange={setColumn}
             searchable
@@ -312,6 +327,19 @@ export default function ClassifyLayer({
           data={modeOptions}
         />
 
+        {(geomType === 'point' || geomType === 'line') && (
+          <NumberInput
+            size="xs"
+            label={geomType === 'point' ? 'Punktgröße' : 'Linienbreite'}
+            placeholder={geomType === 'point' ? '10' : '2.2'}
+            min={0.5}
+            step={geomType === 'point' ? 1 : 0.5}
+            decimalScale={1}
+            value={size ?? ''}
+            onChange={(v) => setSize(typeof v === 'number' ? v : undefined)}
+          />
+        )}
+
         {mode === 'categorized' && numeric && (
           <SegmentedControl
             fullWidth
@@ -326,7 +354,9 @@ export default function ClassifyLayer({
         )}
 
         {error && (
-          <Alert color="red" variant="light" icon={<IconAlertCircle size={16} />}>{error}</Alert>
+          <Alert color={isFreshLayerWait(error) ? 'yellow' : 'red'} variant="light" icon={<IconAlertCircle size={16} />}>
+            {error}
+          </Alert>
         )}
 
         {loading && <Text size="xs" c="dimmed">lade…</Text>}

@@ -1,9 +1,9 @@
-# WebGIS stack: PostGIS + MapServer + QGIS Server + Dagster + Cesium
+# VibeGIS stack: PostGIS + MapServer + QGIS Server + Dagster + Cesium
 # Start:  docker compose up -d
 # Tools:  docker compose --profile tools up -d      (adds pgAdmin)
 # Terrain: docker compose --profile terrain run --rm ctb   (one-shot build)
 
-name: webgis
+name: vibegis
 
 x-postgres-env: &postgres-env
   POSTGRES_DB: ${POSTGRES_DB}
@@ -15,7 +15,7 @@ services:
   # ---------------------------------------------------------------- database
   postgis:
     image: ${POSTGIS_IMAGE}
-    container_name: webgis-postgis
+    container_name: vibegis-postgis
     restart: unless-stopped
     environment:
       <<: *postgres-env
@@ -41,19 +41,19 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    networks: [webgis]
+    networks: [vibegis]
 
   # --------------------------------------------------------------- mapserver
   # Fast WMS/WMTS/OGC-API rendering. Serves imagery + Terrain-RGB to Cesium.
   mapserver:
     image: ${MAPSERVER_IMAGE}
-    container_name: webgis-mapserver
+    container_name: vibegis-mapserver
     restart: unless-stopped
     depends_on:
       postgis:
         condition: service_healthy
     environment:
-      MS_MAPFILE: /etc/mapserver/webgis.map
+      MS_MAPFILE: /etc/mapserver/vibegis.map
       MS_DEBUGLEVEL: "1"
       MS_ERRORFILE: stderr
       # consumed inside the mapfile via CONNECTION
@@ -72,14 +72,18 @@ services:
     volumes:
       - ./mapserver/mapfiles:/etc/mapserver:ro
       - ./mapserver/data:/data:ro
-    networks: [webgis]
+      # Not nested under /data: /data is itself a read-only mount, and Docker
+      # can't create a mountpoint for a second bind mount inside an
+      # already-read-only parent mount at container-creation time.
+      - ./mapserver/rasters:/rasters:ro
+    networks: [vibegis]
 
   # ------------------------------------------------------------- qgis server
   # Headless. Publish by dropping .qgs/.qgz files into ./qgis-server/projects
   # and requesting  ?MAP=/io/data/<project>.qgs&SERVICE=WMS&...
   qgis-server:
     image: ${QGISSERVER_IMAGE}
-    container_name: webgis-qgis-server
+    container_name: vibegis-qgis-server
     restart: unless-stopped
     depends_on:
       postgis:
@@ -97,7 +101,7 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./qgis-server/projects:/io/data:ro
-    networks: [webgis]
+    networks: [vibegis]
 
   # ------------------------------------------------------------------ dagster
   dagster:
@@ -105,7 +109,7 @@ services:
       context: ./dagster
       args:
         GDAL_IMAGE: ${GDAL_IMAGE}
-    container_name: webgis-dagster
+    container_name: vibegis-dagster
     restart: unless-stopped
     depends_on:
       postgis:
@@ -121,7 +125,7 @@ services:
       - ./terrain/dem:/data/dem
     ports:
       - "127.0.0.1:${DAGSTER_PORT}:3000"
-    networks: [webgis]
+    networks: [vibegis]
 
   # -------------------------------------------------------------- upload-api
   # Turns an uploaded shapefile/GeoPackage/GeoJSON/KML/GML into a PostGIS
@@ -133,7 +137,7 @@ services:
       context: ./upload-api
       args:
         GDAL_IMAGE: ${GDAL_IMAGE}
-    container_name: webgis-upload-api
+    container_name: vibegis-upload-api
     restart: unless-stopped
     depends_on:
       postgis:
@@ -143,17 +147,31 @@ services:
       PGDATABASE: ${POSTGRES_DB}
       PGUSER: ${POSTGRES_USER}
       PGPASSWORD: ${POSTGRES_PASSWORD}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
+      GATEWAY_PORT: ${GATEWAY_PORT}
     volumes:
       - ./mapserver/mapfiles:/mapfiles
+      # Read-write, unlike mapserver's own :ro mount of the same host path —
+      # this is what lets POST /upload-raster land a normalized GeoTIFF
+      # somewhere mapserver can then read it from.
+      - ./mapserver/rasters:/rasters
+      # Styling is written here, so tile invalidation has to happen here too:
+      # MapProxy exposes no purge endpoint, so a restyle deletes the layer's
+      # cache directory directly. See purge_layer_cache() in upload-api/app.py.
+      - mapproxy-cache:/mapproxy-cache
+      # Read-write, unlike mapproxy's own :ro mount of the same host path —
+      # this is what lets generate_mapproxy_config() add a layer/cache/source
+      # for every layer this service publishes.
+      - ./mapproxy:/mapproxy-config
     expose:
       - "8000"
-    networks: [webgis]
+    networks: [vibegis]
 
   # ------------------------------------------------------------------ gateway
   # Single origin for the browser -> no CORS problems in Cesium.
   gateway:
     image: ${NGINX_IMAGE}
-    container_name: webgis-gateway
+    container_name: vibegis-gateway
     restart: unless-stopped
     depends_on: [mapserver, qgis-server, frontend, upload-api]
     volumes:
@@ -162,29 +180,32 @@ services:
       - ./frontend-app/public/3dtiles:/usr/share/nginx/tiles3d:ro
     ports:
       - "${GATEWAY_PORT}:80"
-    networks: [webgis]
+    networks: [vibegis]
 
   # ------------------------------------------------------ tile cache (WMS)
-  # Caches MapServer output on disk. Adding a layer to the mapfile does NOT
-  # cache it automatically — add it to mapproxy/mapproxy.yaml too.
+  # Caches MapServer output on disk. mapproxy.yaml here is machine-written by
+  # upload-api (generate_mapproxy_config() in upload-api/app.py) — every layer
+  # it publishes gets a layer/cache/source triple automatically. A dirty diff
+  # is expected, same as uploads.map/layer_config.json; don't hand-edit while
+  # the stack is up.
   mapproxy:
     build:
       context: ./mapproxy
-    container_name: webgis-mapproxy
+    container_name: vibegis-mapproxy
     restart: unless-stopped
     depends_on: [mapserver]
     volumes:
-      - ./mapproxy/mapproxy.yaml:/mapproxy/mapproxy.yaml:ro
+      - ./mapproxy:/mapproxy/config:ro
       - mapproxy-cache:/mapproxy/cache_data
     expose:
       - "8080"
-    networks: [webgis]
+    networks: [vibegis]
 
   # ------------------------------------------------- OGC API Features (JSON)
   # Publishes PostGIS tables and functions as GeoJSON. Used by the search box.
   featureserv:
     image: ${FEATURESERV_IMAGE}
-    container_name: webgis-featureserv
+    container_name: vibegis-featureserv
     restart: unless-stopped
     depends_on:
       postgis:
@@ -196,7 +217,7 @@ services:
       PGFS_PAGING_LIMITMAX: "1000"
     expose:
       - "9000"
-    networks: [webgis]
+    networks: [vibegis]
 
   # --------------------------------------------- 3D Tiles builder (one-shot)
   # docker compose --profile tiles3d run --rm pg2b3dm
@@ -215,7 +236,7 @@ services:
       -t gis.buildings3d -c geom3d
       -a kind,name,height
       -o /app/output
-    networks: [webgis]
+    networks: [vibegis]
 
   # ----------------------------------------------- frontend (Vite dev server)
   # React + TypeScript + Resium + Mantine, with hot module reload.
@@ -223,7 +244,7 @@ services:
   frontend:
     build:
       context: ./frontend-app
-    container_name: webgis-frontend
+    container_name: vibegis-frontend
     restart: unless-stopped
     environment:
       # set to 1 if edits are not picked up (inotify can be flaky on bind mounts)
@@ -236,7 +257,7 @@ services:
     # not published: the gateway proxies to it on the internal network
     expose:
       - "5173"
-    networks: [webgis]
+    networks: [vibegis]
 
   # ------------------------------------------- terrain builder (one-shot job)
   ctb:
@@ -246,7 +267,7 @@ services:
       - ./terrain:/work
     working_dir: /work
     entrypoint: ["/bin/bash", "/work/build-terrain.sh"]
-    networks: [webgis]
+    networks: [vibegis]
 
   # ------------------------------------------------------ pgadmin (optional)
   pgadmin:
@@ -262,15 +283,20 @@ services:
       - pgadmin-data:/var/lib/pgadmin
     ports:
       - "127.0.0.1:${PGADMIN_PORT}:80"
-    networks: [webgis]
+    networks: [vibegis]
 
 volumes:
+  # Pinned to their pre-rebrand names so renaming the compose project above
+  # doesn't make Compose look for (and silently create empty) new volumes —
+  # these hold real data (uploaded layers, Dagster's home) that must survive.
   postgis-data:
+    name: webgis_postgis-data
   dagster-home:
+    name: webgis_dagster-home
   pgadmin-data:
   frontend-node-modules:
   mapproxy-cache:
 
 networks:
-  webgis:
+  vibegis:
     driver: bridge

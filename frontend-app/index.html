@@ -3,10 +3,49 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>WebGIS</title>
+    <title>VibeGIS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&display=swap" rel="stylesheet" />
     <style>
       html, body, #root { height: 100%; margin: 0; padding: 0; overflow: hidden; }
       body { background: #0f1115; }
+
+      /* Shared by LoginScreen and AuthSplash (see colorScheme.ts) */
+      @keyframes authGradientShift {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+      }
+      @keyframes authGridDrift {
+        0% { background-position: 0 0, 0 0; }
+        100% { background-position: 42px 0, 0 42px; }
+      }
+      @keyframes authPop {
+        0% { transform: scale(0.6); opacity: 0; }
+        60% { transform: scale(1.1); opacity: 1; }
+        100% { transform: scale(1); opacity: 1; }
+      }
+      @keyframes authFadeUp {
+        0% { transform: translateY(10px); opacity: 0; }
+        100% { transform: translateY(0); opacity: 1; }
+      }
+
+      /* Sideband's ETL progress ring (see Sideband.tsx's ProgressIcon) — the
+         ring itself spins continuously, on top of filling in with progress,
+         so it still reads as "actively working" the way the plain Mantine
+         Loader it replaced did. */
+      @keyframes etlRingSpin {
+        100% { transform: rotate(360deg); }
+      }
+
+      /* Cesium's own logo watermark — not the data-source credit text next
+         to it (OSM/terrain attribution), which stays since that's someone
+         else's license requirement, not Cesium's. Fine to drop the logo
+         outright: this app uses no Cesium ion-hosted assets (self-hosted
+         imagery/terrain throughout), which is the only case Cesium's terms
+         actually require keeping it on screen. */
+      .cesium-credit-logoContainer { display: none; }
     </style>
   </head>
   <body>

@@ -11,9 +11,23 @@ import type { Camera } from 'cesium'
 import { isValidHex, type Classification } from './legend'
 import type { FilterCondition, FilterLogic } from './filter'
 
-/** Per-layer config from upload-api's /layer-config — classification today, more keys to follow. */
+/**
+ * Per-layer config from upload-api's /layer-config.
+ *
+ * `classification` and `maxScaleDenom` are *compiled into the mapfile* by
+ * upload-api rather than being sent per request — that is what keeps a
+ * classified layer on the cached path (see Scene.tsx's departsFromMapfile).
+ * `styleVersion` is bumped by upload-api whenever it rewrites the block, and
+ * rides along on tile requests purely to stop the browser reusing tiles drawn
+ * with the previous styling.
+ */
 export interface LayerConfig {
   classification?: Classification
+  columnAliases?: Record<string, string>
+  title?: string
+  /** Layer is hidden above this scale denominator. Null = deliberately uncapped. */
+  maxScaleDenom?: number | null
+  styleVersion?: number
 }
 
 export const WMS_URL = '/mapserver'          // capabilities, legends, identify
@@ -21,12 +35,18 @@ export const TILE_URL = '/tiles/service'     // MapProxy: cached rendering
 export const TERRAIN_URL = '/terrain'
 export const TILES3D_URL = '/3dtiles/tileset.json'
 export const UPLOAD_URL = '/upload'          // upload-api: new layers from a file
+export const UPLOAD_RASTER_URL = '/upload-raster'  // upload-api: new raster layer from a GeoTIFF
+export const UPLOAD_RASTER_ZIP_URL = '/upload-raster-zip'  // upload-api: zip of bands -> every band published as its own layer
+export const RASTER_COMPOSITE_URL = '/raster-composite'  // upload-api: combine 3 single-band raster layers into an RGB layer
 export const TABLES_URL = '/tables'          // upload-api: existing DB tables to register
 export const REGISTER_TABLE_URL = '/register-table'
+export const GEOPROCESS_URL = '/geoprocess'  // upload-api: buffer/dissolve/intersect/join, publishes the result
 export const LAYERS_URL = '/layers'          // upload-api: DELETE /layers/<name>?drop_table=
 export const DISTINCT_VALUES_URL = '/distinct-values'  // upload-api: filter builder's value list
 export const LAYER_CONFIG_URL = '/layer-config'  // upload-api: per-layer classification/etc, GET all or PATCH one
-export const COLUMN_STATS_URL = '/column-stats'  // upload-api: min/max for the graduated classification editor
+export const COLUMN_STATS_URL = '/column-stats'  // upload-api: min/max/sum/avg/count for a numeric column
+export const COLUMN_GROUPBY_URL = '/column-groupby'  // upload-api: value+count per distinct value, capped
+export const TABLE_COUNT_URL = '/table-count'  // upload-api: plain row count for a schema.table
 
 /** MapServer GROUP that upload-api puts every layer it creates into. */
 export const MANAGED_GROUP = 'uploads'
@@ -34,7 +54,7 @@ export const MANAGED_GROUP = 'uploads'
 /**
  * Layers upload-api manages, i.e. everything with a LAYER block in
  * uploads.map — file uploads and registered database tables alike. These are
- * the ones it can delete; layers written by hand into webgis.map or
+ * the ones it can delete; layers written by hand into vibegis.map or
  * osm-layers.map have no block for it to remove and would 404.
  *
  * The primary signal travels with the layer itself: build_layer_block() writes
@@ -48,41 +68,62 @@ export const MANAGED_GROUP = 'uploads'
  * gating on /layers meant an unreachable upload-api silently removed a working
  * delete button rather than reporting a problem.
  */
-export function isManaged(layer: LayerState, managedLayers: ReadonlySet<string>): boolean {
+/**
+ * The two weaker signals `isManaged` unions in, usable from just a layer
+ * name — unlike the primary `groupName` signal, which needs the full
+ * GetCapabilities-derived LayerState. Split out because `renderUrlFor` needs
+ * exactly this and nothing more: upload-api's generate_mapproxy_config()
+ * (upload-api/app.py) gives every layer in uploads.map a cache, so "managed"
+ * and "cached" are the same set of layers.
+ */
+function isManagedByName(name: string, managedLayers: ReadonlySet<string>): boolean {
   return (
-    layer.groupName === MANAGED_GROUP ||
-    managedLayers.has(layer.name) ||
+    managedLayers.has(name) ||
     // Floor, kept deliberately. This name-prefix guess is the weakest of the
     // three and would be the wrong sole signal, but the three are unioned and
     // never subtract, so keeping it means this check can only ever grant more
     // than the version that worked before — which is the point.
-    layer.name.startsWith('upload_') ||
-    layer.name.startsWith('dbtable_')
+    name.startsWith('upload_') ||
+    name.startsWith('dbtable_') ||
+    name.startsWith('raster_')
   )
 }
 
 /**
- * Layers MapProxy has a cache configured for. Anything not listed here is
- * rendered straight from MapServer — correct, just slower. Keep in sync with
- * mapproxy/mapproxy.yaml when you add a layer you want cached.
+ * The primary signal travels with the layer itself: build_layer_block() writes
+ * GROUP "uploads" into every block it generates, and MapServer publishes that
+ * group in GetCapabilities. So if a layer is in the tree at all, MapServer read
+ * its block out of uploads.map, which is exactly the condition for upload-api
+ * being able to delete it by name.
+ *
+ * `managedLayers` (from /layers) is unioned in only as a safety net. It must
+ * never be the sole source: deleting needs nothing but the layer name, and
+ * gating on /layers meant an unreachable upload-api silently removed a working
+ * delete button rather than reporting a problem.
  */
-export const CACHED_LAYERS = new Set([
-  'osm_landcover',
-  'osm_roads',
-  'osm_buildings',
-  'adm2_overview',
-  'adm2_detail',
-  'poi',
-])
+export function isManaged(layer: LayerState, managedLayers: ReadonlySet<string>): boolean {
+  return layer.groupName === MANAGED_GROUP || isManagedByName(layer.name, managedLayers)
+}
 
-export function renderUrlFor(layer: string): string {
-  return CACHED_LAYERS.has(layer) ? TILE_URL : WMS_URL
+/**
+ * A handful of hand-authored layers (in vibegis.map/osm-layers.map, not
+ * upload-api-managed) that have their own cache in mapproxy.yaml. Empty
+ * today — osm-layers.map holds none currently — kept as an escape hatch for
+ * the next one, so it isn't rendered live just for lacking a name-based
+ * signal the way every upload-api-managed layer already has.
+ */
+const HAND_AUTHORED_CACHED_LAYERS = new Set<string>([])
+
+export function renderUrlFor(layer: string, managedLayers: ReadonlySet<string>): string {
+  return HAND_AUTHORED_CACHED_LAYERS.has(layer) || isManagedByName(layer, managedLayers)
+    ? TILE_URL
+    : WMS_URL
 }
 
 /**
  * WMS layer name -> pg_featureserv OGC API Features collection id, so the
  * attribute table knows which table backs a given layer. Mirrors each
- * LAYER's DATA source in the mapfiles (webgis.map / osm-layers.map) — keep
+ * LAYER's DATA source in the mapfiles (vibegis.map / osm-layers.map) — keep
  * in sync when a layer's source table changes. Layers with no entry here
  * (e.g. the raster "dem" layer) have no feature data and get no table button.
  */
@@ -152,7 +193,10 @@ async function loadDynamicLayerInfo(): Promise<DynamicLayerInfo> {
     const managed = new Set<string>()
     for (const l of body.layers ?? []) {
       managed.add(l.name)
-      collections[l.name] = `${l.schema}.${l.table}`
+      // A raster layer has schema: null, table: null — skip it rather than
+      // recording the literal string "null.null", which collectionFor()
+      // would then report as a real (fake) collection for the layer.
+      if (l.schema && l.table) collections[l.name] = `${l.schema}.${l.table}`
       if (l.geometry_type) geometryTypes[l.name] = l.geometry_type
     }
     return { collections, geometryTypes, managed, ok: true, error: null }
@@ -208,8 +252,32 @@ export interface LayerState {
   source: string | null
   /** Mapfile TYPE, lowercased, from the same keyword. resolveLegend needs it. */
   geomType: string | null
+  /**
+   * Band count for a raster layer (null for anything else), from the same
+   * keyword — the layer panel's RGB composite picker uses this to only
+   * offer single-band layers as a Rot/Grün/Blau choice, since a multi-band
+   * layer can't unambiguously be "one channel" of a new composite.
+   */
+  bands: number | null
+  /**
+   * Set only for a band published via /upload-raster-zip — every band from
+   * one zip upload shares the same opaque `batch` id, which LayerPanel.tsx
+   * uses to collapse them under one group named `batchTitle`. Independent
+   * of GROUP "uploads" membership (MapServer's own GROUP has no hierarchy —
+   * this is a frontend-only grouping concept riding the same keywordlist).
+   */
+  batch: string | null
+  batchTitle: string | null
   visible: boolean
   opacity: number
+  /**
+   * Opt-in per layer, point layers only. Off (default): rendered as the
+   * usual server-side WMS raster tile. On: Scene.tsx swaps in a real
+   * Cesium CustomDataSource fed from /features so Cesium's EntityCluster
+   * can group overlapping points — see PointCluster.tsx. Session-only,
+   * like visible/opacity, and reset by the same flattenLeaves() default.
+   */
+  clustered: boolean
 }
 
 // ---------------------------------------------------------------- parsing
@@ -348,8 +416,23 @@ export function flattenLeaves(
       groupName,
       source: keywordValue(node.keywords, 'source'),
       geomType: keywordValue(node.keywords, 'geomtype'),
-      visible: !DEFAULT_OFF.has(node.name),
+      bands: (() => {
+        const v = keywordValue(node.keywords, 'bands')
+        return v ? Number(v) : null
+      })(),
+      batch: keywordValue(node.keywords, 'batch'),
+      batchTitle: (() => {
+        const v = keywordValue(node.keywords, 'batch_title')
+        if (!v) return null
+        try {
+          return decodeURIComponent(v)
+        } catch {
+          return v
+        }
+      })(),
+      visible: false,
       opacity: 1,
+      clustered: false,
     }]
   }
   // the outermost node is the service itself, not a real group
@@ -357,8 +440,6 @@ export function flattenLeaves(
   const nextGroupName = node.name ? node.name : groupName
   return node.children.flatMap((c) => flattenLeaves(c, nextGroup, nextGroupName))
 }
-
-const DEFAULT_OFF = new Set(['dem'])
 
 // ------------------------------------------------------------ style overrides
 //
@@ -368,7 +449,7 @@ const DEFAULT_OFF = new Set(['dem'])
 // GetMap request straight to MapServer, bypassing the MapProxy tile cache
 // (which only ever serves the mapfile's default styling).
 
-const STYLE_OVERRIDES_KEY = 'webgis:style-overrides'
+const STYLE_OVERRIDES_KEY = 'vibegis:style-overrides'
 
 type StyleOverrides = Record<string, Record<string, string>>
 
@@ -396,7 +477,7 @@ function saveStyleOverrides(overrides: StyleOverrides) {
 // which — like SLD_BODY — MapProxy's cache can't vary per user, so a
 // filtered layer bypasses the cache the same way a recolored one does.
 
-const ATTRIBUTE_FILTERS_KEY = 'webgis:attribute-filters'
+const ATTRIBUTE_FILTERS_KEY = 'vibegis:attribute-filters'
 
 export interface LayerFilter {
   logic: FilterLogic
@@ -467,6 +548,12 @@ interface AppState {
   layerColumns: Record<string, { key: string; numeric: boolean }[]>
   setLayerColumns: (layer: string, columns: { key: string; numeric: boolean }[]) => void
 
+  // Set by PointCluster.tsx when a clustered layer's current view holds more
+  // points than fetchFeaturesInBbox's cap — LayerPanel.tsx surfaces it as a
+  // small note next to that layer's row.
+  clusterTruncated: Record<string, boolean>
+  setClusterTruncated: (layer: string, truncated: boolean) => void
+
   // schema.table for every layer upload-api knows about (see collectionFor).
   // Refreshed whenever load() runs, so it's correct after a fresh page load
   // too, not just for layers created this session.
@@ -489,9 +576,12 @@ interface AppState {
   layerConfigs: Record<string, LayerConfig>
   saveClassification: (layer: string, classification: Classification) => Promise<void>
   clearClassification: (layer: string) => Promise<void>
+  saveColumnAliases: (layer: string, aliases: Record<string, string>) => Promise<void>
+  saveTitle: (layer: string, title: string) => Promise<void>
 
   load: () => Promise<void>
   toggle: (name: string) => void
+  toggleClustered: (name: string) => void
   setOpacity: (name: string, opacity: number) => void
   reorder: (from: number, to: number) => void
   move: (name: string, delta: number) => void
@@ -565,6 +655,10 @@ export const useApp = create<AppState>((set, get) => ({
   setLayerColumns: (layer, columns) =>
     set((s) => ({ layerColumns: { ...s.layerColumns, [layer]: columns } })),
 
+  clusterTruncated: {},
+  setClusterTruncated: (layer, truncated) =>
+    set((s) => ({ clusterTruncated: { ...s.clusterTruncated, [layer]: truncated } })),
+
   dynamicCollections: {},
   dynamicGeometry: {},
   managedLayers: new Set<string>(),
@@ -587,13 +681,43 @@ export const useApp = create<AppState>((set, get) => ({
     set((s) => ({ layerConfigs: { ...s.layerConfigs, [layer]: merged } }))
   },
 
-  // There's no "unset just this key" in a PATCH-merges-keys model, so
-  // clearing deletes the layer's config entirely — fine while classification
-  // is the only key; once more keys land here this'll need to become a real
-  // partial-delete instead.
   clearClassification: async (layer) => {
-    set((s) => ({ layerConfigs: { ...s.layerConfigs, [layer]: {} } }))
-    await fetch(`${LAYER_CONFIG_URL}/${encodeURIComponent(layer)}`, { method: 'DELETE' })
+    const res = await fetch(`${LAYER_CONFIG_URL}/${encodeURIComponent(layer)}/classification`, {
+      method: 'DELETE',
+    })
+    const merged = await res.json()
+    set((s) => ({ layerConfigs: { ...s.layerConfigs, [layer]: merged } }))
+  },
+
+  saveTitle: async (layer, title) => {
+    const trimmed = title.trim()
+    const res = trimmed
+      ? await fetch(`${LAYER_CONFIG_URL}/${encodeURIComponent(layer)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: trimmed }),
+        })
+      : await fetch(`${LAYER_CONFIG_URL}/${encodeURIComponent(layer)}/title`, { method: 'DELETE' })
+    if (!res.ok) {
+      const body = await res.json().catch(() => null)
+      throw new Error(body?.detail ?? `Name speichern fehlgeschlagen: HTTP ${res.status}`)
+    }
+    const merged = await res.json()
+    set((s) => ({ layerConfigs: { ...s.layerConfigs, [layer]: merged } }))
+  },
+
+  saveColumnAliases: async (layer, aliases) => {
+    const res = await fetch(`${LAYER_CONFIG_URL}/${encodeURIComponent(layer)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ columnAliases: aliases }),
+    })
+    if (!res.ok) {
+      const body = await res.json().catch(() => null)
+      throw new Error(body?.detail ?? `Spaltennamen speichern fehlgeschlagen: HTTP ${res.status}`)
+    }
+    const merged = await res.json()
+    set((s) => ({ layerConfigs: { ...s.layerConfigs, [layer]: merged } }))
   },
 
   load: async () => {
@@ -644,6 +768,11 @@ export const useApp = create<AppState>((set, get) => ({
   toggle: (name) =>
     set((s) => ({
       layers: s.layers.map((l) => (l.name === name ? { ...l, visible: !l.visible } : l)),
+    })),
+
+  toggleClustered: (name) =>
+    set((s) => ({
+      layers: s.layers.map((l) => (l.name === name ? { ...l, clustered: !l.clustered } : l)),
     })),
 
   setOpacity: (name, opacity) =>

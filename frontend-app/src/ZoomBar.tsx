@@ -6,27 +6,38 @@
  * so the number lands in the same 0-20ish range those tiles use.
  */
 import { useEffect, useState } from 'react'
-import { Group, Paper, Progress, Text } from '@mantine/core'
-import { PerspectiveFrustum, type Scene } from 'cesium'
+import { Group, Paper, Progress, Text, useComputedColorScheme } from '@mantine/core'
+import { BoundingSphere, Cartesian3, type Scene } from 'cesium'
 import { useCesium } from 'resium'
+
+import { panelBg } from './colorScheme'
 
 const EARTH_CIRCUMFERENCE = 40075016.6856 // metres, at the equator
 const MAX_ZOOM = 21
 
+/**
+ * getPixelSize() delegates to whichever frustum is actually active, unlike
+ * the old height * tan(fovy/2) formula this replaced — that one only made
+ * sense for a PerspectiveFrustum and returned null under the Orthographic one
+ * AutoOrthographic switches to on close-in zoom, which is why the zoom
+ * readout used to go blank (and stop responding to zooming) below ~18km.
+ */
 function computeZoomLevel(scene: Scene): number | null {
   const { camera } = scene
-  const { frustum } = camera
-  if (!(frustum instanceof PerspectiveFrustum) || frustum.fovy === undefined) return null
-
+  const canvasWidth = scene.canvas.clientWidth
   const canvasHeight = scene.canvas.clientHeight
-  if (!canvasHeight) return null
+  if (!canvasWidth || !canvasHeight) return null
 
-  const metersPerPixel = (2 * camera.positionCartographic.height * Math.tan(frustum.fovy / 2)) / canvasHeight
+  const carto = camera.positionCartographic
+  const groundPoint = Cartesian3.fromRadians(carto.longitude, carto.latitude, 0)
+  const metersPerPixel = camera.getPixelSize(new BoundingSphere(groundPoint, 0), canvasWidth, canvasHeight)
+  if (!metersPerPixel || !isFinite(metersPerPixel)) return null
   return Math.log2(EARTH_CIRCUMFERENCE / (256 * metersPerPixel))
 }
 
 export default function ZoomBar() {
   const { scene } = useCesium()
+  const scheme = useComputedColorScheme('dark')
   const [zoom, setZoom] = useState<number | null>(null)
 
   useEffect(() => {
@@ -51,13 +62,13 @@ export default function ZoomBar() {
       py={8}
       style={{
         minWidth: 190,
-        backgroundColor: 'rgba(20,22,28,0.92)',
+        backgroundColor: panelBg(scheme),
         backdropFilter: 'blur(8px)',
       }}
     >
       <Group justify="space-between" gap="lg" mb={4}>
         <Text size="xs" c="dimmed">Zoom</Text>
-        <Text size="xs" fw={600} c="blue.3">{zoom === null ? '–' : clamped.toFixed(1)}</Text>
+        <Text size="xs" fw={600} c="teal.4">{zoom === null ? '–' : clamped.toFixed(1)}</Text>
       </Group>
       <Progress value={(clamped / MAX_ZOOM) * 100} size="sm" radius="xl" />
     </Paper>

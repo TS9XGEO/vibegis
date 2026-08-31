@@ -1,4 +1,4 @@
-# OpenStreetMap layers, classified. Included from webgis.map via:
+# OpenStreetMap layers, classified. Included from vibegis.map via:
 #   INCLUDE "osm-layers.map"
 #
 # Currently empty — every LAYER block was removed on request. The database
