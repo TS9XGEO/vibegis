@@ -36,6 +36,9 @@ endpoint needs a matching `location` block in `nginx/nginx.conf`** or it 404s.
 | `GET/POST /users`, `DELETE /users/{username}` | 380, 389, 401 | admin-only account management; `POST` body/response includes `premium` alongside `role` |
 | `POST /etl/run` | 442 | admin-or-`premium`-gated (`require_etl_access`): launches the `refresh_all` Dagster job, returns `{runId, status}` |
 | `GET /etl/run/{run_id}` | 503 | poll a launched run's `{status, progress}` (progress = resolved steps / planned steps) |
+| `GET/POST/DELETE /ai/settings/key` | end of file | `require_etl_access`; bring-your-own Anthropic/OpenAI API key, encrypted at rest (see ai_agent.py). Write-only: never returns the plaintext, only `{configured, provider, last4}` |
+| `POST /ai/chat` | end of file | `require_etl_access`; runs one full tool-calling turn (read-only DB tools + map-control actions + geoprocess/ETL proposals) server-side, returns `{reply, actions[], pendingAction}` |
+| `POST /ai/execute-action` | end of file | `require_etl_access`; the only path that actually runs a geoprocess/ETL action the agent proposed — takes a single-use, short-lived, user-scoped confirmation token from `/ai/chat`'s `pendingAction`, never reachable by the model's own tool loop |
 
 ## Contracts
 
@@ -202,6 +205,35 @@ endpoint needs a matching `location` block in `nginx/nginx.conf`** or it 404s.
   container-to-container traffic at all). `/etl/run` looks up the real repository
   location/name via a `workspaceOrError` query rather than hardcoding them, since
   they depend on how `workspace.yaml`'s `python_module` entry gets named internally.
+- **The AI agent's DB reads never use `engine()`.** `ai_agent.py` (imported as
+  `ai_agent`, not merged into this file — the tool loop, provider adapters, SQL
+  guardrails and key encryption are substantial and orthogonal to everything else
+  here) opens its own connection as the unprivileged `ai_readonly` Postgres role
+  (`ensure_ai_schema()`, called from this file's startup hook alongside
+  `ensure_users_table()` — same idempotent-DDL-on-a-live-database pattern that added
+  `premium`). Defense in depth on top of that role having no write grants:
+  `validate_select_sql()` forces a single `SELECT`/`WITH` statement with no mutating
+  keywords, and the query additionally runs inside a Postgres `READ ONLY`
+  transaction. **`gis.users` is explicitly revoked from `ai_readonly`** even though
+  it's granted schema-wide `SELECT` on `gis` for the real geodata tables that live
+  alongside it (`AI_UNREADABLE_TABLES` in ai_agent.py) — without that, the agent
+  (and so indirectly a premium/admin user's chat) could read every bcrypt
+  `password_hash` and every other user's encrypted AI key ciphertext. Any future
+  non-geodata table added to `raw`/`staging`/`gis`/`public` needs the same
+  exclusion.
+- **A geoprocess/ETL action the AI agent proposes never runs itself.** `/geoprocess`
+  and `/etl/run`'s bodies are `_execute_geoprocess()`/`_execute_etl_run()` — plain
+  functions the routes call, so there is exactly one implementation of each
+  regardless of entry point. The agent's `propose_geoprocess`/`propose_etl_run`
+  tools only stage a `PendingAction` (ai_agent.py) and hand the model back an
+  opaque, single-use, short-lived, user-scoped token — the model has no way to mark
+  it confirmed. `POST /ai/execute-action` is the only thing that ever calls the
+  `_execute_*` functions from a proposal, and only after a real button click in the
+  frontend sends that exact token back. Note it's gated `require_etl_access`
+  (admin-or-premium) like every other `/ai/*` route, not `require_role("admin")`
+  like the manual `/geoprocess` route — a deliberate, confirmed choice: a premium
+  (non-admin) user can trigger a geoprocess run through the AI chat's confirmation
+  flow even though they can't open the manual `Geoprocessing.tsx` modal.
 
 ## Running
 

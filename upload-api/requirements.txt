@@ -10,3 +10,6 @@ geoalchemy2
 pyyaml
 pyjwt
 bcrypt
+cryptography
+anthropic
+openai

@@ -59,6 +59,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
 
+import ai_agent
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -498,6 +500,14 @@ def dagster_graphql(query: str, variables: dict) -> dict:
 
 @app.post("/etl/run")
 def run_etl(user: dict = Depends(require_etl_access)):
+    return _execute_etl_run(user)
+
+
+def _execute_etl_run(user: dict) -> dict:
+    # Both the manual /etl/run route above and the AI agent's confirmed
+    # /ai/execute-action route (see the end of this file) call this same
+    # function — exactly one implementation of "launch the ETL job".
+    #
     # Repository location/name aren't hardcoded: they come from however
     # workspace.yaml's python_module entry gets named internally, so this
     # looks them up rather than guessing — cheap, and it also doubles as a
@@ -586,6 +596,10 @@ def create_users_table_if_missing() -> None:
         ensure_users_table()
     except Exception as e:
         print(f"[startup] could not ensure users table: {e}", flush=True)
+    try:
+        ai_agent.ensure_ai_schema(engine)
+    except Exception as e:
+        print(f"[startup] could not ensure AI agent schema/role: {e}", flush=True)
 
 
 def slugify(name: str) -> str:
@@ -1986,12 +2000,21 @@ class GeoprocessBody(BaseModel):
 
 @app.post("/geoprocess")
 def geoprocess(body: GeoprocessBody, user: dict = Depends(require_role("admin"))):
+    return _execute_geoprocess(body, user)
+
+
+def _execute_geoprocess(body: GeoprocessBody, user: dict) -> dict:
     """
     Runs one of four PostGIS operations against already-published tables and
     publishes the result as a new layer via publish_derived_table() — the
     same "an existing table becomes a layer" path /register-table uses,
     since that's exactly what a geoprocessing result is once CREATE TABLE AS
     has run.
+
+    The manual /geoprocess route above and the AI agent's confirmed
+    /ai/execute-action route (see the end of this file) both call this same
+    function, so there is exactly one implementation of "run a geoprocess
+    operation" regardless of which entry point triggered it.
     """
     schema_a = check_identifier(body.schema_a, "schema name")
     table_a = check_identifier(body.table_a, "table name")
@@ -2339,3 +2362,134 @@ def materialize_saved_styles() -> None:
         generate_mapproxy_config()
     except Exception as e:
         print(f"[startup] could not generate mapproxy.yaml: {e}", flush=True)
+
+
+# --------------------------------------------------------------------- /ai
+#
+# Bring-your-own-key AI agent: chat with read-only DB access, map-control
+# actions, and (via a confirmation token) the existing geoprocess/ETL
+# actions. See ai_agent.py for the tool loop, SQL guardrails, encrypted key
+# storage and the pending-action mechanism — this section only wires HTTP
+# routes and auth around it. Every route is gated require_etl_access
+# (admin or premium), same as /etl/*.
+
+class SetAiKeyBody(BaseModel):
+    provider: Literal["anthropic", "openai"]
+    api_key: str
+
+
+class AiChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class AiChatBody(BaseModel):
+    messages: list[AiChatMessage]
+    model: str | None = None
+    # The frontend's current layer list (name/title/source/geomType), passed
+    # in on every request so the model can address a layer by its exact WMS
+    # name with no extra round trip. This is the live, complete list —
+    # including hand-authored layers from vibegis.map/osm-layers.map, which
+    # read_layers() below only knows about for upload-api-managed ones —
+    # straight from wms.ts's own store.
+    layers: list[dict] = Field(default_factory=list)
+
+
+class AiExecuteActionBody(BaseModel):
+    token: str
+
+
+def _load_user_ai_key(user: dict) -> tuple[str, str]:
+    with engine().begin() as conn:
+        row = conn.execute(
+            text("SELECT ai_provider, ai_key_ciphertext FROM users WHERE id = :id"),
+            {"id": int(user["sub"])},
+        ).first()
+    if not row or not row.ai_key_ciphertext:
+        raise HTTPException(400, "Kein API-Schlüssel hinterlegt — bitte in den KI-Einstellungen speichern")
+    return row.ai_provider, row.ai_key_ciphertext
+
+
+@app.get("/ai/settings/key")
+def get_ai_key(user: dict = Depends(require_etl_access)):
+    # Write-only from the client's perspective: the plaintext key is never
+    # returned here or anywhere else, only a masked last4 indicator.
+    with engine().begin() as conn:
+        row = conn.execute(
+            text("SELECT ai_provider, ai_key_last4 FROM users WHERE id = :id"),
+            {"id": int(user["sub"])},
+        ).first()
+    configured = bool(row and row.ai_key_last4)
+    return {
+        "configured": configured,
+        "provider": row.ai_provider if row else None,
+        "last4": row.ai_key_last4 if row else None,
+    }
+
+
+@app.post("/ai/settings/key")
+def set_ai_key(body: SetAiKeyBody, user: dict = Depends(require_etl_access)):
+    key = body.api_key.strip()
+    if not key:
+        raise HTTPException(400, "API-Schlüssel darf nicht leer sein")
+    ciphertext = ai_agent.encrypt_key(key)
+    last4 = ai_agent.mask(key)
+    with engine().begin() as conn:
+        conn.execute(text(
+            "UPDATE users SET ai_provider = :p, ai_key_ciphertext = :c, ai_key_last4 = :l4, "
+            "ai_key_updated_at = now() WHERE id = :id"
+        ), {"p": body.provider, "c": ciphertext, "l4": last4, "id": int(user["sub"])})
+    return {"provider": body.provider, "last4": last4}
+
+
+@app.delete("/ai/settings/key")
+def delete_ai_key(user: dict = Depends(require_etl_access)):
+    with engine().begin() as conn:
+        conn.execute(text(
+            "UPDATE users SET ai_provider = NULL, ai_key_ciphertext = NULL, ai_key_last4 = NULL, "
+            "ai_key_updated_at = NULL WHERE id = :id"
+        ), {"id": int(user["sub"])})
+    return {"ok": True}
+
+
+@app.post("/ai/chat")
+def ai_chat(body: AiChatBody, user: dict = Depends(require_etl_access)):
+    provider, ciphertext = _load_user_ai_key(user)
+    api_key = ai_agent.decrypt_key(ciphertext)
+    # The only app.py internals a tool call needs — kept to this one
+    # identifier-sanitizer rather than handing ai_agent.py the full-access
+    # engine(), since every DB read tool uses its own ai_readonly_engine().
+    tool_context = {"check_identifier": check_identifier}
+    return ai_agent.run_agent_turn(
+        provider=provider,
+        api_key=api_key,
+        model=body.model,
+        messages=[m.model_dump() for m in body.messages],
+        layers_context=body.layers,
+        user=user,
+        tool_context=tool_context,
+    )
+
+
+@app.post("/ai/execute-action")
+def ai_execute_action(body: AiExecuteActionBody, user: dict = Depends(require_etl_access)):
+    """
+    The one and only path that actually runs a geoprocess/ETL action the
+    agent proposed. Not reachable by the model's own tool loop — only a real
+    button click in the frontend calls this, with a token that's opaque,
+    single-use, short-lived, and tied to the user who requested it.
+    """
+    action = ai_agent.consume_pending_action(body.token, user["sub"])
+    if action.kind == "geoprocess":
+        p = action.params
+        geoprocess_body = GeoprocessBody(
+            operation=p["operation"], title=p.get("title"),
+            schema_a=p["schema_a"], table_a=p["table_a"],
+            schema_b=p.get("schema_b"), table_b=p.get("table_b"),
+            distance=p.get("distance"), group_column=p.get("group_column"),
+            join_columns=p.get("join_columns"),
+        )
+        return _execute_geoprocess(geoprocess_body, user)
+    if action.kind == "etl_run":
+        return _execute_etl_run(user)
+    raise HTTPException(400, f"Unbekannte Aktion: {action.kind}")

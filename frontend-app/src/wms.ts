@@ -6,6 +6,7 @@
  * it appear in the UI.
  */
 import { create } from 'zustand'
+import { Rectangle } from 'cesium'
 import type { Camera } from 'cesium'
 
 import { isValidHex, type Classification } from './legend'
@@ -581,6 +582,15 @@ interface AppState {
 
   load: () => Promise<void>
   toggle: (name: string) => void
+  /**
+   * Explicit show/hide, unlike toggle() above — needed by the AI agent
+   * (aiAgent.ts), which decides "show" or "visible" from a chat message and
+   * has no current-state read of its own to flip against.
+   */
+  setLayerVisible: (name: string, visible: boolean) => void
+  /** Flies the camera to a layer's own bbox — same call shape
+   * AttributeTable.tsx's zoomToSelection() uses for a feature selection. */
+  zoomToLayer: (name: string) => void
   toggleClustered: (name: string) => void
   setOpacity: (name: string, opacity: number) => void
   reorder: (from: number, to: number) => void
@@ -769,6 +779,21 @@ export const useApp = create<AppState>((set, get) => ({
     set((s) => ({
       layers: s.layers.map((l) => (l.name === name ? { ...l, visible: !l.visible } : l)),
     })),
+
+  setLayerVisible: (name, visible) =>
+    set((s) => ({
+      layers: s.layers.map((l) => (l.name === name ? { ...l, visible } : l)),
+    })),
+
+  zoomToLayer: (name) => {
+    const { layers, camera } = get()
+    const bbox = layers.find((l) => l.name === name)?.bbox
+    if (!bbox || !camera) return
+    camera.flyTo({
+      destination: Rectangle.fromDegrees(bbox.west, bbox.south, bbox.east, bbox.north),
+      duration: 1.2,
+    })
+  },
 
   toggleClustered: (name) =>
     set((s) => ({

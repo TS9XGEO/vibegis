@@ -10,7 +10,10 @@ main.tsx        25   Mantine provider, teal/amber theme, mounts <Notifications/>
 App.tsx        223   composes Scene + Sideband + LayerPanel + DataViewBand; gates on auth
 Scene.tsx      385   the globe: imagery layers, terrain, 3D tiles; a clustered point layer
                      renders through PointCluster.tsx instead of an ImageryLayer
-wms.ts         782   ★ zustand store `useApp`, GetCapabilities parsing, all endpoint URLs
+wms.ts         839   ★ zustand store `useApp`, GetCapabilities parsing, all endpoint URLs.
+                     `setLayerVisible()`/`zoomToLayer()` are explicit (non-toggle) setters
+                     added for aiAgent.ts, which decides show/hide/zoom from a chat
+                     message rather than flipping current state
 legend.ts      451   ★ legend types and `buildSld()` — SLD generation lives here
 selection.ts   189   ★ zustand store `useSelection` — open data-view tabs, select scope,
                      layer-tagged selection, and localStorage-persisted named bookmarks
@@ -141,19 +144,40 @@ auth.ts         72  zustand store `useAuth` — session state, login/logout
 LoginScreen.tsx 119  AuthSplash.tsx 88  ConnectedGlobe.tsx 30   login + welcome/goodbye splash
 UserAdmin.tsx  166  admin-only account management (role + premium)
 
-Sideband.tsx   388  the docked icon band: panel toggles, reset-to-north, ETL trigger +
-                     progress ring, geoprocessing (admin-only), handbook, logout. Most
-                     toggles are a generic `RAIL` array driving `panels.ts`'s open/closed
-                     booleans, but a few things don't fit that simple shape and get their
-                     own bespoke button below the RAIL loop instead — CompassButton (a
-                     live action, not a toggle — see its own entry below), EtlButton (its
-                     own polling state), Geoprocessing/Handbook (modal opens), and the
-                     Auswahl-Dashboard toggle (selection.ts's `dashboardTabOpen`/
-                     `toggleDashboardTab()`, since it's a tab-strip slot now, not a
-                     `panels.ts` boolean) — kept in the RAIL's old visual position even
-                     though it's no longer a RAIL entry
+Sideband.tsx   436  the docked icon band: panel toggles, reset-to-north, ETL trigger +
+                     progress ring, geoprocessing (admin-only), AI agent toggle
+                     (admin/premium), handbook, logout. Most toggles are a generic `RAIL`
+                     array driving `panels.ts`'s open/closed booleans, but a few things
+                     don't fit that simple shape and get their own bespoke button below
+                     the RAIL loop instead — CompassButton (a live action, not a toggle —
+                     see its own entry below), EtlButton (its own polling state),
+                     AiAgentButton (same visible-but-disabled + upsell-tooltip shape as
+                     EtlButton, toggles aiAgent.ts's `open` instead of polling),
+                     Geoprocessing/Handbook (modal opens), and the Auswahl-Dashboard
+                     toggle (selection.ts's `dashboardTabOpen`/`toggleDashboardTab()`,
+                     since it's a tab-strip slot now, not a `panels.ts` boolean) — kept in
+                     the RAIL's old visual position even though it's no longer a RAIL entry
 Geoprocessing.tsx 232  buffer/dissolve/intersect/join modal, admin-only, publishes
                      the result as a new layer via /geoprocess (mirrors UploadLayer.tsx)
+aiAgent.ts     124  zustand store `useAiAgent` — the AI agent chat panel's session-only
+                     state (messages, pending confirmation, open/closed). `sendMessage()`
+                     posts to upload-api's `/ai/chat` (see upload-api/CLAUDE.md) and
+                     applies any returned map-control `actions[]` straight into wms.ts's
+                     `useApp` store (`setLayerVisible`/`zoomToLayer`/`setAttributeFilter`)
+                     — never touches Cesium/DOM directly, same "draw order is state"
+                     convention as everything else here. `confirmPendingAction()` posts
+                     to `/ai/execute-action` and reloads layers afterwards, same pattern
+                     Geoprocessing.tsx uses post-mutation
+AiAgentPanel.tsx 158  the chat window itself — a fixed-position Paper (not a Modal/Drawer)
+                     so the map stays visible and reacts live while chatting, styled with
+                     colorScheme.ts's panelBg/panelBorder like MapTools.tsx's floating
+                     panel. Renders the message list, an inline proposal card
+                     (Ausführen/Abbrechen) when aiAgent.ts's `pendingAction` is set, and a
+                     settings gear opening AiSettings.tsx
+AiSettings.tsx 142  bring-your-own-key form (provider + API key) for `/ai/settings/key`.
+                     The key is write-only end to end — this component drops its own
+                     local copy of the plaintext immediately after a successful save;
+                     upload-api never echoes it back, only `{provider, last4}`
 Handbook.tsx    15  placeholder in-app manual, opened from Sideband
 panels.ts       28  zustand store `usePanels` — open/closed state for the floating boxes
                      (`mapTools` | `hud` | `layerPanel`). The Auswahl-Dashboard used to be

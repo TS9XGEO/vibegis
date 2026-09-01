@@ -18,10 +18,13 @@ import {
   IconHelp,
   IconLayoutSidebarRightExpand,
   IconLogout,
+  IconRobot,
   IconTools,
   IconWand,
 } from '@tabler/icons-react'
 
+import AiAgentPanel from './AiAgentPanel'
+import { useAiAgent } from './aiAgent'
 import { ETL_URL, useAuth } from './auth'
 import { panelBg, panelBorder } from './colorScheme'
 import CompassButton from './CompassButton'
@@ -31,6 +34,7 @@ import { usePanels, type PanelId } from './panels'
 import { useSelection } from './selection'
 
 const PREMIUM_TOOLTIP = 'ETL Tasks (Premium-Access)\n Buy Premium Access for 15€/month'
+const AI_PREMIUM_TOOLTIP = 'KI-Assistent (Premium-Zugang)\n Premium-Zugang für 15€/Monat freischalten'
 
 type EtlState = 'idle' | 'loading' | 'success' | 'error'
 
@@ -236,6 +240,48 @@ function EtlButton() {
   )
 }
 
+/**
+ * Same visible-but-disabled + upsell-tooltip shape as EtlButton above
+ * (never `disabled`, so the Tooltip still fires on hover) rather than
+ * Geoprocessing's fully-hidden pattern — the AI panel toggle itself opens
+ * AiAgentPanel.tsx, mounted once below in the main render.
+ */
+function AiAgentButton() {
+  const user = useAuth((s) => s.user)
+  const hasAccess = user?.role === 'admin' || !!user?.premium
+  const open = useAiAgent((s) => s.open)
+  const toggle = useAiAgent((s) => s.toggle)
+
+  const tooltip = !hasAccess ? AI_PREMIUM_TOOLTIP : open ? 'KI-Assistent ausblenden' : 'KI-Assistent einblenden'
+
+  return (
+    <Tooltip
+      label={<span style={{ whiteSpace: 'pre-line' }}>{tooltip}</span>}
+      position="left"
+      withArrow
+      multiline
+    >
+      <UnstyledButton
+        aria-label="KI-Assistent"
+        onClick={() => hasAccess && toggle()}
+        style={{
+          width: 28,
+          height: 28,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          borderRadius: 6,
+          color: !hasAccess ? 'var(--mantine-color-dimmed)' : open ? 'var(--mantine-color-dimmed)' : 'var(--mantine-color-teal-5)',
+          cursor: hasAccess ? 'pointer' : 'default',
+          transition: 'color 150ms ease',
+        }}
+      >
+        <IconRobot size={16} />
+      </UnstyledButton>
+    </Tooltip>
+  )
+}
+
 export default function Sideband() {
   const open = usePanels((s) => s.open)
   const hide = usePanels((s) => s.hide)
@@ -321,6 +367,7 @@ export default function Sideband() {
       </Tooltip>
 
       <EtlButton />
+      <AiAgentButton />
 
       {isAdmin && (
         <Tooltip label="Geoverarbeitung" position="left" withArrow>
@@ -342,6 +389,7 @@ export default function Sideband() {
         </Tooltip>
       )}
       <Geoprocessing opened={geoprocessOpen} onClose={() => setGeoprocessOpen(false)} />
+      <AiAgentPanel />
 
       <Tooltip label="Handbuch" position="left" withArrow>
         <UnstyledButton
