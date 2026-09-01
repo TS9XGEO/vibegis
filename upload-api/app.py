@@ -475,15 +475,29 @@ def delete_user(username: str, user: dict = Depends(require_role("admin"))):
 
 # ---------------------------------------------------------------- /etl/run
 #
-# Triggers the Dagster job that refreshes every layer (dagster/defs/__init__.py:
-# refresh_all). upload-api and dagster are separate images/venvs — no in-process
-# import path — so this reaches Dagster's GraphQL API over the "vibegis" Docker
-# network at its service name. Dagster's own port is published as
-# 127.0.0.1:<port> on the host (host-only), but that restriction doesn't apply
-# to container-to-container traffic on the compose network at all.
+# Triggers one of the named Dagster jobs defined in dagster/defs/__init__.py
+# (ETL_JOBS below is the frontend-facing whitelist/label list — must stay in
+# sync with the job names defined there). upload-api and dagster are separate
+# images/venvs — no in-process import path — so this reaches Dagster's
+# GraphQL API over the "vibegis" Docker network at its service name.
+# Dagster's own port is published as 127.0.0.1:<port> on the host
+# (host-only), but that restriction doesn't apply to container-to-container
+# traffic on the compose network at all.
 
 DAGSTER_GRAPHQL_URL = "http://dagster:3000/graphql"
 ETL_JOB_NAME = "refresh_all"
+
+# The selectable tasks in the frontend's ETL picker (Sideband.tsx) — must
+# match the job names defined in dagster/defs/__init__.py. Kept as a
+# whitelist here rather than trusting whatever job name a request sends,
+# since it's threaded straight into a GraphQL selector.
+ETL_JOBS = [
+    {"name": "refresh_all", "label": "Vollständiger Refresh (alle Assets)"},
+    {"name": "reload_data", "label": "Vektordaten neu laden"},
+    {"name": "publish_layers", "label": "Layer neu indizieren"},
+    {"name": "add_test_column", "label": "Test-Spalte hinzufügen"},
+]
+ETL_JOB_NAMES = {j["name"] for j in ETL_JOBS}
 
 
 def dagster_graphql(query: str, variables: dict) -> dict:
@@ -498,12 +512,23 @@ def dagster_graphql(query: str, variables: dict) -> dict:
         raise HTTPException(502, f"Dagster nicht erreichbar: {e}")
 
 
+@app.get("/etl/jobs")
+def list_etl_jobs(user: dict = Depends(require_etl_access)):
+    return {"jobs": ETL_JOBS}
+
+
+class EtlRunBody(BaseModel):
+    job_name: str = ETL_JOB_NAME
+
+
 @app.post("/etl/run")
-def run_etl(user: dict = Depends(require_etl_access)):
-    return _execute_etl_run(user)
+def run_etl(body: EtlRunBody = EtlRunBody(), user: dict = Depends(require_etl_access)):
+    if body.job_name not in ETL_JOB_NAMES:
+        raise HTTPException(400, f"Unbekannter ETL-Job: {body.job_name}")
+    return _execute_etl_run(user, body.job_name)
 
 
-def _execute_etl_run(user: dict) -> dict:
+def _execute_etl_run(user: dict, job_name: str = ETL_JOB_NAME) -> dict:
     # Both the manual /etl/run route above and the AI agent's confirmed
     # /ai/execute-action route (see the end of this file) call this same
     # function — exactly one implementation of "launch the ETL job".
@@ -530,11 +555,11 @@ def _execute_etl_run(user: dict) -> dict:
         if loc.get("__typename") != "RepositoryLocation":
             continue
         for repo in loc["repositories"]:
-            if any(p["name"] == ETL_JOB_NAME for p in repo["pipelines"]):
+            if any(p["name"] == job_name for p in repo["pipelines"]):
                 location_name, repository_name = loc["name"], repo["name"]
                 break
     if not location_name:
-        raise HTTPException(502, f"Dagster-Job '{ETL_JOB_NAME}' nicht gefunden")
+        raise HTTPException(502, f"Dagster-Job '{job_name}' nicht gefunden")
 
     result = dagster_graphql(
         "mutation Launch($selector: JobOrPipelineSelector!, $runConfigData: RunConfigData) { "
@@ -555,7 +580,7 @@ def _execute_etl_run(user: dict) -> dict:
             "selector": {
                 "repositoryLocationName": location_name,
                 "repositoryName": repository_name,
-                "jobName": ETL_JOB_NAME,
+                "jobName": job_name,
             },
             "runConfigData": {},
         },

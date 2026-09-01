@@ -14,6 +14,7 @@ import booleanPointInPolygon from '@turf/boolean-point-in-polygon'
 import circle from '@turf/circle'
 import distance from '@turf/distance'
 import pointToLineDistance from '@turf/point-to-line-distance'
+import { Camera, Cartesian2, Ellipsoid, Math as CesiumMath, Scene } from 'cesium'
 
 import type { Feature } from './features'
 
@@ -110,6 +111,51 @@ export function padBbox(bbox: Bbox, fraction = 0.1, minPad = 0.001): Bbox {
     east: bbox.east + padLon,
     north: bbox.north + padLat,
   }
+}
+
+/**
+ * A tight bounding box of the ground actually on screen — ray-casts a 3x3
+ * grid of screen points (corners, edge midpoints, center) against the
+ * ellipsoid via the same `camera.pickEllipsoid()` MapTools.tsx's own click
+ * handlers already use, and bounds whichever ones hit. Deliberately not
+ * `Camera.computeViewRectangle()`: that's accurate for a near-vertical view,
+ * but at any real tilt it has to account for ground near the horizon — which
+ * can be a very long way from the camera — so it can return a rectangle many
+ * times larger than what's actually visible on screen (Legend.tsx used it
+ * for its Kartenansicht-scoped class list and, at a tilt, ended up showing
+ * classes nowhere near the current view). A screen point that misses the
+ * globe (pointed at open sky) is just skipped rather than inflating the box
+ * toward it or bailing out entirely. Null only when nothing on screen hits
+ * the ellipsoid at all.
+ */
+export function visibleGroundBbox(camera: Camera, scene: Scene): Bbox | null {
+  const width = scene.canvas.clientWidth
+  const height = scene.canvas.clientHeight
+  if (!width || !height) return null
+
+  const ellipsoid = scene.globe?.ellipsoid ?? Ellipsoid.WGS84
+  let west = Infinity
+  let south = Infinity
+  let east = -Infinity
+  let north = -Infinity
+  let hit = false
+
+  for (const fx of [0, 0.5, 1]) {
+    for (const fy of [0, 0.5, 1]) {
+      const cartesian = camera.pickEllipsoid(new Cartesian2(fx * width, fy * height), ellipsoid)
+      if (!cartesian) continue
+      const carto = ellipsoid.cartesianToCartographic(cartesian)
+      const lon = CesiumMath.toDegrees(carto.longitude)
+      const lat = CesiumMath.toDegrees(carto.latitude)
+      hit = true
+      if (lon < west) west = lon
+      if (lon > east) east = lon
+      if (lat < south) south = lat
+      if (lat > north) north = lat
+    }
+  }
+
+  return hit ? { west, south, east, north } : null
 }
 
 /** Bounding box across every feature's geometry, padded for breathing room

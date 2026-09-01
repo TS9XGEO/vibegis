@@ -136,9 +136,26 @@ def rndm_int_column(context: AssetExecutionContext) -> MaterializeResult:
 
 refresh_job = define_asset_job("refresh_all", selection="*")
 
+# A handful of separately-runnable named jobs over the same asset graph, used
+# by the frontend's ETL task picker (Sideband.tsx) — each is a distinct
+# spatial operation an admin/premium user can trigger on its own rather than
+# always re-running the full pipeline.
+reload_data_job = define_asset_job(
+    "reload_data", selection="*raw_vectors",
+    description="Verify PostGIS and reload every vector file into raw.*.",
+)
+publish_layers_job = define_asset_job(
+    "publish_layers", selection=[published_layers],
+    description="Reindex and analyse published layers, without reloading data.",
+)
+add_test_column_job = define_asset_job(
+    "add_test_column", selection=[rndm_int_column],
+    description="Add/refresh a random integer test column on every published layer.",
+)
+
 defs = Definitions(
     assets=[postgis_ready, raw_vectors, published_layers, rndm_int_column],
-    jobs=[refresh_job],
+    jobs=[refresh_job, reload_data_job, publish_layers_job, add_test_column_job],
     schedules=[
         ScheduleDefinition(
             job=refresh_job,

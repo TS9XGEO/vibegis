@@ -42,13 +42,18 @@ const HOME = {
  * now, so it can't call useCesium() itself — can still fly to a layer's extent.
  */
 function InitialView() {
-  const { camera } = useCesium()
+  const { camera, scene } = useCesium()
   const done = useRef(false)
   const setCamera = useApp((s) => s.setCamera)
+  const setScene = useApp((s) => s.setScene)
 
   useEffect(() => {
     setCamera(camera ?? null)
   }, [camera, setCamera])
+
+  useEffect(() => {
+    setScene(scene ?? null)
+  }, [scene, setScene])
 
   useEffect(() => {
     if (!camera || done.current) return

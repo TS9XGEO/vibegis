@@ -21,6 +21,7 @@ import { Math as CesiumMath, Rectangle } from 'cesium'
 import { columnLabel } from './columns'
 import { selectionRowBg } from './colorScheme'
 import { fetchFeaturePage, fetchFeaturePageInBbox, type Feature } from './features'
+import { buildCql } from './filter'
 import { FRESH_LAYER_WAIT_MESSAGE, isFreshLayerWait } from './freshLayerRetry'
 import { useSelection } from './selection'
 import { boundsOfFeatures } from './spatial'
@@ -43,6 +44,16 @@ export default function AttributeTablePanel({
   const saveColumnAliases = useApp((s) => s.saveColumnAliases)
   const savedAliases = layerConfigs[layer.name]?.columnAliases || {}
   const camera = useApp((s) => s.camera)
+
+  // Kartenansicht scopes to the layer's active attribute filter, same as
+  // SelectionDashboard.tsx's LayerOverviewCard already does for its own
+  // Kartenansicht mode (see fetchFeaturePageInBbox's cql param) — Alle
+  // Zeilen deliberately stays unfiltered, unchanged.
+  const activeFilter = useApp((s) => s.attributeFilters[layer.name])
+  const cql = useMemo(
+    () => buildCql(activeFilter?.conditions ?? [], activeFilter?.logic ?? 'and'),
+    [activeFilter],
+  )
 
   const [offset, setOffset] = useState(0)
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
@@ -90,6 +101,14 @@ export default function AttributeTablePanel({
     const remove = camera.changed.addEventListener(update)
     return () => remove()
   }, [isActive, viewMode, camera])
+
+  // Same "start over" treatment when the active filter changes while looking
+  // at Kartenansicht — an old offset can point past the end of a now-smaller
+  // filtered result, or just land on a confusing mid-list page.
+  useEffect(() => {
+    if (!isActive || viewMode !== 'viewport') return
+    setOffset(0)
+  }, [isActive, viewMode, cql])
 
   function toggleRenaming(next: boolean) {
     if (next) {
@@ -147,7 +166,7 @@ export default function AttributeTablePanel({
         east: CesiumMath.toDegrees(rect.east),
         north: CesiumMath.toDegrees(rect.north),
       }
-      request = fetchFeaturePageInBbox(collection, bbox, offset, pageSize, controller.signal, onRetry)
+      request = fetchFeaturePageInBbox(collection, bbox, offset, pageSize, controller.signal, onRetry, cql ?? undefined)
     } else {
       request = fetchFeaturePage(collection, offset, pageSize, controller.signal, onRetry)
     }
@@ -165,7 +184,7 @@ export default function AttributeTablePanel({
         setRetrying(false)
       })
     return () => controller.abort()
-  }, [isActive, collection, offset, pageSize, viewMode, viewVersion, camera])
+  }, [isActive, collection, offset, pageSize, viewMode, viewVersion, camera, cql])
 
   // pg_featureserv doesn't report a total count, so columns come from
   // whatever the current page actually returned.

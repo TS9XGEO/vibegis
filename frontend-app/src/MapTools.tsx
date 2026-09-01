@@ -30,6 +30,7 @@ import { useCesium } from 'resium'
 
 import { accentEdge, panelBg, SELECTION_COLOR } from './colorScheme'
 import { fetchFeaturesInBbox, type Feature } from './features'
+import { buildCql } from './filter'
 import { useSelection } from './selection'
 import { bboxOf, circlePolygon, featuresInShape, nearestFeatureAtPoint, padBbox } from './spatial'
 import { formatArea, formatDistance, identifyAt, useTools } from './tools'
@@ -105,6 +106,7 @@ export default function MapTools() {
   const setSelectTruncated = useSelection((s) => s.setTruncated)
   const selectPoints = useRef<Cartesian3[]>([])
   const selectEntities = useRef<any[]>([])
+  const attributeFilters = useApp((s) => s.attributeFilters)
 
   // Same derivation ToolboxControls.tsx's buttons use for their disabled
   // state — a single hook so the click handlers below and the UI never see
@@ -114,6 +116,16 @@ export default function MapTools() {
   // set changes, not on every render just because the array is a fresh
   // reference (same pattern as Scene.tsx's ImageryOrder).
   const selectCandidatesKey = selectCandidates.map((c) => `${c.name}:${c.collection}`).join(',')
+
+  // A feature the active attribute filter hides shouldn't be selectable
+  // either — the map itself already draws only the matching features (see
+  // Scene.tsx), so selecting one that doesn't match would pick something
+  // invisible and pin it back into the attribute table. Scoped per layer,
+  // same as the filter itself.
+  function cqlFor(layerName: string): string | undefined {
+    const f = attributeFilters[layerName]
+    return buildCql(f?.conditions ?? [], f?.logic ?? 'and') ?? undefined
+  }
 
   // ---- identify ----------------------------------------------------------
   useEffect(() => {
@@ -279,7 +291,7 @@ export default function MapTools() {
         // single-layer point-select, just widened to look everywhere visible.
         const perLayer = await Promise.all(
           candidates.map(async (cand) => {
-            const { features } = await fetchFeaturesInBbox(cand.collection, bbox)
+            const { features } = await fetchFeaturesInBbox(cand.collection, bbox, undefined, cqlFor(cand.name))
             const nearest = nearestFeatureAtPoint(features, lon, lat, toleranceMeters)
             return nearest ? { layer: cand.name, ...nearest } : null
           }),
@@ -368,7 +380,7 @@ export default function MapTools() {
         // whatever it already had selected is left untouched.
         const perLayer = await Promise.all(
           candidates.map(async (cand) => {
-            const { features, truncated } = await fetchFeaturesInBbox(cand.collection, bbox)
+            const { features, truncated } = await fetchFeaturesInBbox(cand.collection, bbox, undefined, cqlFor(cand.name))
             return { layer: cand.name, features: featuresInShape(features, shape), truncated }
           }),
         )
@@ -418,7 +430,7 @@ export default function MapTools() {
       const bbox = padBbox(bboxOf(polygon))
       const perLayer = await Promise.all(
         candidates.map(async (cand) => {
-          const { features, truncated } = await fetchFeaturesInBbox(cand.collection, bbox)
+          const { features, truncated } = await fetchFeaturesInBbox(cand.collection, bbox, undefined, cqlFor(cand.name))
           return { layer: cand.name, features: featuresInShape(features, polygon), truncated }
         }),
       )
@@ -458,7 +470,7 @@ export default function MapTools() {
       handler.removeInputAction(ScreenSpaceEventType.RIGHT_CLICK)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewer, scene, selectMode, selectCandidatesKey])
+  }, [viewer, scene, selectMode, selectCandidatesKey, attributeFilters])
 
   // ---- ui ----------------------------------------------------------------
   return (

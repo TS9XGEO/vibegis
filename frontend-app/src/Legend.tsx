@@ -19,11 +19,11 @@
 import { useEffect, useState } from 'react'
 import { ActionIcon, Group, Popover, ColorPicker, Stack, Text, Tooltip } from '@mantine/core'
 import { IconRefresh, IconX } from '@tabler/icons-react'
-import { Math as CesiumMath } from 'cesium'
 
 import { fetchDistinctValues } from './columns'
 import { fetchFeaturesInBbox } from './features'
 import { classSatisfiedBy, reachableClasses, resolveLegend, rgbToHex, type LegendClass, type GeometryKind } from './legend'
+import { visibleGroundBbox } from './spatial'
 import { collectionFor, useApp } from './wms'
 
 function Swatch({ geometry, color }: { geometry: GeometryKind; color: string }) {
@@ -106,6 +106,7 @@ export default function LegendSymbols({ layerName, active }: { layerName: string
   const layerFilter = useApp((s) => s.attributeFilters[layerName])
   const dynamicCollections = useApp((s) => s.dynamicCollections)
   const camera = useApp((s) => s.camera)
+  const scene = useApp((s) => s.scene)
   const legend = resolveLegend(layerName, classification, geometryType)
   const collection = collectionFor(layerName, dynamicCollections)
   const classItem = legend?.classItem ?? null
@@ -128,19 +129,19 @@ export default function LegendSymbols({ layerName, active }: { layerName: string
   }, [active, collection, classItem])
 
   // Live, viewport-scoped check — same camera.changed/percentageChanged
-  // idiom AttributeTable.tsx's "Kartenansicht" mode already uses.
+  // idiom AttributeTable.tsx's "Kartenansicht" mode already uses, but the
+  // bbox itself comes from spatial.ts's visibleGroundBbox() rather than
+  // Camera.computeViewRectangle(): at any real camera tilt (this is a 3D
+  // globe, not a flat map) that method has to account for ground near the
+  // horizon, which can be far from the camera, so it can return a rectangle
+  // many times larger than what's actually on screen — the legend ended up
+  // listing classes nowhere near the current view.
   useEffect(() => {
-    if (!active || !collection || classItem === null || !camera) return
+    if (!active || !collection || classItem === null || !camera || !scene) return
     let cancelled = false
     const update = () => {
-      const rect = camera.computeViewRectangle()
-      if (!rect) return
-      const bbox = {
-        west: CesiumMath.toDegrees(rect.west),
-        south: CesiumMath.toDegrees(rect.south),
-        east: CesiumMath.toDegrees(rect.east),
-        north: CesiumMath.toDegrees(rect.north),
-      }
+      const bbox = visibleGroundBbox(camera, scene)
+      if (!bbox) return
       fetchFeaturesInBbox(collection, bbox).then((r) => {
         if (cancelled) return
         const values = new Set<string>()
@@ -156,7 +157,7 @@ export default function LegendSymbols({ layerName, active }: { layerName: string
     camera.percentageChanged = 0.1
     const remove = camera.changed.addEventListener(update)
     return () => { cancelled = true; remove() }
-  }, [active, collection, classItem, camera])
+  }, [active, collection, classItem, camera, scene])
 
   if (!layer?.visible) {
     return (

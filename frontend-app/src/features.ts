@@ -83,7 +83,10 @@ export async function fetchFeaturePage(
 }
 
 /** One page within a bounding box — the attribute table's "Kartenansicht" mode, same offset/limit
- * pagination as fetchFeaturePage, just scoped to what's currently on screen. */
+ * pagination as fetchFeaturePage, just scoped to what's currently on screen. An optional `cql`
+ * (see filter.ts's buildCql()) combines with the bbox in the same request, same as
+ * fetchFeaturesInBbox's below — Kartenansicht respects the layer's active attribute filter instead
+ * of showing every feature on screen regardless of it. */
 export async function fetchFeaturePageInBbox(
   collection: string,
   bbox: Bbox,
@@ -91,8 +94,10 @@ export async function fetchFeaturePageInBbox(
   limit: number,
   signal?: AbortSignal,
   onRetry?: () => void,
+  cql?: string,
 ): Promise<Feature[]> {
-  const extra = `&bbox=${bbox.west},${bbox.south},${bbox.east},${bbox.north}`
+  let extra = `&bbox=${bbox.west},${bbox.south},${bbox.east},${bbox.north}`
+  if (cql) extra += `&filter=${encodeURIComponent(cql)}`
   return fetchOnePage(collection, extra, offset, limit, signal, onRetry)
 }
 
