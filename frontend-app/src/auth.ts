@@ -8,6 +8,7 @@ import { create } from 'zustand'
 
 export const USERS_URL = '/users'
 export const ETL_URL = '/etl/run'
+export const ETL_JOBS_URL = '/etl/jobs'
 
 export interface AuthUser {
   username: string

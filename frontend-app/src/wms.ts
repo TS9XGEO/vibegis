@@ -7,7 +7,7 @@
  */
 import { create } from 'zustand'
 import { Rectangle } from 'cesium'
-import type { Camera } from 'cesium'
+import type { Camera, Scene } from 'cesium'
 
 import { isValidHex, type Classification } from './legend'
 import type { FilterCondition, FilterLogic } from './filter'
@@ -535,6 +535,13 @@ interface AppState {
   camera: Camera | null
   setCamera: (camera: Camera | null) => void
 
+  // Stashed alongside camera, same reason — anything outside <Scene> that
+  // needs to ray-cast against the globe (spatial.ts's visibleGroundBbox(),
+  // used by Legend.tsx) needs the canvas size scene.canvas gives, which
+  // Camera alone doesn't expose.
+  scene: Scene | null
+  setScene: (scene: Scene | null) => void
+
   styleOverrides: StyleOverrides
   setClassColor: (layer: string, className: string, hex: string) => void
   resetClassColor: (layer: string, className: string) => void
@@ -626,6 +633,9 @@ export const useApp = create<AppState>((set, get) => ({
 
   camera: null,
   setCamera: (camera) => set({ camera }),
+
+  scene: null,
+  setScene: (scene) => set({ scene }),
 
   styleOverrides: loadStyleOverrides(),
 

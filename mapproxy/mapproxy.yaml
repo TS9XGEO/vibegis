@@ -57,14 +57,6 @@ layers:
   title: upload_lau_rg_01m_2024_3035
   sources:
   - cache_upload_lau_rg_01m_2024_3035
-- name: raster_echtfarbe
-  title: raster_echtfarbe
-  sources:
-  - cache_raster_echtfarbe
-- name: raster_fasdasda
-  title: raster_fasdasda
-  sources:
-  - cache_raster_fasdasda
 caches:
   cache_dbtable_gis_roads:
     grids:
@@ -114,26 +106,6 @@ caches:
     - src_upload_lau_rg_01m_2024_3035
     format: image/png
     cache_dir: /mapproxy/cache_data/upload_lau_rg_01m_2024_3035
-    cache:
-      type: file
-  cache_raster_echtfarbe:
-    grids:
-    - webmercator
-    - geodetic
-    sources:
-    - src_raster_echtfarbe
-    format: image/png
-    cache_dir: /mapproxy/cache_data/raster_echtfarbe
-    cache:
-      type: file
-  cache_raster_fasdasda:
-    grids:
-    - webmercator
-    - geodetic
-    sources:
-    - src_raster_fasdasda
-    format: image/png
-    cache_dir: /mapproxy/cache_data/raster_fasdasda
     cache:
       type: file
 sources:
@@ -186,28 +158,6 @@ sources:
     req:
       url: http://mapserver/
       layers: upload_lau_rg_01m_2024_3035
-      transparent: true
-    supported_srs:
-    - EPSG:4326
-    - EPSG:3857
-    wms_opts:
-      version: 1.3.0
-  src_raster_echtfarbe:
-    type: wms
-    req:
-      url: http://mapserver/
-      layers: raster_echtfarbe
-      transparent: true
-    supported_srs:
-    - EPSG:4326
-    - EPSG:3857
-    wms_opts:
-      version: 1.3.0
-  src_raster_fasdasda:
-    type: wms
-    req:
-      url: http://mapserver/
-      layers: raster_fasdasda
       transparent: true
     supported_srs:
     - EPSG:4326

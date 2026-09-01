@@ -34,7 +34,8 @@ endpoint needs a matching `location` block in `nginx/nginx.conf`** or it 404s.
 | `GET /auth/verify` | 363 | 200/401 only — nginx's `auth_request` target, not for direct use |
 | `GET /auth/me` | 370 | current user's `{username, role, premium}` |
 | `GET/POST /users`, `DELETE /users/{username}` | 380, 389, 401 | admin-only account management; `POST` body/response includes `premium` alongside `role` |
-| `POST /etl/run` | 442 | admin-or-`premium`-gated (`require_etl_access`): launches the `refresh_all` Dagster job, returns `{runId, status}` |
+| `GET /etl/jobs` | 522 | admin-or-`premium`-gated: the selectable ETL tasks (`ETL_JOBS`), `{name, label}` each — must stay in sync with the jobs defined in `dagster/defs/__init__.py` |
+| `POST /etl/run` | 530 | admin-or-`premium`-gated (`require_etl_access`): launches a named Dagster job (body `{job_name}`, defaults to `refresh_all`, validated against `ETL_JOBS`), returns `{runId, status}` |
 | `GET /etl/run/{run_id}` | 503 | poll a launched run's `{status, progress}` (progress = resolved steps / planned steps) |
 | `GET/POST/DELETE /ai/settings/key` | end of file | `require_etl_access`; bring-your-own Anthropic/OpenAI API key, encrypted at rest (see ai_agent.py). Write-only: never returns the plaintext, only `{configured, provider, last4}` |
 | `POST /ai/chat` | end of file | `require_etl_access`; runs one full tool-calling turn (read-only DB tools + map-control actions + geoprocess/ETL proposals) server-side, returns `{reply, actions[], pendingAction}` |

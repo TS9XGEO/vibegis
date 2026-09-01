@@ -6,7 +6,8 @@
  */
 import { useEffect, useState } from 'react'
 import {
-  ActionIcon, Alert, Autocomplete, Button, Group, NumberInput, Popover, SegmentedControl, Select, Stack, Text, Tooltip,
+  ActionIcon, Alert, Autocomplete, Button, Group, NumberInput, Popover, SegmentedControl, Select, Stack, Switch,
+  Text, Tooltip,
 } from '@mantine/core'
 import { IconFilter, IconX } from '@tabler/icons-react'
 
@@ -15,6 +16,7 @@ import { fetchFeaturesWithFilter } from './features'
 import { FRESH_LAYER_WAIT_MESSAGE, isFreshLayerWait } from './freshLayerRetry'
 import { buildCql, NUMERIC_OPS, OP_LABELS, TEXT_OPS, type FilterCondition, type FilterLogic, type FilterOp } from './filter'
 import { useSelection } from './selection'
+import SqlFilterModal from './SqlFilterModal'
 import { useApp } from './wms'
 
 function ConditionRow({
@@ -110,6 +112,7 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
   const [draft, setDraft] = useState<FilterCondition[]>(active?.conditions ?? [])
   const [logic, setLogic] = useState<FilterLogic>(active?.logic ?? 'and')
   const [selecting, setSelecting] = useState(false)
+  const [sqlModalOpen, setSqlModalOpen] = useState(false)
   const replaceSelectionForLayers = useSelection((s) => s.replaceSelectionForLayers)
 
   useEffect(() => {
@@ -188,97 +191,133 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
   }
 
   return (
-    <Popover opened={opened} onChange={setOpened} position="bottom-end" withArrow shadow="md">
-      <Popover.Target>
-        <Tooltip label="Filtern" withArrow>
-          <ActionIcon
-            variant="subtle"
-            color={hasActive ? 'teal' : 'gray'}
-            size="sm"
-            aria-label="Layer filtern"
-            onClick={() => setOpened((o) => !o)}
-          >
-            <IconFilter size={13} />
-          </ActionIcon>
-        </Tooltip>
-      </Popover.Target>
-      {/* Mantine's Popover.Dropdown clips overflow (for its open/close
-          animation); the condition Selects below render inline rather than
-          in a portal (see ConditionRow) so their own dropdowns don't count
-          as an "outside click" that closes this popover — which means they'd
-          otherwise get clipped away invisibly right here. */}
-      <Popover.Dropdown miw={340} style={{ overflow: 'visible' }}>
-        <Stack gap={6}>
-          <Group justify="space-between" wrap="nowrap">
-            <Text size="xs" fw={600}>Filter</Text>
-            <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Schliessen" onClick={() => setOpened(false)}>
-              <IconX size={14} />
+    <>
+      <Popover opened={opened} onChange={setOpened} position="bottom-end" withArrow shadow="md">
+        <Popover.Target>
+          <Tooltip label="Filtern" withArrow>
+            <ActionIcon
+              variant="subtle"
+              color={hasActive ? 'teal' : 'gray'}
+              size="sm"
+              aria-label="Layer filtern"
+              onClick={() => setOpened((o) => !o)}
+            >
+              <IconFilter size={13} />
             </ActionIcon>
-          </Group>
-
-          {error && <Text size="xs" c={isFreshLayerWait(error) ? 'yellow' : 'red'}>{error}</Text>}
-          {!error && columns.length === 0 && <Text size="xs" c="dimmed">lade Spalten…</Text>}
-
-          {/* One control, because there is one `logic` for the whole filter.
-              It used to be rendered between every pair of conditions, which
-              implied a per-pair setting that does not exist: with three
-              conditions you got two controls bound to the same state, so
-              switching one silently switched the other. Hidden below two
-              conditions because there is then nothing to combine — and
-              buildConditionsXml correctly emits no And/Or wrapper for one. */}
-          {draft.length > 1 && (
-            <Group gap={8} align="center" justify="center" my={2} wrap="nowrap">
-              <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
-                Bedingungen verknüpfen:
-              </Text>
-              <SegmentedControl
-                size="xs"
-                value={logic}
-                onChange={(v) => setLogic(v as FilterLogic)}
-                data={[
-                  { label: 'UND', value: 'and' },
-                  { label: 'ODER', value: 'or' },
-                ]}
-              />
+          </Tooltip>
+        </Popover.Target>
+        {/* Mantine's Popover.Dropdown clips overflow (for its open/close
+            animation); the condition Selects below render inline rather than
+            in a portal (see ConditionRow) so their own dropdowns don't count
+            as an "outside click" that closes this popover — which means they'd
+            otherwise get clipped away invisibly right here. */}
+        <Popover.Dropdown miw={340} style={{ overflow: 'visible' }}>
+          <Stack gap={6}>
+            <Group justify="space-between" wrap="nowrap">
+              <Text size="xs" fw={600}>Filter</Text>
+              <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Schliessen" onClick={() => setOpened(false)}>
+                <IconX size={14} />
+              </ActionIcon>
             </Group>
-          )}
 
-          {draft.map((c, i) => (
-            <ConditionRow
-              key={i}
-              condition={c}
-              columns={columns}
-              aliases={aliases}
-              schema={schema}
-              table={table}
-              onChange={(next) => setDraft((d) => d.map((x, j) => (j === i ? next : x)))}
-              onRemove={() => setDraft((d) => d.filter((_, j) => j !== i))}
+            <Switch
+              size="xs"
+              label="SQL-Modus"
+              checked={sqlModalOpen}
+              onChange={(e) => {
+                if (e.currentTarget.checked) {
+                  setOpened(false)
+                  setSqlModalOpen(true)
+                }
+              }}
             />
-          ))}
 
-          {contradictory && (
-            <Alert color="yellow" variant="light" p="xs">
-              <Text size="xs">
-                Mit UND können diese Bedingungen nie gleichzeitig zutreffen — eine Spalte
-                kann nur einen Wert haben. Der Layer bleibt leer. Für „einer der Werte"
-                ODER wählen.
-              </Text>
-            </Alert>
-          )}
+            {error && <Text size="xs" c={isFreshLayerWait(error) ? 'yellow' : 'red'}>{error}</Text>}
+            {!error && columns.length === 0 && <Text size="xs" c="dimmed">lade Spalten…</Text>}
 
-          <Button size="xs" variant="subtle" disabled={columns.length === 0} onClick={addCondition}>
-            + Bedingung
-          </Button>
+            {/* One control, because there is one `logic` for the whole filter.
+                It used to be rendered between every pair of conditions, which
+                implied a per-pair setting that does not exist: with three
+                conditions you got two controls bound to the same state, so
+                switching one silently switched the other. Hidden below two
+                conditions because there is then nothing to combine — and
+                buildConditionsXml correctly emits no And/Or wrapper for one. */}
+            {draft.length > 1 && (
+              <Group gap={8} align="center" justify="center" my={2} wrap="nowrap">
+                <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
+                  Bedingungen verknüpfen:
+                </Text>
+                <SegmentedControl
+                  size="xs"
+                  value={logic}
+                  onChange={(v) => setLogic(v as FilterLogic)}
+                  data={[
+                    { label: 'UND', value: 'and' },
+                    { label: 'ODER', value: 'or' },
+                  ]}
+                />
+              </Group>
+            )}
 
-          <Group justify="space-between" mt={4}>
-            <Button size="xs" variant="default" onClick={clear}>Zurücksetzen</Button>
-            <Group gap={6}>
-              <Button size="xs" variant="light" loading={selecting} disabled={!draftUsable} onClick={selectMatches}>Auswählen</Button>
-              <Button size="xs" onClick={apply}>Anwenden</Button>
+            {draft.map((c, i) => (
+              <ConditionRow
+                key={i}
+                condition={c}
+                columns={columns}
+                aliases={aliases}
+                schema={schema}
+                table={table}
+                onChange={(next) => setDraft((d) => d.map((x, j) => (j === i ? next : x)))}
+                onRemove={() => setDraft((d) => d.filter((_, j) => j !== i))}
+              />
+            ))}
+
+            {contradictory && (
+              <Alert color="yellow" variant="light" p="xs">
+                <Text size="xs">
+                  Mit UND können diese Bedingungen nie gleichzeitig zutreffen — eine Spalte
+                  kann nur einen Wert haben. Der Layer bleibt leer. Für „einer der Werte"
+                  ODER wählen.
+                </Text>
+              </Alert>
+            )}
+
+            <Button size="xs" variant="subtle" disabled={columns.length === 0} onClick={addCondition}>
+              + Bedingung
+            </Button>
+
+            <Group justify="space-between" mt={4}>
+              <Button size="xs" variant="default" onClick={clear}>Zurücksetzen</Button>
+              <Group gap={6}>
+                <Button size="xs" variant="light" loading={selecting} disabled={!draftUsable} onClick={selectMatches}>Auswählen</Button>
+                <Button size="xs" onClick={apply}>Anwenden</Button>
+              </Group>
             </Group>
-          </Group>
-        </Stack>
-      </Popover.Dropdown>
-    </Popover>
+          </Stack>
+        </Popover.Dropdown>
+      </Popover>
+
+      <SqlFilterModal
+        opened={sqlModalOpen}
+        onClose={() => setSqlModalOpen(false)}
+        columns={columns}
+        aliases={aliases}
+        schema={schema}
+        table={table}
+        initialLogic={logic}
+        initialConditions={draft}
+        onApply={(l, c) => {
+          // Commits straight to the store, exactly like the visual builder's
+          // own "Anwenden" (apply() above) — loading the result into local
+          // draft/logic instead and reopening the popover doesn't work: the
+          // popover's own reset effect re-seeds draft/logic from the store's
+          // (still-unchanged) active filter the moment `opened` flips back
+          // to true, silently discarding whatever was just parsed.
+          setAttributeFilter(layerName, { logic: l, conditions: c })
+          setSqlModalOpen(false)
+          setOpened(true)
+        }}
+      />
+    </>
   )
 }

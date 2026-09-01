@@ -798,7 +798,185 @@
     "maxScaleDenom": 50000
   },
   "upload_lau_eu": {},
-  "upload_lau_rg_01m_2024_3035": {},
+  "upload_lau_rg_01m_2024_3035": {
+    "styleVersion": 4,
+    "classification": {
+      "mode": "categorized",
+      "column": "CNTR_CODE",
+      "classes": [
+        {
+          "value": "AL",
+          "label": "AL",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "AT",
+          "label": "AT",
+          "color": "#3d9970"
+        },
+        {
+          "value": "BE",
+          "label": "BE",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "BG",
+          "label": "BG",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "CH",
+          "label": "CH",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "CY",
+          "label": "CY",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "CZ",
+          "label": "CZ",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "DE",
+          "label": "DE",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "DK",
+          "label": "DK",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "EE",
+          "label": "EE",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "EL",
+          "label": "EL",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "ES",
+          "label": "ES",
+          "color": "#3d9970"
+        },
+        {
+          "value": "FI",
+          "label": "FI",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "FR",
+          "label": "FR",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "HR",
+          "label": "HR",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "HU",
+          "label": "HU",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "IE",
+          "label": "IE",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "IS",
+          "label": "IS",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "IT",
+          "label": "IT",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "LI",
+          "label": "LI",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "LT",
+          "label": "LT",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "LU",
+          "label": "LU",
+          "color": "#3d9970"
+        },
+        {
+          "value": "LV",
+          "label": "LV",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "MK",
+          "label": "MK",
+          "color": "#e0b03d"
+        },
+        {
+          "value": "MT",
+          "label": "MT",
+          "color": "#a06cd5"
+        },
+        {
+          "value": "NL",
+          "label": "NL",
+          "color": "#4fb0c6"
+        },
+        {
+          "value": "NO",
+          "label": "NO",
+          "color": "#d65f8a"
+        },
+        {
+          "value": "PL",
+          "label": "PL",
+          "color": "#7a9e3d"
+        },
+        {
+          "value": "PT",
+          "label": "PT",
+          "color": "#c67d4f"
+        },
+        {
+          "value": "RO",
+          "label": "RO",
+          "color": "#6a6ed6"
+        },
+        {
+          "value": "RS",
+          "label": "RS",
+          "color": "#e07a5f"
+        },
+        {
+          "value": "SE",
+          "label": "SE",
+          "color": "#3d9970"
+        },
+        {
+          "value": "SI",
+          "label": "SI",
+          "color": "#5b8dd6"
+        },
+        {
+          "value": "SK",
+          "label": "SK",
+          "color": "#e0b03d"
+        }
+      ]
+    }
+  },
   "upload_sadfasdasdsdf": {},
   "upload_testy_mc_testface": {},
   "upload_testy_mctestface": {},
