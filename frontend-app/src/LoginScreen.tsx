@@ -3,18 +3,22 @@ import {
   Alert, Box, Button, Group, Paper, PasswordInput, Stack, Text, TextInput, Title, useComputedColorScheme,
 } from '@mantine/core'
 import { IconAlertCircle } from '@tabler/icons-react'
+import { useTranslation } from 'react-i18next'
 
 import { useAuth } from './auth'
 import ConnectedGlobe from './ConnectedGlobe'
 import { AUTH_FONT, authAccent, authBorder, authGlow, authGradient, authGradientColors, authGrid, authTextGlow } from './colorScheme'
 
-export default function LoginScreen() {
+export default function LoginScreen({ onShowRegister }: { onShowRegister: () => void }) {
+  const { t } = useTranslation()
   const login = useAuth((s) => s.login)
+  const continueAsGuest = useAuth((s) => s.continueAsGuest)
   const error = useAuth((s) => s.error)
   const scheme = useComputedColorScheme('dark')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
+  const [guestLoading, setGuestLoading] = useState(false)
 
   async function submit() {
     if (!username || !password) return
@@ -23,6 +27,15 @@ export default function LoginScreen() {
       await login(username, password)
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function submitGuest() {
+    setGuestLoading(true)
+    try {
+      await continueAsGuest()
+    } finally {
+      setGuestLoading(false)
     }
   }
 
@@ -81,19 +94,19 @@ export default function LoginScreen() {
               </Title>
             </Group>
             <Text size="xs" c="dimmed" style={{ fontFamily: AUTH_FONT, letterSpacing: 2 }}>
-              ANMELDUNG
+              {t('login.heading')}
             </Text>
           </Stack>
           <Stack gap="sm">
             <TextInput
-              label="Benutzername"
+              label={t('login.username')}
               value={username}
               onChange={(e) => setUsername(e.currentTarget.value)}
               onKeyDown={(e) => e.key === 'Enter' && submit()}
               autoFocus
             />
             <PasswordInput
-              label="Passwort"
+              label={t('login.password')}
               value={password}
               onChange={(e) => setPassword(e.currentTarget.value)}
               onKeyDown={(e) => e.key === 'Enter' && submit()}
@@ -109,8 +122,22 @@ export default function LoginScreen() {
               onClick={submit}
               fullWidth
             >
-              Anmelden
+              {t('login.submit')}
             </Button>
+            <Button variant="subtle" color="gray" loading={guestLoading} onClick={submitGuest} fullWidth>
+              {t('login.guestButton')}
+            </Button>
+            <Group gap={4} justify="center">
+              <Text size="xs" c="dimmed">{t('login.registerPrompt')}</Text>
+              <Text
+                size="xs"
+                c={authAccent(scheme)}
+                style={{ cursor: 'pointer' }}
+                onClick={onShowRegister}
+              >
+                {t('login.registerLink')}
+              </Text>
+            </Group>
           </Stack>
         </Paper>
       </Box>

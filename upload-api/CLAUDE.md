@@ -1,9 +1,10 @@
 # upload-api
 
-FastAPI service (single file, `app.py`, ~2100 lines) that turns an uploaded vector
-file, a GeoTIFF (or a zip of several single-band rasters), or an existing PostGIS
-table into a published MapServer layer, and also owns accounts/auth and the
-ETL-trigger bridge to Dagster. Built on the GDAL image so GeoPandas/OGR can read
+FastAPI service (single file, `app.py`, ~3400 lines) that turns an uploaded vector
+file, a GeoTIFF (or a zip of several single-band rasters), a LAS/LAZ point cloud,
+or an existing PostGIS table into a published layer, and also owns accounts/auth
+and the ETL-trigger bridge to Dagster. Everything but the point cloud becomes a
+MapServer layer; a point cloud becomes Cesium 3D Tiles instead (see below). Built on the GDAL image so GeoPandas/OGR can read
 shapefiles, GeoPackages, GeoJSON, KML and GML — and so the GDAL CLI tools
 (`gdalinfo`, `gdalwarp`, `gdaladdo`, `gdalbuildvrt`, `gdal_translate`) are available
 for `/upload-raster` and `/upload-raster-zip`, shelled out via `subprocess` rather
@@ -12,31 +13,60 @@ than a Python binding.
 Reached through the gateway — nginx proxies each route individually, so **a new
 endpoint needs a matching `location` block in `nginx/nginx.conf`** or it 404s.
 
+**Three Postgres schemas, not one.** `dwh` (all geodata — uploaded/registered/
+geoprocessed tables, what Dagster's `raw_vectors` asset writes into), `configdb`
+(`layer_config`, `pages` — any number of admin-managed content pages, see the `/cms`
+endpoints below), `userdb` (just `users`). See the root CLAUDE.md and
+`bin/migrate-schemas.sql`. `ai_agent.py`'s `AI_READABLE_SCHEMAS` deliberately omits
+`userdb`.
+
+**Structured JSON logging to stdout**, shipped to Loki by the `promtail` service and
+viewable in Grafana (`http://127.0.0.1:3001`, 127.0.0.1-only like Dagster/PostGIS —
+see `docker-compose.yml`). Every request gets an id (`request_id_ctx`, near the top of
+`app.py`) — read from an incoming `X-Request-Id` header if the gateway already set one
+(nginx generates one per request, see `nginx.conf`'s `log_format`), otherwise
+generated fresh — echoed back on the response and attached to every log line emitted
+while handling that request, so one request's logs can be found together even though
+uvicorn handles requests concurrently.
+
 ## Endpoints
 
 | Route | Line | Does |
 |---|---|---|
-| `POST /upload` | 1010 | file → table in schema `raw` → `LAYER` block appended. Accepts either a `file`, or `upload_token` + `layer` to finish a pending multi-layer choice (see below) |
+| `POST /upload` | 1254 | file → table in schema `dwh` → `LAYER` block appended. Accepts either a `file`, or `upload_token` + `layer` to finish a pending multi-layer choice (see below) |
 | `POST /upload-raster` | admin-only | GeoTIFF → reprojected/tiled/overviewed via GDAL CLI → `TYPE RASTER` `LAYER` block, no PostGIS table involved |
 | `POST /upload-raster-zip` | admin-only | zip of single-band rasters (e.g. a Sentinel-2 product) → every readable band published as its own layer immediately, no picker; `title` names the whole batch (falls back to the zip's filename), not any one band. Each band's own title/layer-name comes from `band_label()` — GDAL's band description or a handful of common band-identifying metadata keys (e.g. `BANDNAME`) — falling back to that band file's own name when GDAL reports neither; `/upload-raster` uses the same `band_label()` fallback ahead of the filename when no `title` is given |
 | `POST /raster-composite` | admin-only | combine three already-published single-band raster layers into one RGB layer — a VRT, not a new reprojection pass |
-| `POST /register-table` | 1251 | publish a table that already exists |
+| `POST /upload-pointcloud` | pro+ | LAS/LAZ → Cesium 3D Tiles via py3dtiles → a row in `configdb.point_clouds`. No PostGIS table *and* no MapServer layer — see the point-cloud contract below |
+| `POST /register-table` | 2052 | publish a table that already exists |
 | `POST /geoprocess` | admin-only | buffer/dissolve/intersect/join against published layers, publishes the result as a new layer via `publish_derived_table()` |
-| `GET /tables` | 1224 | tables available to register |
-| `GET /layers`, `DELETE /layers/{name}?drop_table=` | 1285, 1290 | list / unpublish — for a raster layer, `drop_table=true` deletes the underlying `.tif` instead of dropping a table |
-| `GET /distinct-values` | 1736 | value list for the filter and categorized editor (caps at 500) |
-| `GET /column-stats` | 1763 | min/max/sum/avg/count of a numeric column — min/max seed the graduated editor, the rest back the dashboard's "everything selected" overview |
-| `GET /column-groupby` | 1795 | value+count per distinct value, capped like `/distinct-values` plus an exact `totalCount` — the dashboard overview's server-side group-by, no in-memory features to aggregate over client-side there |
-| `GET /table-count` | 1829 | plain row count for a schema.table — the overview's headline number per layer |
-| `GET|PATCH|DELETE /layer-config[/{name}]` | 1404-1452 | per-layer classification state |
-| `GET /health` | 1471 | |
-| `POST /login`, `POST /logout` | 341, 357 | issue/clear the `vibegis_session` cookie |
-| `GET /auth/verify` | 363 | 200/401 only — nginx's `auth_request` target, not for direct use |
-| `GET /auth/me` | 370 | current user's `{username, role, premium}` |
-| `GET/POST /users`, `DELETE /users/{username}` | 380, 389, 401 | admin-only account management; `POST` body/response includes `premium` alongside `role` |
-| `GET /etl/jobs` | 522 | admin-or-`premium`-gated: the selectable ETL tasks (`ETL_JOBS`), `{name, label}` each — must stay in sync with the jobs defined in `dagster/defs/__init__.py` |
-| `POST /etl/run` | 530 | admin-or-`premium`-gated (`require_etl_access`): launches a named Dagster job (body `{job_name}`, defaults to `refresh_all`, validated against `ETL_JOBS`), returns `{runId, status}` |
-| `GET /etl/run/{run_id}` | 503 | poll a launched run's `{status, progress}` (progress = resolved steps / planned steps) |
+| `GET /tables` | 2025 | tables available to register |
+| `GET /layers`, `DELETE /layers/{name}?drop_table=` | 2201 | list / unpublish — for a raster layer, `drop_table=true` deletes the underlying `.tif` instead of dropping a table |
+| `GET /distinct-values` | 1885 | value list for the filter and categorized editor (caps at 500) |
+| `GET /column-stats` | 1912 | min/max/sum/avg/count of a numeric column — min/max seed the graduated editor, the rest back the dashboard's "everything selected" overview |
+| `GET /column-groupby` | 1954 | value+count per distinct value, capped like `/distinct-values` plus an exact `totalCount` — the dashboard overview's server-side group-by, no in-memory features to aggregate over client-side there |
+| `GET /table-count` | 2002 | plain row count for a schema.table — the overview's headline number per layer |
+| `GET|PATCH|DELETE /layer-config[/{name}]` | 2331 | per-layer classification state — now backed by `configdb.layer_config` (see below), not a JSON file, but the external contract is unchanged |
+| `GET /cms` | 2434 | any logged-in user; every page's `{slug, title_de, title_en, updated_at}` (no body — kept light for the picker list in `Pages.tsx`) |
+| `POST /cms` | 2447 | admin-only; create a new page — `slug` validated by `check_slug()` (lowercase/digits/`_`/`-`, ≤64 chars), 409 if it already exists |
+| `GET /cms/{slug}` | 2470 | any logged-in user; one page's full content from `configdb.pages` |
+| `PATCH /cms/{slug}` | 2485 | admin-only; `Pages.tsx`'s editor writes here |
+| `DELETE /cms/{slug}` | 2505 | admin-only |
+| `GET /qgis-process/algorithms` | end of file | premium; curated catalog, `?advanced=true` appends the full introspected one |
+| `GET /qgis-process/algorithms/{id}` | end of file | premium; one algorithm's parameters, curated or translated from `qgis_process help --json` into the same shape |
+| `POST /qgis-process/run` | end of file | premium; validates, inserts a `configdb.qgis_jobs` row, starts a watcher thread, returns `{jobId, status}` |
+| `GET /qgis-process/run/{job_id}` | end of file | premium; poll one job — 404s someone else's unless `is_privileged_role()` |
+| `GET /qgis-process/health` | end of file | premium; the worker's `/healthz` (providers, algorithm count, plugin state) plus the shared-volume check |
+| `GET /qgis-print/templates` | end of file | premium; the server-owned page templates |
+| `POST /qgis-print` | end of file | premium; builds a project via the worker, proxies QGIS Server's GetPrint, streams back `application/pdf` |
+| `GET /health` | 2446 | |
+| `POST /login`, `POST /logout` | 447 | issue/clear the `vibegis_session` cookie |
+| `GET /auth/verify` | 469 | 200/401 only — nginx's `auth_request` target, not for direct use |
+| `GET /auth/me` | 476 | current user's `{username, role, premium}` |
+| `GET/POST /users`, `DELETE /users/{username}` | 486 | admin-only account management; `POST` body/response includes `premium` alongside `role` |
+| `GET /etl/jobs` | 562 | admin-or-`premium`-gated: the selectable ETL tasks (`ETL_JOBS`), `{name, label}` each — must stay in sync with the jobs defined in `dagster/defs/__init__.py` |
+| `POST /etl/run` | 571 | admin-or-`premium`-gated (`require_etl_access`): launches a named Dagster job (body `{job_name}`, defaults to `refresh_all`, validated against `ETL_JOBS`), returns `{runId, status}` |
+| `GET /etl/run/{run_id}` | 642 | poll a launched run's `{status, progress}` (progress = resolved steps / planned steps) |
 | `GET/POST/DELETE /ai/settings/key` | end of file | `require_etl_access`; bring-your-own Anthropic/OpenAI API key, encrypted at rest (see ai_agent.py). Write-only: never returns the plaintext, only `{configured, provider, last4}` |
 | `POST /ai/chat` | end of file | `require_etl_access`; runs one full tool-calling turn (read-only DB tools + map-control actions + geoprocess/ETL proposals) server-side, returns `{reply, actions[], pendingAction}` |
 | `POST /ai/execute-action` | end of file | `require_etl_access`; the only path that actually runs a geoprocess/ETL action the agent proposed — takes a single-use, short-lived, user-scoped confirmation token from `/ai/chat`'s `pendingAction`, never reachable by the model's own tool loop |
@@ -72,6 +102,19 @@ endpoint needs a matching `location` block in `nginx/nginx.conf`** or it 404s.
 - **`check_identifier()` (line 539) is the SQL-identifier guard.** Every schema, table
   and column name coming from a request goes through it before touching a query.
   Reuse it; do not hand-roll a second check.
+- **A polygon layer's border is one per-layer value, not a per-class one.**
+  `layer_config`'s `outlineWidth` feeds `polygon_outline()`, which every polygon
+  `STYLE` goes through — the unclassified default (`default_style()`) and each
+  class of a classification (`classified_style()`) alike. `0` emits no
+  `OUTLINECOLOR` at all rather than `WIDTH 0`, because MapServer still draws a
+  hairline for the latter. It is in `STYLE_KEYS`, so a write rebuilds the LAYER
+  block, purges that layer's tiles and bumps `styleVersion` like any other
+  styling change. Range is validated on the Pydantic model (`0..10`), so a bad
+  value is a 422 rather than a corrupt mapfile.
+  The outline colour is deliberately *not* configurable: it is derived from each
+  class's own fill via `darken_rgb()`, which keeps a categorized layer readable
+  without a second colour picker. `legend.ts`'s `darkenHex()` must stay identical
+  — see the root CLAUDE.md.
 - **`mapfile_escape()` (line 545) for anything user-supplied that lands in a mapfile**
   string — titles especially.
 - **Every generated block carries `ows_keywordlist` with `source:<schema>.<table>`**
@@ -167,6 +210,54 @@ endpoint needs a matching `location` block in `nginx/nginx.conf`** or it 404s.
   no-ops for `geometry_type == "RASTER"` for the same reason `build_layer_block()`
   can't be called with `schema=None` — there's no CLASS-based styling to seed for
   a continuous/RGB raster.
+- **A point cloud is the one published layer with no `LAYER` block at all.**
+  MapServer cannot render 3D Tiles, so `/upload-pointcloud` registers it in
+  `configdb.point_clouds` (created by `ensure_pointcloud_table()` on startup,
+  same idempotent-DDL pattern as `ensure_users_table()`) and writes the tileset
+  to `/pointclouds/<layer>/`, which nginx serves directly. Consequences worth
+  knowing before touching any of it:
+  - **`read_layers()` must stay mapfile-only.** Its other callers are
+    `generate_mapproxy_config()` (would emit a cache/source pair aimed at a
+    MapServer layer that does not exist) and `materialize_saved_styles()` (would
+    try to seed a `CLASS` style for a block that does not exist). `all_layers()`
+    unions the two sources and is used by `GET /layers` and the name-collision
+    checks only. Verified live: after publishing a point cloud, `mapproxy.yaml`
+    and `uploads.map` both stay free of it and a restart logs no style errors.
+  - **`DELETE /layers/{name}` checks the point-cloud registry *before*
+    `remove_layer_block()`**, which 404s on a name it cannot find — checking
+    after would make a point cloud undeletable.
+  - The layer name is `pointcloud_`-prefixed, never `upload_`: `collectionFor()`
+    in `wms.ts` resolves `upload_*` to `dwh.<name>`, which would offer an
+    attribute table against a table that does not exist.
+- **py3dtiles lives in its own venv, `/opt/py3dtiles`, pinned to 12.1.1.** It
+  pins `numpy<2.4` and pulls `numba`, which will not co-resolve with the
+  geopandas stack `/upload` needs — so it is shelled out to by absolute path
+  (`run_py3dtiles()`, the `run_gdal()` idiom with a longer timeout), never
+  imported. `laspy[lazrs]` *is* in the main `requirements.txt`, because
+  `probe_pointcloud()` reads headers in-process; `lazrs` is a prebuilt Rust
+  wheel, so LAZ needs no apt-level `liblaszip`. Verified CLI:
+  `convert <file> --out <dir> --srs_in <epsg> --srs_out 4978 --overwrite --jobs 2
+  --disable-processpool`. `--srs_out 4978` (ECEF) is what puts the tileset's root
+  transform on the globe; the default `--spec-version 1.0` is what emits `.pnts`
+  rather than glTF. `--disable-processpool` is for Docker's 64 MB `/dev/shm`.
+- **The input CRS is required, never guessed** — a wrong one drops the cloud in
+  the ocean or underground, which is far worse than refusing the upload. Header
+  first (`laspy` `parse_crs()`), then the `srs` form field, else a German 400
+  naming the fix. The WGS84 bbox goes through
+  `pyproj.Transformer.from_crs(..., always_xy=True)`; **without `always_xy` the
+  bbox comes out transposed**, since EPSG:4326 declares latitude first.
+- **Classification only survives conversion for LAS point formats 6+, and
+  `probe_pointcloud()` checks for exactly that.** py3dtiles builds its
+  `--extra-fields` list from the point format's *dtype* field names; in formats
+  0–5 the classification is packed into a shared byte exposed as
+  `raw_classification`, so asking for `classification` there makes py3dtiles warn
+  and write a column of zeros rather than fail — a layer that colours every point
+  identically and looks broken. So `has_classification` is only true when the
+  format exposes it standalone *and* the values vary, and `--extra-fields` is
+  only passed then. Confirmed by reading the generated `.pnts` batch table
+  directly, which is also where the frontend's `${classification}` style variable
+  name (lowercase) comes from. Note it lands as a *JSON* batch table, which puts
+  Cesium on its CPU styling path — fine here, a real cost on a very large cloud.
 - **`build_layer_block()` (line 683) writes no `password=`.** libpq gets it from
   `PGPASSWORD` on the mapserver container. The mapfiles are in git — keep it that way.
 - `pg_env()` still returns the password because `engine()` needs it for the SQLAlchemy
@@ -198,7 +289,61 @@ endpoint needs a matching `location` block in `nginx/nginx.conf`** or it 404s.
   very function gives an originally-uploaded layer) reliably hits it. Fixed
   by checking `information_schema.columns` first and falling back to
   `gid_2`, `gid_3`, … Found by actually running `/geoprocess` against a real
-  published layer (`raw.adm2`) rather than only against fresh test tables.
+  published layer (`dwh.adm2`) rather than only against fresh test tables.
+- **`qgis_worker()` is the second cross-container HTTP client in this file**, the
+  same plain-urllib shape as `dagster_graphql()` and for the same reason: the
+  `qgis-processing` worker is a separate image with no in-process import path. It has
+  no auth and no nginx `location` — like Dagster, it is reachable only on the
+  `vibegis` network, and every tier/ACL check happens here before the call.
+- **`ingest_geodataframe()` is the shared tail of `POST /upload` and the QGIS
+  finalizer.** An in-memory GeoDataFrame becomes a `dwh` table and a published layer.
+  Its `require_crs` flag is the only behavioural difference between the callers: an
+  uploaded file with no CRS is assumed to be 4326 (a reasonable guess for a file a
+  person picked), while an algorithm result with no CRS is a hard error — silently
+  assuming 4326 for the output of a reprojection would put the layer somewhere
+  entirely wrong with nothing on screen to hint at it.
+- **It calls `ensure_unique_column()` instead of hardcoding `ADD COLUMN gid`.** A
+  QGIS result copies its source table's columns verbatim, and every layer this app
+  publishes already has a `gid`, so the old unconditional `ADD COLUMN gid SERIAL
+  PRIMARY KEY` collided on *every* QGIS run. That is the same trap
+  `ensure_unique_column()` already existed for on the `/geoprocess` path (it falls
+  back to `gid_2`, `gid_3`, …), so it is reused rather than answered twice. `/upload`
+  is unaffected: a plain uploaded file has no `gid`, so it still gets `gid`.
+- **QGIS jobs are tracked in `configdb.qgis_jobs`, not in the worker.** The job does
+  not end when `qgis_process` exits — reading the GeoPackage, loading it into `dwh`
+  and publishing can only happen here, so a registry in the worker could only ever
+  disagree with this one. `ensure_qgis_jobs_table()` also fails any row still marked
+  `running` at startup: such a row belongs to a process that is gone, and without the
+  sweep a rebuild mid-run leaves a notification spinning forever in the browser. It is
+  safe because it runs before uvicorn accepts requests.
+- **The watcher is a plain daemon thread started at submit time, not work done in the
+  poll handler.** An ingest can take tens of seconds while the client polls every two
+  seconds; doing it in the handler would need a lock and would still lose the run when
+  the user closed the tab. **This assumes uvicorn stays single-process** — it does
+  (no `--workers` in the Dockerfile's CMD). Adding workers later would give one
+  watcher per process per job; the fix then is a `pg_advisory_xact_lock` in the poll
+  handler, not a rewrite.
+- **QGIS layer inputs resolve through `visible_layers_for()`, unlike `/geoprocess`.**
+  `resolve_layer_source()` takes a *layer name*, checks it against what this user may
+  actually see, and derives schema/table from the layer's own record. `/geoprocess`
+  still takes a raw schema/table pair validated only by `check_identifier()`, which
+  lets anyone past its tier gate read any table in `dwh` including one behind a
+  `layer_grants` ACL. The new routes deliberately do not copy that; it is a candidate
+  retrofit for `/geoprocess`.
+- **A GeoPackage result is read with geopandas, so it needs a size ceiling**
+  (`QGIS_MAX_OUTPUT_BYTES`, 512 MB) that a streaming `ogr2ogr -f PostgreSQL` would
+  not. `ogr2ogr` is the escape hatch if that ever bites, but it bypasses the geometry
+  family check and the 4326 normalization every downstream consumer assumes.
+- **`POST /qgis-print` is synchronous, unlike the processing routes** — a PDF is a
+  download, and making it a job would mean inventing a download-token dance for a few
+  seconds' work. DPI (≤300) and page size (≤A3) are capped so that stays true. It
+  proxies the GetPrint rather than handing the browser a `/qgis?MAP=…` URL, which
+  keeps generated project paths out of the client. **QGIS Server answers a failed
+  GetPrint with HTTP 200 and an XML `ServiceExceptionReport`**, so the status code
+  proves nothing — the response's content type is what distinguishes a real PDF.
+- **The print layer list is rebuilt from `visible_layers_for()`, never trusted from
+  the request.** QGIS Server has no per-user concept at all, so without that the print
+  route would be a broader read than `/layers` is.
 - **`dagster_graphql()` (line 430) is the whole bridge to Dagster** — upload-api and
   Dagster are separate Python images/venvs with no in-process import path, so this
   is a plain HTTP POST to `http://dagster:3000/graphql` over the `vibegis` Docker
@@ -215,13 +360,14 @@ endpoint needs a matching `location` block in `nginx/nginx.conf`** or it 404s.
   `premium`). Defense in depth on top of that role having no write grants:
   `validate_select_sql()` forces a single `SELECT`/`WITH` statement with no mutating
   keywords, and the query additionally runs inside a Postgres `READ ONLY`
-  transaction. **`gis.users` is explicitly revoked from `ai_readonly`** even though
-  it's granted schema-wide `SELECT` on `gis` for the real geodata tables that live
-  alongside it (`AI_UNREADABLE_TABLES` in ai_agent.py) — without that, the agent
-  (and so indirectly a premium/admin user's chat) could read every bcrypt
-  `password_hash` and every other user's encrypted AI key ciphertext. Any future
-  non-geodata table added to `raw`/`staging`/`gis`/`public` needs the same
-  exclusion.
+  transaction. **`userdb` (accounts, AI key ciphertext) is never granted to
+  `ai_readonly` in the first place** — the DB is split into three schemas
+  (`dwh` geodata, `configdb` app/layer config, `userdb` accounts; see
+  `bin/migrate-schemas.sql` and the root CLAUDE.md), and `AI_READABLE_SCHEMAS`
+  in `ai_agent.py` simply omits `userdb`, rather than granting schema-wide
+  `SELECT` and then revoking one sensitive table back out (the previous
+  approach, from when accounts lived inside the `gis` schema alongside real
+  geodata). Any future non-geodata schema needs the same omission.
 - **A geoprocess/ETL action the AI agent proposes never runs itself.** `/geoprocess`
   and `/etl/run`'s bodies are `_execute_geoprocess()`/`_execute_etl_run()` — plain
   functions the routes call, so there is exactly one implementation of each

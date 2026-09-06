@@ -15,7 +15,7 @@ import {
   Alert, Button, Group, Loader, ScrollArea, SegmentedControl, Select, Switch, Table, Text, TextInput,
   useComputedColorScheme,
 } from '@mantine/core'
-import { IconCurrentLocation } from '@tabler/icons-react'
+import { IconArrowDown, IconArrowUp, IconCurrentLocation } from '@tabler/icons-react'
 import { Math as CesiumMath, Rectangle } from 'cesium'
 
 import { columnLabel } from './columns'
@@ -70,6 +70,15 @@ export default function AttributeTablePanel({
   const [renaming, setRenaming] = useState(false)
   const [aliases, setAliases] = useState<Record<string, string>>({})
   const [sortBySelection, setSortBySelection] = useState(false)
+  // Click-to-sort by column, current page only — not a real server-side
+  // ORDER BY. Tried pg_featureserv's own `sortby` param first (it exists),
+  // but it 500s on any column name that needs SQL quoting (mixed-case —
+  // common for uploaded data, e.g. this exact kind of dataset's
+  // "POP_DENS_2024") — confirmed directly against a running layer, not
+  // usable here. Same "don't fetch the whole table just to reorder it"
+  // reasoning sortBySelection above already uses.
+  const [sortColumn, setSortColumn] = useState<string | null>(null)
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc')
   const allSelected = useSelection((s) => s.selected)
   const toggleFeature = useSelection((s) => s.toggleFeature)
 
@@ -207,10 +216,37 @@ export default function AttributeTablePanel({
     return Array.from(selected.values()).filter((f) => !onThisPage.has(f.id))
   }, [rows, sortBySelection, selected])
 
+  function toggleColumnSort(col: string) {
+    if (sortColumn !== col) {
+      setSortColumn(col)
+      setSortDirection('asc')
+    } else {
+      setSortDirection((d) => (d === 'asc' ? 'desc' : 'asc'))
+    }
+  }
+
   const displayRows = useMemo(() => {
-    if (!sortBySelection) return rows
-    return [...rows].sort((a, b) => Number(selected.has(b.id)) - Number(selected.has(a.id)))
-  }, [rows, sortBySelection, selected])
+    let result = rows
+    if (sortColumn) {
+      const dir = sortDirection === 'asc' ? 1 : -1
+      result = [...result].sort((a, b) => {
+        const av = a.properties[sortColumn]
+        const bv = b.properties[sortColumn]
+        if (av == null && bv == null) return 0
+        if (av == null) return 1
+        if (bv == null) return -1
+        if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir
+        return String(av).localeCompare(String(bv)) * dir
+      })
+    }
+    // Stable sort, applied after: selected rows still float to the top when
+    // sortBySelection is on, but each group (selected / not) keeps whatever
+    // column order was just computed above instead of losing it.
+    if (sortBySelection) {
+      result = [...result].sort((a, b) => Number(selected.has(b.id)) - Number(selected.has(a.id)))
+    }
+    return result
+  }, [rows, sortBySelection, selected, sortColumn, sortDirection])
 
   return (
     <div style={{ display: isActive ? 'flex' : 'none', flex: 1, minHeight: 0, minWidth: 0, flexDirection: 'column' }}>
@@ -291,7 +327,11 @@ export default function AttributeTablePanel({
                   <Table.Thead>
                     <Table.Tr>
                       {columns.map((c) => (
-                        <Table.Th key={c}>
+                        <Table.Th
+                          key={c}
+                          onClick={() => !renaming && toggleColumnSort(c)}
+                          style={{ cursor: renaming ? undefined : 'pointer', userSelect: 'none' }}
+                        >
                           {renaming ? (
                             <TextInput
                               size="xs"
@@ -302,7 +342,14 @@ export default function AttributeTablePanel({
                               }
                             />
                           ) : (
-                            columnLabel(savedAliases, c)
+                            <Group gap={2} wrap="nowrap">
+                              <Text fz="xs" fw={sortColumn === c ? 700 : undefined}>
+                                {columnLabel(savedAliases, c)}
+                              </Text>
+                              {sortColumn === c && (
+                                sortDirection === 'asc' ? <IconArrowUp size={12} /> : <IconArrowDown size={12} />
+                              )}
+                            </Group>
                           )}
                         </Table.Th>
                       ))}

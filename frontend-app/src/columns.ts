@@ -38,10 +38,10 @@ async function fetchColumnsOnce(collection: string): Promise<Column[]> {
 }
 
 /**
- * A freshly uploaded/registered layer can 404 here: pg_featureserv
- * discovers new tables on its own schedule, which can lag well behind the
- * mapfile append that makes the layer show up in the panel — see
- * freshLayerRetry.ts for why that gap can't just be closed at the source.
+ * A freshly uploaded/registered layer can 404 here: pg_featureserv's
+ * catalog lookup for one specific collection never refreshes on its own
+ * after the service's first-ever request — see freshLayerRetry.ts for the
+ * real mechanism (and the one thing that does force a refresh).
  */
 export async function fetchColumns(collection: string, onRetry?: () => void): Promise<Column[]> {
   return retryFreshLayer(() => fetchColumnsOnce(collection), onRetry)
@@ -102,10 +102,11 @@ export interface ColumnGroupBy {
 export async function fetchColumnGroupBy(
   schema: string,
   table: string,
-  column: string,
+  column: string | string[],
   filter?: LayerFilter | null,
 ): Promise<ColumnGroupBy> {
-  const url = `${COLUMN_GROUPBY_URL}?schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}&column=${encodeURIComponent(column)}${filterQueryParam(filter)}`
+  const columnParam = Array.isArray(column) ? column.join(',') : column
+  const url = `${COLUMN_GROUPBY_URL}?schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}&column=${encodeURIComponent(columnParam)}${filterQueryParam(filter)}`
   const res = await fetch(url, { cache: 'no-store' })
   if (!res.ok) throw new Error(`Gruppierung: HTTP ${res.status}`)
   const body = await res.json()

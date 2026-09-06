@@ -28,10 +28,10 @@ export interface Feature {
 }
 
 // A freshly uploaded/registered layer's collection can 404 here — see
-// freshLayerRetry.ts for why pg_featureserv's own discovery lag has to be
-// absorbed here rather than closed at the source. Once one page succeeds
-// the collection is known to exist, so later pages in the same fetchPaged()
-// loop never hit the retry path.
+// freshLayerRetry.ts for pg_featureserv's actual catalog-refresh behavior
+// and the fix for it. Once one page succeeds the collection is known to
+// exist, so later pages in the same fetchPaged() loop never hit the retry
+// path.
 async function fetchOnePage(
   collection: string,
   extraQuery: string,

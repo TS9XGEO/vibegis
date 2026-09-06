@@ -91,6 +91,18 @@ interface SelectionState {
   // alongside the dashboard instead of staying hidden.
   dashboardTabOpen: boolean
   dashboardTabActive: boolean
+  /**
+   * Which layer the dashboard's master-detail view is showing. Lives here
+   * rather than as local state inside SelectionDashboardPanel so the data
+   * view's own "auswerten" button can open the dashboard *on a specific
+   * layer* — with two sources of truth that button could only ever request a
+   * layer and hope the panel's own auto-select didn't immediately override it.
+   *
+   * The panel still owns the *policy*: it falls back to the first available
+   * layer whenever this points at one the dashboard cannot currently show
+   * (see useDashboardLayerNames in SelectionDashboard.tsx).
+   */
+  dashboardLayer: string | null
   mode: SelectMode
   scope: SelectionScope
   // Set by MapTools.tsx's own click handlers after a circle/polygon draw —
@@ -109,6 +121,9 @@ interface SelectionState {
   focusDashboardTab: () => void
   closeDashboardTab: () => void
   focusDataView: () => void
+  setDashboardLayer: (name: string | null) => void
+  /** Open + focus the dashboard tab showing this layer, in one action. */
+  openDashboardForLayer: (name: string) => void
   setMode: (mode: SelectMode) => void
   setScope: (scope: SelectionScope) => void
   setTruncated: (truncated: boolean) => void
@@ -125,6 +140,7 @@ export const useSelection = create<SelectionState>((set, get) => ({
   activeLayer: null,
   dashboardTabOpen: false,
   dashboardTabActive: false,
+  dashboardLayer: null,
   mode: 'off',
   scope: 'active',
   truncated: false,
@@ -173,6 +189,14 @@ export const useSelection = create<SelectionState>((set, get) => ({
   // rather than showing every layer tab alongside it, so this is that pill's
   // one job: un-focus the dashboard, nothing else.
   focusDataView: () => set({ dashboardTabActive: false }),
+
+  setDashboardLayer: (name) => set({ dashboardLayer: name }),
+
+  // Deliberately does not touch `activeLayer`: the layer tab stays where it
+  // was, so closing the dashboard again (or clicking the "Datenansicht" pill)
+  // returns to exactly the table the user came from.
+  openDashboardForLayer: (name) =>
+    set({ dashboardTabOpen: true, dashboardTabActive: true, dashboardLayer: name }),
 
   setMode: (mode) => set({ mode }),
   setScope: (scope) => set({ scope }),

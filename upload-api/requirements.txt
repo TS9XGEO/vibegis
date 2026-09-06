@@ -13,3 +13,10 @@ bcrypt
 cryptography
 anthropic
 openai
+python-json-logger
+# probe_pointcloud() reads LAS/LAZ headers in-process (CRS, bounds, point
+# count, RGB/classification presence) before handing the file to py3dtiles,
+# which lives in its own venv. lazrs is a prebuilt Rust wheel — it gives LAZ
+# support without an apt-level liblaszip, keeping "nothing to install on the
+# host" true for the image too.
+laspy[lazrs]

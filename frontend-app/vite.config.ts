@@ -28,6 +28,7 @@ export default defineConfig({
       '/qgis':      { target: 'http://gateway', changeOrigin: true },
       '/terrain':   { target: 'http://gateway', changeOrigin: true },
       '/3dtiles':   { target: 'http://gateway', changeOrigin: true },
+      '/pointclouds': { target: 'http://gateway', changeOrigin: true },
     },
   },
   build: {

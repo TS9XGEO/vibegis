@@ -2,7 +2,7 @@
 Turns geodata into a first-class WMS layer, several ways:
   - POST /upload         read a file (shapefile zip, GeoPackage, GeoJSON, KML,
                          GML) with geopandas/GDAL, reproject to EPSG:4326 and
-                         load it into PostGIS schema "raw" — the same schema
+                         load it into PostGIS schema "dwh" — the same schema
                          and reprojection convention the nightly Dagster asset
                          (dagster/defs/__init__.py: raw_vectors) uses for
                          files dropped into mapserver/data
@@ -33,13 +33,17 @@ underlying file (raster). Only layers that live in uploads.map (i.e. ones
 created through this API) can be named here — the static layers in
 vibegis.map/osm-layers.map are never touched.
 """
+import contextvars
 import fcntl
 import json
+import logging
+import math
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -47,19 +51,59 @@ import urllib.request
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Annotated, Literal, Union
+from typing import Annotated, Any, Literal, Union
 
 import bcrypt
 import geopandas as gpd
 import jwt
+import laspy
+import numpy as np
 import pandas as pd
+import pyproj
 import yaml
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from pythonjsonlogger import jsonlogger
 from sqlalchemy import create_engine, text
 
 import ai_agent
+import paypal
+import qgis_catalog
+
+# ---------------------------------------------------------------- logging
+# JSON to stdout (picked up by Promtail -> Loki, see docker-compose.yml's
+# loki/promtail/grafana services) with a request id on every line, so one
+# request's log lines can be grepped/filtered together in Grafana even
+# though uvicorn handles requests concurrently. The id is also echoed back
+# as X-Request-Id and, on a request that arrived through the gateway,
+# matches the id nginx already generated for it (see nginx.conf's
+# log_format) — one id traces a request gateway-to-backend.
+request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+
+
+class _RequestIdFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_ctx.get()
+        return True
+
+
+def _configure_logging() -> logging.Logger:
+    handler = logging.StreamHandler()
+    handler.setFormatter(jsonlogger.JsonFormatter("%(asctime)s %(levelname)s %(name)s %(request_id)s %(message)s"))
+    handler.addFilter(_RequestIdFilter())
+    root = logging.getLogger()
+    root.handlers = [handler]
+    root.setLevel(logging.INFO)
+    return logging.getLogger("upload-api")
+
+
+log = _configure_logging()
+
+# Same convention the CORS origin below already uses — never trust
+# request.url for this: nginx proxies to upload-api on its own internal
+# address, not the browser-facing one PayPal needs to redirect back to.
+PUBLIC_BASE_URL = f"http://localhost:{os.environ.get('GATEWAY_PORT', '8080')}"
 
 app = FastAPI()
 app.add_middleware(
@@ -70,14 +114,63 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    rid = request.headers.get("x-request-id") or str(uuid.uuid4())
+    token = request_id_ctx.set(rid)
+    try:
+        response = await call_next(request)
+    finally:
+        request_id_ctx.reset(token)
+    response.headers["X-Request-Id"] = rid
+    log.info(
+        "request",
+        extra={"http_method": request.method, "http_path": request.url.path, "http_status": response.status_code},
+    )
+    return response
+
 ALLOWED_EXT = {".zip", ".gpkg", ".geojson", ".json", ".kml", ".gml"}
 MAX_BYTES = 2048 * 1024 * 1024  # 2 GB — matches nginx's client_max_body_size for /upload
+
+# NOTE: every upload route here is a plain `def`, never `async def`, and reads
+# its UploadFile through the synchronous `file.file` handle rather than
+# `await file.read()`. That is deliberate and load-bearing.
+#
+# These handlers do seconds-to-minutes of *blocking* work — geopandas/OGR
+# reads, gdalwarp/gdaladdo, py3dtiles (up to POINTCLOUD_CONVERT_TIMEOUT). In an
+# `async def` that work runs directly on the event loop, so uvicorn (one worker
+# here, no --workers) can serve nothing else until it finishes — including
+# GET /auth/verify, which nginx calls on *every* gated request for mapserver,
+# mapproxy, pg_featureserv, qgis, /terrain, /3dtiles and /pointclouds. A single
+# large point-cloud upload would therefore freeze the whole map for every user
+# for the duration of the conversion.
+#
+# Declared sync, Starlette runs the handler in its threadpool instead and the
+# event loop stays free. Do not "modernize" these back to `async def`.
 
 RASTER_ALLOWED_EXT = {".tif", ".tiff"}
 # Not /data/rasters: /data is itself a read-only mount here (and read-only in
 # mapserver too), and a nested bind mount can't be created under an
 # already-read-only parent — see docker-compose.yml.
 RASTERS_DIR = Path("/rasters")
+
+POINTCLOUD_ALLOWED_EXT = {".las", ".laz"}
+# One directory per published layer, named for the layer itself. Served
+# straight off disk by nginx at /pointclouds/ — MapServer is not involved at
+# any point, since it cannot render 3D Tiles. See read_pointcloud_layers().
+POINTCLOUDS_DIR = Path("/pointclouds")
+# py3dtiles lives in its own virtualenv (see upload-api/Dockerfile) because it
+# pins numpy<2.4 and pulls numba, which will not co-resolve with the
+# geopandas stack /upload needs. Called by absolute path, never imported.
+PY3DTILES_BIN = "/opt/py3dtiles/bin/py3dtiles"
+# Cesium 3D Tiles are positioned by an ECEF root transform, so the tileset
+# has to be written in EPSG:4978 regardless of what the source LAS uses.
+POINTCLOUD_SRS_OUT = "4978"
+# Slightly under nginx's 600s proxy_read_timeout for /upload-pointcloud, so a
+# conversion that runs long fails with this route's own actionable message
+# rather than as a bare gateway timeout with nothing to act on.
+POINTCLOUD_CONVERT_TIMEOUT = 570
 
 # Uploaded files awaiting a layer choice (see list_spatial_layers()) live
 # here between the initial /upload call and the follow-up one that names the
@@ -90,7 +183,6 @@ UPLOAD_TOKEN_MAX_AGE = 60 * 60  # 1h
 
 MAPFILE_DIR = Path("/mapfiles")
 UPLOADS_MAP = MAPFILE_DIR / "uploads.map"
-LAYER_CONFIG_PATH = MAPFILE_DIR / "layer_config.json"
 
 # MapProxy's tile cache, mounted here so a styling change can drop the tiles it
 # invalidates. See purge_layer_cache(); absent mount = nothing cached yet.
@@ -121,6 +213,13 @@ MOUNT_SENTINEL = MAPFILE_DIR / "vibegis.map"
 # rather than merely empty.
 RASTER_MOUNT_SENTINEL = RASTERS_DIR / ".gitkeep"
 
+# Same reasoning again for the pointclouds/ bind mount. This one matters even
+# more than the raster case: a point-cloud layer's only proof of existence on
+# disk is its tileset directory, and the gateway serves that directory
+# read-only from its own mount of the same host path — so a dead mount here
+# means a published layer whose tiles 404 for every user.
+POINTCLOUD_MOUNT_SENTINEL = POINTCLOUDS_DIR / ".gitkeep"
+
 
 def check_mapfile_volume() -> None:
     if not MOUNT_SENTINEL.exists():
@@ -138,6 +237,16 @@ def check_raster_volume() -> None:
             503,
             f"Raster volume not mounted: {RASTER_MOUNT_SENTINEL} is missing, so nothing "
             "written here would reach MapServer. Recreate the container: "
+            "docker compose up -d --force-recreate upload-api",
+        )
+
+
+def check_pointcloud_volume() -> None:
+    if not POINTCLOUD_MOUNT_SENTINEL.exists():
+        raise HTTPException(
+            503,
+            f"Point cloud volume not mounted: {POINTCLOUD_MOUNT_SENTINEL} is missing, so "
+            "nothing written here would be served by the gateway. Recreate the container: "
             "docker compose up -d --force-recreate upload-api",
         )
 
@@ -163,9 +272,24 @@ DEFAULT_STYLE = {
     "POINT": '    STYLE\n      SYMBOL "circle"\n      SIZE 9\n      COLOR 255 196 40\n'
              "      OUTLINECOLOR 40 30 10\n      WIDTH 1.5\n    END\n",
     "LINE": "    STYLE\n      COLOR 255 110 60\n      WIDTH 2.4\n      LINECAP ROUND\n    END\n",
-    "POLYGON": "    STYLE\n      COLOR 90 170 230\n      OPACITY 55\n"
-               "      OUTLINECOLOR 130 200 255\n      WIDTH 0.6\n    END\n",
+    # POLYGON is built by default_style() instead: its outline width is
+    # per-layer configurable, so it cannot be a constant.
 }
+
+POLYGON_FILL = "90 170 230"
+
+# Every polygon layer gets a real border around each feature unless a layer
+# says otherwise — adjacent polygons in the same class are indistinguishable
+# without one. 0 turns it off for a layer.
+DEFAULT_POLYGON_OUTLINE_WIDTH = 0.6
+MAX_POLYGON_OUTLINE_WIDTH = 10.0
+
+# The outline is a darkened version of the fill rather than a fixed colour, so
+# it reads as that class's own border in a categorized/graduated layer instead
+# of a grid of black lines over everything. legend.ts's darkenHex() applies the
+# identical factor — the mapfile and SLD renderers have to agree, or turning on
+# an attribute filter visibly restyles the layer.
+POLYGON_OUTLINE_DARKEN = 0.55
 
 HEX_RE = re.compile(r"#[0-9a-fA-F]{6}")
 
@@ -185,7 +309,40 @@ def fmt_num(x: float) -> str:
     return str(int(x)) if float(x).is_integer() else str(x)
 
 
-def classified_style(ms_type: str, color: str, size: float | None = None) -> str:
+def darken_rgb(rgb: str, factor: float = POLYGON_OUTLINE_DARKEN) -> str:
+    """'90 170 230' -> '49 93 126'. Mirrors legend.ts's darkenHex()."""
+    r, g, b = (int(v) for v in rgb.split())
+    return f"{int(r * factor)} {int(g * factor)} {int(b * factor)}"
+
+
+def polygon_outline(rgb: str, outline_width: float | None) -> str:
+    """The OUTLINECOLOR/WIDTH fragment of a polygon STYLE.
+
+    Returns "" for a width of 0: MapServer draws no outline when OUTLINECOLOR
+    is absent, whereas WIDTH 0 with a colour still renders a hairline.
+    """
+    width = DEFAULT_POLYGON_OUTLINE_WIDTH if outline_width is None else float(outline_width)
+    if width <= 0:
+        return ""
+    return f"  OUTLINECOLOR {darken_rgb(rgb)}  WIDTH {fmt_num(width)}"
+
+
+def default_style(ms_type: str, outline_width: float | None = None) -> str:
+    """The STYLE for an *unclassified* layer. Only polygons vary (their outline
+    width is per-layer configurable), so points and lines still come straight
+    from the DEFAULT_STYLE constant."""
+    if ms_type != "POLYGON":
+        return DEFAULT_STYLE[ms_type]
+    lines = ["    STYLE", f"      COLOR {POLYGON_FILL}", "      OPACITY 55"]
+    width = DEFAULT_POLYGON_OUTLINE_WIDTH if outline_width is None else float(outline_width)
+    if width > 0:
+        lines += [f"      OUTLINECOLOR {darken_rgb(POLYGON_FILL)}", f"      WIDTH {fmt_num(width)}"]
+    lines.append("    END")
+    return "\n".join(lines) + "\n"
+
+
+def classified_style(ms_type: str, color: str, size: float | None = None,
+                     outline_width: float | None = None) -> str:
     """
     The STYLE for one class of a user classification.
 
@@ -200,11 +357,16 @@ def classified_style(ms_type: str, color: str, size: float | None = None) -> str
     `size` is the user-configurable point size / line width from the
     classification editor (None = the same defaults this always used —
     matches symbolizerFor()'s `size ?? 10` / `size ?? 2.2`). Meaningless for
-    polygons, which have no size control.
+    polygons, which have no size control — they take `outline_width`
+    instead, the per-layer border thickness (None = DEFAULT_POLYGON_OUTLINE_WIDTH,
+    0 = no border).
     """
     rgb = hex_to_rgb(color)
     if ms_type == "POLYGON":
-        return f"    STYLE  COLOR {rgb}  OUTLINECOLOR {rgb}  WIDTH 0.5  END\n"
+        # The outline used to be OUTLINECOLOR {rgb} — the fill colour, i.e.
+        # invisible. It is a darkened shade at a per-layer width now, so
+        # neighbouring polygons in the same class can be told apart.
+        return f"    STYLE  COLOR {rgb}{polygon_outline(rgb, outline_width)}  END\n"
     if ms_type == "LINE":
         width = size if size is not None else 2.2
         return f"    STYLE  COLOR {rgb}  WIDTH {width}  LINECAP ROUND  END\n"
@@ -212,7 +374,8 @@ def classified_style(ms_type: str, color: str, size: float | None = None) -> str
     return f'    STYLE  SYMBOL "circle"  SIZE {point_size}  COLOR {rgb}  OUTLINECOLOR 255 255 255  WIDTH 1  END\n'
 
 
-def build_class_blocks(classification: dict | None, ms_type: str, title: str) -> str:
+def build_class_blocks(classification: dict | None, ms_type: str, title: str,
+                       outline_width: float | None = None) -> str:
     """
     Compiles a stored classification into MapServer CLASSITEM + CLASS blocks —
     the heart of making a classified layer cacheable. A classification used to
@@ -226,7 +389,8 @@ def build_class_blocks(classification: dict | None, ms_type: str, title: str) ->
     remove_layer_block() truncates the file mid-layer.
     """
     if not classification:
-        return "  CLASS\n" f'    NAME "{mapfile_escape(title)}"\n' f"{DEFAULT_STYLE[ms_type]}" "  END\n"
+        return ("  CLASS\n" f'    NAME "{mapfile_escape(title)}"\n'
+                f"{default_style(ms_type, outline_width)}" "  END\n")
 
     mode = classification.get("mode")
     size = classification.get("size")
@@ -234,7 +398,7 @@ def build_class_blocks(classification: dict | None, ms_type: str, title: str) ->
         return (
             "  CLASS\n"
             f'    NAME "{mapfile_escape(title)}"\n'
-            f"{classified_style(ms_type, classification.get('color'), size)}"
+            f"{classified_style(ms_type, classification.get('color'), size, outline_width)}"
             "  END\n"
         )
 
@@ -251,7 +415,7 @@ def build_class_blocks(classification: dict | None, ms_type: str, title: str) ->
                 # Quoted-string form only. A user-supplied value must never
                 # reach the regex (/.../) form, where it would be a pattern.
                 f'    EXPRESSION "{mapfile_escape(value)}"\n'
-                f"{classified_style(ms_type, c.get('color'), size)}"
+                f"{classified_style(ms_type, c.get('color'), size, outline_width)}"
                 "  END\n"
             )
         return out
@@ -266,7 +430,7 @@ def build_class_blocks(classification: dict | None, ms_type: str, title: str) ->
                 # Numeric comparison needs bare [brackets]; "[quoted]" would
                 # compare as strings — see docs/classification.md.
                 f"    EXPRESSION ([{column}] >= {lo} AND [{column}] < {hi})\n"
-                f"{classified_style(ms_type, b.get('color'), size)}"
+                f"{classified_style(ms_type, b.get('color'), size, outline_width)}"
                 "  END\n"
             )
         return out
@@ -338,18 +502,102 @@ COOKIE_NAME = "vibegis_session"
 def ensure_users_table() -> None:
     with engine().begin() as conn:
         conn.execute(text(
-            "CREATE TABLE IF NOT EXISTS users ("
+            "CREATE TABLE IF NOT EXISTS userdb.users ("
             "id serial PRIMARY KEY, username text NOT NULL UNIQUE, "
             "password_hash text NOT NULL, "
-            "role text NOT NULL CHECK (role IN ('admin', 'viewer')), "
+            "role text NOT NULL CHECK (role IN ('admin', 'editor', 'viewer')), "
             "created_at timestamptz NOT NULL DEFAULT now())"
         ))
-        # Additive to role, not a third role value: an admin should never
-        # lose ETL access, and "viewer + premium" is a real combination.
-        # ALTER ... ADD COLUMN IF NOT EXISTS is needed (not just the CREATE
-        # TABLE above) because this table already exists in the live DB.
+        # Widens an existing two-value CHECK for any environment that hasn't
+        # run bin/migrate-editor-role.sql by hand yet. 'editor': full
+        # analysis/editing capability (bypasses subscription_tier and layer-
+        # ownership checks, same as admin — see require_tier()/
+        # require_owner_or_admin()) but still blocked from the strictly-
+        # admin-only routes (user accounts, groups/grants), which check
+        # role == "admin" directly and are unaffected by this.
+        conn.execute(text("ALTER TABLE userdb.users DROP CONSTRAINT IF EXISTS users_role_check"))
         conn.execute(text(
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS premium boolean NOT NULL DEFAULT false"
+            "ALTER TABLE userdb.users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'editor', 'viewer'))"
+        ))
+        # Self-healing on startup for any environment that hasn't run
+        # bin/migrate-tiers.sql by hand yet — same idempotent-DDL-on-a-live-
+        # database pattern this function already used for the old `premium`
+        # column. subscription_tier replaces it outright (four tiers, not a
+        # boolean); an existing `premium=true` row becomes 'premium' before
+        # the column is dropped, so nobody silently loses paid access.
+        conn.execute(text(
+            "ALTER TABLE userdb.users ADD COLUMN IF NOT EXISTS subscription_tier text "
+            "NOT NULL DEFAULT 'free' CHECK (subscription_tier IN ('free', 'pro', 'premium'))"
+        ))
+        conn.execute(text("ALTER TABLE userdb.users ADD COLUMN IF NOT EXISTS email text"))
+        if conn.execute(text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = 'userdb' AND table_name = 'users' AND column_name = 'premium'"
+        )).first():
+            conn.execute(text("UPDATE userdb.users SET subscription_tier = 'premium' WHERE premium"))
+            conn.execute(text("ALTER TABLE userdb.users DROP COLUMN premium"))
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS configdb.layer_owners ("
+            "layer_name text PRIMARY KEY, "
+            "owner_user_id bigint NOT NULL REFERENCES userdb.users(id) ON DELETE CASCADE, "
+            "created_at timestamptz NOT NULL DEFAULT now())"
+        ))
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS configdb.groups (id bigserial PRIMARY KEY, name text UNIQUE NOT NULL)"
+        ))
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS configdb.group_members ("
+            "group_id bigint NOT NULL REFERENCES configdb.groups(id) ON DELETE CASCADE, "
+            "user_id bigint NOT NULL REFERENCES userdb.users(id) ON DELETE CASCADE, "
+            "PRIMARY KEY (group_id, user_id))"
+        ))
+        conn.execute(text("INSERT INTO configdb.groups (name) VALUES ('guests') ON CONFLICT DO NOTHING"))
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS configdb.layer_grants ("
+            "id bigserial PRIMARY KEY, layer_name text NOT NULL, "
+            "principal_type text NOT NULL CHECK (principal_type IN ('user', 'group')), "
+            "principal_id bigint NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), "
+            "UNIQUE (layer_name, principal_type, principal_id))"
+        ))
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS userdb.subscriptions ("
+            "id bigserial PRIMARY KEY, user_id bigint NOT NULL REFERENCES userdb.users(id) ON DELETE CASCADE, "
+            "tier text NOT NULL CHECK (tier IN ('pro', 'premium')), "
+            "paypal_subscription_id text UNIQUE, "
+            "status text NOT NULL CHECK (status IN ('pending', 'active', 'cancelled', 'suspended')), "
+            "current_period_end timestamptz, "
+            "created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now())"
+        ))
+
+
+def ensure_pointcloud_table() -> None:
+    """The registry of published point-cloud layers.
+
+    A point cloud is the one published layer with no MapServer LAYER block —
+    MapServer cannot render 3D Tiles — so read_layers() cannot see it and this
+    table is its only record. In configdb rather than a JSON sidecar next to
+    the tileset for two reasons: this repo has been moving the other way for a
+    while (layer_config.json -> configdb.layer_config), and /layers already
+    has to hit Postgres for the ACL regardless, so a sidecar would only add an
+    N-file read per call.
+
+    The tileset directory is always POINTCLOUDS_DIR / layer_name, derived from
+    the primary key — never a stored free-form path, so a row can never point
+    the delete path at something outside the mount.
+    """
+    with engine().begin() as conn:
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS configdb"))
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS configdb.point_clouds ("
+            "layer_name text PRIMARY KEY, "
+            "title text NOT NULL, "
+            "point_count bigint, "
+            "srs_in text, "
+            "west double precision, south double precision, "
+            "east double precision, north double precision, "
+            "has_color boolean NOT NULL DEFAULT false, "
+            "has_classification boolean NOT NULL DEFAULT false, "
+            "created_at timestamptz NOT NULL DEFAULT now())"
         ))
 
 
@@ -361,13 +609,19 @@ class LoginBody(BaseModel):
 class CreateUserBody(BaseModel):
     username: str
     password: str
-    role: Literal["admin", "viewer"]
-    premium: bool = False
+    role: Literal["admin", "editor", "viewer"]
+    subscription_tier: Literal["free", "pro", "premium"] = "free"
 
 
-def issue_token(user_id: int, username: str, role: str, premium: bool) -> str:
+# Ranked so require_tier() can do a single numeric comparison. 'guest' is
+# never a value on a users row — see issue_guest_token() — but is ranked
+# here so the same TIER_RANK/require_tier() serves guest sessions too.
+TIER_RANK = {"guest": 0, "free": 1, "pro": 2, "premium": 3}
+
+
+def issue_token(user_id: int | str, username: str, role: str, tier: str) -> str:
     payload = {
-        "sub": str(user_id), "username": username, "role": role, "premium": premium,
+        "sub": str(user_id), "username": username, "role": role, "tier": tier,
         "exp": int(time.time()) + JWT_EXPIRY_SECONDS,
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
@@ -391,26 +645,64 @@ def require_role(role: str):
     return _dep
 
 
-def require_etl_access(user: dict = Depends(require_login)) -> dict:
-    if user.get("role") != "admin" and not user.get("premium"):
-        raise HTTPException(403, "Premium access required")
+def is_privileged_role(user: dict) -> bool:
+    """Admin and editor both bypass subscription_tier and layer-ownership
+    checks — 'editor' is full analysis/editing capability without paying for
+    a tier, deliberately NOT a bypass of require_role("admin") itself, which
+    is what still blocks it from the strictly-admin-only routes (user
+    accounts, groups/grants — see those routes' own Depends)."""
+    return user.get("role") in ("admin", "editor")
+
+
+def require_tier(min_tier: str):
+    """Admin/editor always pass regardless of tier; everyone else needs
+    TIER_RANK[their tier] >= TIER_RANK[min_tier]. A guest session's tier is
+    always 'guest' (rank 0), so this also gates guests out of anything
+    requiring at least 'free' — a guest is never treated as a free account."""
+    def _dep(user: dict = Depends(require_login)) -> dict:
+        if is_privileged_role(user):
+            return user
+        if TIER_RANK.get(user.get("tier"), -1) < TIER_RANK[min_tier]:
+            raise HTTPException(403, f"Erfordert mindestens Tarif '{min_tier}'")
+        return user
+    return _dep
+
+
+# Was its own bespoke check; now just the 'premium' tier by another name —
+# every existing `Depends(require_etl_access)` call site is unchanged.
+require_etl_access = require_tier("premium")
+
+
+def require_privileged(user: dict = Depends(require_login)) -> dict:
+    """Admin or editor — full analysis/editing/content capability, but NOT
+    the strictly-admin-only routes (user accounts, groups/grants), which use
+    require_role("admin") directly instead and are unaffected by this."""
+    if not is_privileged_role(user):
+        raise HTTPException(403, "Erfordert Admin- oder Editor-Rolle")
     return user
+
+
+def is_guest(user: dict) -> bool:
+    return user.get("tier") == "guest"
 
 
 @app.post("/login")
 def login(body: LoginBody, response: Response):
     with engine().begin() as conn:
         row = conn.execute(
-            text("SELECT id, username, password_hash, role, premium FROM users WHERE username = :u"),
+            text(
+                "SELECT id, username, password_hash, role, subscription_tier "
+                "FROM userdb.users WHERE username = :u"
+            ),
             {"u": body.username},
         ).first()
     if not row or not bcrypt.checkpw(body.password.encode(), row.password_hash.encode()):
         raise HTTPException(401, "Ungültiger Benutzername oder Passwort")
     response.set_cookie(
-        COOKIE_NAME, issue_token(row.id, row.username, row.role, row.premium),
+        COOKIE_NAME, issue_token(row.id, row.username, row.role, row.subscription_tier),
         httponly=True, secure=False, samesite="lax", path="/", max_age=JWT_EXPIRY_SECONDS,
     )
-    return {"username": row.username, "role": row.role, "premium": row.premium}
+    return {"username": row.username, "role": row.role, "tier": row.subscription_tier}
 
 
 @app.post("/logout")
@@ -419,16 +711,215 @@ def logout(response: Response):
     return {"ok": True}
 
 
+@app.post("/guest-session")
+def guest_session(response: Response):
+    """No credentials, no userdb.users row at all — a synthetic identity
+    baked directly into the JWT. Same cookie mechanism as /login, just a
+    'guest' tier (rank 0, below 'free') and a role of 'viewer'. See
+    visible_layers_for() for what a guest actually gets to see."""
+    guest_id = f"guest-{uuid.uuid4().hex[:8]}"
+    response.set_cookie(
+        COOKIE_NAME, issue_token(guest_id, guest_id, "viewer", "guest"),
+        httponly=True, secure=False, samesite="lax", path="/", max_age=JWT_EXPIRY_SECONDS,
+    )
+    return {"username": guest_id, "role": "viewer", "tier": "guest"}
+
+
+USERNAME_RE = re.compile(r"[a-zA-Z0-9_.-]{3,32}")
+
+
+class RegisterBody(BaseModel):
+    username: str
+    password: str
+    email: str | None = None
+    tier: Literal["free", "pro", "premium"] = "free"
+
+
+@app.post("/register")
+def register(body: RegisterBody):
+    """Self-service signup — always creates a 'viewer' account (self-signup
+    can never create an admin). 'free' is active immediately; 'pro'/'premium'
+    land on 'free' in enforcement terms until the PayPal webhook below
+    confirms the subscription actually activated — nothing paid is ever
+    granted on the strength of this request alone."""
+    username = body.username.strip()
+    if not USERNAME_RE.fullmatch(username):
+        raise HTTPException(400, "Benutzername: 3-32 Zeichen, Buchstaben/Ziffern/._-")
+    if len(body.password) < 8:
+        raise HTTPException(400, "Passwort: mindestens 8 Zeichen")
+    if body.tier in ("pro", "premium") and not body.email:
+        raise HTTPException(400, "E-Mail wird für kostenpflichtige Tarife benötigt")
+
+    pw_hash = bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode()
+    with engine().begin() as conn:
+        if conn.execute(text("SELECT 1 FROM userdb.users WHERE username = :u"), {"u": username}).first():
+            raise HTTPException(409, "Benutzername bereits vergeben")
+        user_id = conn.execute(
+            text(
+                "INSERT INTO userdb.users (username, password_hash, role, subscription_tier, email) "
+                "VALUES (:u, :p, 'viewer', 'free', :e) RETURNING id"
+            ),
+            {"u": username, "p": pw_hash, "e": body.email},
+        ).scalar_one()
+
+    if body.tier == "free":
+        return {"username": username, "tier": "free", "approveUrl": None}
+
+    # Registration is all-or-nothing: a PayPal failure here must not leave a
+    # signed-up account behind with no way to know its payment never
+    # started — delete what was just created rather than silently leaving
+    # them on 'free' with a confusing error.
+    try:
+        sub = paypal.create_subscription(
+            body.tier, body.email or "",
+            return_url=f"{PUBLIC_BASE_URL}/?paypal_return=1&tier={body.tier}",
+            cancel_url=f"{PUBLIC_BASE_URL}/?paypal_cancel=1",
+        )
+        approve_url = next((l["href"] for l in sub.get("links", []) if l.get("rel") == "approve"), None)
+        if not approve_url:
+            raise RuntimeError("PayPal did not return an approval link")
+    except RuntimeError as e:
+        with engine().begin() as conn:
+            conn.execute(text("DELETE FROM userdb.users WHERE id = :u"), {"u": user_id})
+        raise HTTPException(502, f"PayPal: {e}")
+
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO userdb.subscriptions (user_id, tier, paypal_subscription_id, status) "
+                "VALUES (:u, :t, :p, 'pending')"
+            ),
+            {"u": user_id, "t": body.tier, "p": sub["id"]},
+        )
+
+    return {"username": username, "tier": "free", "approveUrl": approve_url}
+
+
+class SubscriptionUpgradeBody(BaseModel):
+    tier: Literal["pro", "premium"]
+
+
+@app.post("/subscription/upgrade")
+def upgrade_subscription(body: SubscriptionUpgradeBody, user: dict = Depends(require_login)):
+    """Same PayPal flow /register's paid-tier branch uses, for an existing
+    account instead of a brand-new one — the nag notification's CTA calls
+    this. Guest sessions have no userdb.users row to attach a subscription
+    to, so this 403s them (the frontend already only shows the nag's CTA to
+    a real account for exactly this reason, but this route enforces it
+    either way rather than trusting the client)."""
+    if is_guest(user):
+        raise HTTPException(403, "Gastzugänge können nicht upgraden — bitte zuerst ein Konto erstellen")
+    with engine().begin() as conn:
+        email = conn.execute(text("SELECT email FROM userdb.users WHERE id = :u"), {"u": int(user["sub"])}).scalar()
+    try:
+        sub = paypal.create_subscription(
+            body.tier, email or "",
+            return_url=f"{PUBLIC_BASE_URL}/?paypal_return=1&tier={body.tier}",
+            cancel_url=f"{PUBLIC_BASE_URL}/?paypal_cancel=1",
+        )
+    except RuntimeError as e:
+        raise HTTPException(502, f"PayPal: {e}")
+    approve_url = next((l["href"] for l in sub.get("links", []) if l.get("rel") == "approve"), None)
+    if not approve_url:
+        raise HTTPException(502, "PayPal did not return an approval link")
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO userdb.subscriptions (user_id, tier, paypal_subscription_id, status) "
+                "VALUES (:u, :t, :p, 'pending')"
+            ),
+            {"u": int(user["sub"]), "t": body.tier, "p": sub["id"]},
+        )
+    return {"approveUrl": approve_url}
+
+
+@app.post("/subscription/cancel")
+def cancel_subscription(user: dict = Depends(require_login)):
+    with engine().begin() as conn:
+        row = conn.execute(
+            text(
+                "SELECT paypal_subscription_id FROM userdb.subscriptions "
+                "WHERE user_id = :u AND status = 'active' ORDER BY created_at DESC LIMIT 1"
+            ),
+            {"u": int(user["sub"])},
+        ).first()
+    if not row:
+        raise HTTPException(404, "Kein aktives Abonnement gefunden")
+    try:
+        paypal.cancel_subscription(row.paypal_subscription_id)
+    except RuntimeError as e:
+        raise HTTPException(502, f"PayPal: {e}")
+    # The webhook (BILLING.SUBSCRIPTION.CANCELLED) is what actually flips
+    # subscription_tier back to 'free' — this just asks PayPal to cancel and
+    # reports the request went through, same "webhook is the only path that
+    # changes tier" rule /paypal/webhook documents.
+    return {"ok": True}
+
+
+@app.post("/paypal/webhook")
+async def paypal_webhook(request: Request):
+    """The only path that ever changes subscription_tier for a paid tier —
+    never the /register return-redirect, which only shows a "processing"
+    state (webhooks can arrive before or after the browser's own redirect
+    lands). Signature-verified via PayPal's own endpoint (paypal.py) before
+    anything in the body is trusted."""
+    raw_body = await request.body()
+    if not paypal.verify_webhook_signature(dict(request.headers), raw_body):
+        raise HTTPException(400, "Invalid webhook signature")
+    event = json.loads(raw_body)
+    event_type = event.get("event_type", "")
+    resource = event.get("resource", {})
+    paypal_subscription_id = resource.get("id")
+    if not paypal_subscription_id:
+        return {"ok": True}
+
+    with engine().begin() as conn:
+        sub_row = conn.execute(
+            text("SELECT user_id, tier FROM userdb.subscriptions WHERE paypal_subscription_id = :p"),
+            {"p": paypal_subscription_id},
+        ).first()
+        if not sub_row:
+            log.warning("paypal webhook for unknown subscription", extra={"paypal_subscription_id": paypal_subscription_id})
+            return {"ok": True}
+
+        if event_type == "BILLING.SUBSCRIPTION.ACTIVATED":
+            conn.execute(
+                text("UPDATE userdb.subscriptions SET status = 'active', updated_at = now() WHERE paypal_subscription_id = :p"),
+                {"p": paypal_subscription_id},
+            )
+            conn.execute(
+                text("UPDATE userdb.users SET subscription_tier = :t WHERE id = :u"),
+                {"t": sub_row.tier, "u": sub_row.user_id},
+            )
+        elif event_type in (
+            "BILLING.SUBSCRIPTION.CANCELLED", "BILLING.SUBSCRIPTION.EXPIRED", "BILLING.SUBSCRIPTION.SUSPENDED",
+        ):
+            status = "suspended" if event_type.endswith("SUSPENDED") else "cancelled"
+            conn.execute(
+                text("UPDATE userdb.subscriptions SET status = :s, updated_at = now() WHERE paypal_subscription_id = :p"),
+                {"s": status, "p": paypal_subscription_id},
+            )
+            conn.execute(
+                text("UPDATE userdb.users SET subscription_tier = 'free' WHERE id = :u"),
+                {"u": sub_row.user_id},
+            )
+
+    return {"ok": True}
+
+
 @app.get("/auth/verify")
 def auth_verify(user: dict = Depends(require_login)):
     # nginx's auth_request only cares about the status code — 200 here means
-    # "gateway may proxy the original request".
+    # "gateway may proxy the original request". Still purely "is there a
+    # valid session" — see CLAUDE.md's "Part 3" note on the WMS/tile
+    # enforcement gap: this does not (and structurally can't, from here)
+    # check per-layer grants.
     return Response(status_code=200)
 
 
 @app.get("/auth/me")
 def auth_me(user: dict = Depends(require_login)):
-    return {"username": user["username"], "role": user["role"], "premium": bool(user.get("premium"))}
+    return {"username": user["username"], "role": user["role"], "tier": user.get("tier", "free")}
 
 
 # -------------------------------------------------------------- /users
@@ -440,7 +931,7 @@ def auth_me(user: dict = Depends(require_login)):
 def list_users(user: dict = Depends(require_role("admin"))):
     with engine().begin() as conn:
         rows = conn.execute(text(
-            "SELECT id, username, role, premium, created_at FROM users ORDER BY username"
+            "SELECT id, username, role, subscription_tier, created_at FROM userdb.users ORDER BY username"
         )).mappings().all()
     return list(rows)
 
@@ -450,26 +941,28 @@ def upsert_user(body: CreateUserBody, user: dict = Depends(require_role("admin")
     pw_hash = bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode()
     with engine().begin() as conn:
         conn.execute(text(
-            "INSERT INTO users (username, password_hash, role, premium) VALUES (:u, :p, :r, :pr) "
+            "INSERT INTO userdb.users (username, password_hash, role, subscription_tier) "
+            "VALUES (:u, :p, :r, :t) "
             "ON CONFLICT (username) DO UPDATE SET "
-            "password_hash = EXCLUDED.password_hash, role = EXCLUDED.role, premium = EXCLUDED.premium"
-        ), {"u": body.username, "p": pw_hash, "r": body.role, "pr": body.premium})
-    return {"username": body.username, "role": body.role, "premium": body.premium}
+            "password_hash = EXCLUDED.password_hash, role = EXCLUDED.role, "
+            "subscription_tier = EXCLUDED.subscription_tier"
+        ), {"u": body.username, "p": pw_hash, "r": body.role, "t": body.subscription_tier})
+    return {"username": body.username, "role": body.role, "tier": body.subscription_tier}
 
 
 @app.delete("/users/{username}")
 def delete_user(username: str, user: dict = Depends(require_role("admin"))):
     with engine().begin() as conn:
-        target = conn.execute(text("SELECT role FROM users WHERE username = :u"), {"u": username}).first()
+        target = conn.execute(text("SELECT role FROM userdb.users WHERE username = :u"), {"u": username}).first()
         if not target:
             raise HTTPException(404, "Unbekannter Benutzer")
         if target.role == "admin":
             remaining = conn.execute(text(
-                "SELECT count(*) FROM users WHERE role = 'admin' AND username != :u"
+                "SELECT count(*) FROM userdb.users WHERE role = 'admin' AND username != :u"
             ), {"u": username}).scalar()
             if remaining == 0:
                 raise HTTPException(400, "Der letzte Admin kann nicht gelöscht werden")
-        conn.execute(text("DELETE FROM users WHERE username = :u"), {"u": username})
+        conn.execute(text("DELETE FROM userdb.users WHERE username = :u"), {"u": username})
     return {"ok": True}
 
 
@@ -620,11 +1113,15 @@ def create_users_table_if_missing() -> None:
     try:
         ensure_users_table()
     except Exception as e:
-        print(f"[startup] could not ensure users table: {e}", flush=True)
+        log.error("could not ensure users table", extra={"error": str(e)})
     try:
         ai_agent.ensure_ai_schema(engine)
     except Exception as e:
-        print(f"[startup] could not ensure AI agent schema/role: {e}", flush=True)
+        log.error("could not ensure AI agent schema/role", extra={"error": str(e)})
+    try:
+        ensure_pointcloud_table()
+    except Exception as e:
+        log.error("could not ensure point cloud table", extra={"error": str(e)})
 
 
 def slugify(name: str) -> str:
@@ -796,6 +1293,142 @@ def read_layers() -> list[dict]:
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
+def read_pointcloud_layers() -> list[dict]:
+    """The point-cloud half of the layer list, from configdb.point_clouds.
+
+    Every dict carries the same key set parse_layers() produces, for exactly
+    the reason parse_layers() gives for filling in None on a raster entry:
+    downstream code should never have to ask which fields exist. `block` is
+    None because there is no mapfile block — that absence is what
+    read_layers()' consumers rely on, see all_layers().
+
+    Best-effort: a dead database must not take /layers down for the mapfile
+    layers too, which is the same degradation contract the frontend already
+    assumes about this endpoint.
+    """
+    try:
+        with engine().begin() as conn:
+            rows = conn.execute(text(
+                "SELECT layer_name, title, point_count, srs_in, west, south, east, north, "
+                "has_color, has_classification FROM configdb.point_clouds ORDER BY created_at"
+            )).mappings().all()
+    except Exception as e:
+        log.warning("could not read point cloud layers", extra={"error": str(e)})
+        return []
+    out = []
+    for r in rows:
+        bbox = None
+        if None not in (r["west"], r["south"], r["east"], r["north"]):
+            bbox = {"west": r["west"], "south": r["south"], "east": r["east"], "north": r["north"]}
+        out.append({
+            "name": r["layer_name"],
+            "geom_col": None,
+            "schema": None,
+            "table": None,
+            "unique_col": None,
+            "srid": None,
+            "path": str(POINTCLOUDS_DIR / r["layer_name"]),
+            "geometry_type": "POINTCLOUD",
+            "title": r["title"],
+            "bands": None,
+            "block": None,
+            # Point-cloud-only extras. The frontend reads tileset_url straight
+            # off this rather than rebuilding the path client-side, so where
+            # the files live stays one decision made in one place.
+            "tileset_url": f"/pointclouds/{r['layer_name']}/tileset.json",
+            "bbox": bbox,
+            "point_count": r["point_count"],
+            "srs_in": r["srs_in"],
+            "has_color": r["has_color"],
+            "has_classification": r["has_classification"],
+        })
+    return out
+
+
+def all_layers() -> list[dict]:
+    """Every published layer, from both sources.
+
+    read_layers() stays mapfile-only on purpose and must not learn about point
+    clouds: generate_mapproxy_config() would emit a cache/source pair pointing
+    at a MapServer layer that does not exist, and materialize_saved_styles()
+    would try to seed a CLASS-based style for something that has no block to
+    style. Both iterate read_layers() directly. Unioning here instead means
+    /layers and the name-collision checks see everything while those two keep
+    seeing only what they can actually act on.
+    """
+    return read_layers() + read_pointcloud_layers()
+
+
+def record_layer_owner(layer_name: str, user: dict) -> None:
+    """Called once, right after a layer publishes successfully, from every
+    publish path (/upload, /upload-raster[-zip], /raster-composite,
+    /register-table, /geoprocess) — the one thing PATCH /layer-config and
+    DELETE /layers' ownership check (require_owner_or_admin()) reads.
+    Recorded for admin publishes too (harmless, and keeps "who published
+    this" available consistently regardless of who did it)."""
+    user_id = user.get("sub")
+    if user_id is None:
+        return
+    with engine().begin() as conn:
+        conn.execute(text(
+            "INSERT INTO configdb.layer_owners (layer_name, owner_user_id) VALUES (:n, :u) "
+            "ON CONFLICT (layer_name) DO UPDATE SET owner_user_id = EXCLUDED.owner_user_id"
+        ), {"n": layer_name, "u": int(user_id)})
+
+
+def visible_layers_for(user: dict, all_layers: list[dict]) -> list[dict]:
+    """Admin/editor see everything — can't analyze or edit what you can't
+    see. A guest session (no userdb.users row at all) sees only what's
+    granted to the implicit 'guests' group. Everyone else sees what's
+    granted directly to their user id, unioned with whatever's granted to
+    any group they belong to, unioned with whatever they own
+    (configdb.layer_owners — a Pro user obviously needs to see a layer the
+    moment they publish it, not only once an admin grants it back to them).
+    Reused by GET /layers and by the grants-admin screen's own listing."""
+    if is_privileged_role(user):
+        return all_layers
+    names = {l["name"] for l in all_layers}
+    with engine().begin() as conn:
+        if is_guest(user):
+            granted = conn.execute(text(
+                "SELECT g.layer_name FROM configdb.layer_grants g "
+                "JOIN configdb.groups gr ON gr.id = g.principal_id AND g.principal_type = 'group' "
+                "WHERE gr.name = 'guests'"
+            )).scalars().all()
+        else:
+            granted = conn.execute(
+                text(
+                    "SELECT layer_name FROM configdb.layer_grants "
+                    "WHERE principal_type = 'user' AND principal_id = :uid "
+                    "UNION "
+                    "SELECT g.layer_name FROM configdb.layer_grants g "
+                    "JOIN configdb.group_members gm "
+                    "ON gm.group_id = g.principal_id AND g.principal_type = 'group' "
+                    "WHERE gm.user_id = :uid "
+                    "UNION "
+                    "SELECT layer_name FROM configdb.layer_owners WHERE owner_user_id = :uid"
+                ),
+                {"uid": int(user["sub"])},
+            ).scalars().all()
+    granted_set = set(granted) & names
+    return [l for l in all_layers if l["name"] in granted_set]
+
+
+def require_owner_or_admin(layer_name: str, user: dict) -> None:
+    """Admin/editor always pass. Otherwise the caller must be pro+ (checked
+    by the route's own require_tier dependency already) *and* own this
+    specific layer — a guest/free user never reaches here at all since they
+    can't pass require_tier("pro") in the first place."""
+    if is_privileged_role(user):
+        return
+    with engine().begin() as conn:
+        row = conn.execute(
+            text("SELECT owner_user_id FROM configdb.layer_owners WHERE layer_name = :n"), {"n": layer_name}
+        ).first()
+    if not row or str(row.owner_user_id) != str(user.get("sub")):
+        raise HTTPException(403, "Nur der Ersteller oder ein Admin darf diesen Layer bearbeiten")
+
+
 def append_layer_block(block: str) -> None:
     check_mapfile_volume()
     MAPFILE_DIR.mkdir(parents=True, exist_ok=True)
@@ -869,7 +1502,7 @@ def replace_layer_block(name: str, new_block: str) -> bool:
 
 def build_layer_block(
     name, title, ms_type, schema, table, geom_col, unique_col, srid,
-    classification=None, max_scale_denom=None,
+    classification=None, max_scale_denom=None, outline_width=None,
 ) -> str:
     e = pg_env()
     # Scale cap: without one, a zoomed-out view draws every row in the table.
@@ -904,7 +1537,7 @@ def build_layer_block(
         # registered tables — the two must stay indistinguishable downstream.
         f'    "ows_keywordlist"   "source:{schema}.{table},geomtype:{ms_type.lower()}"\n'
         "  END\n"
-        f"{build_class_blocks(classification, ms_type, title)}"
+        f"{build_class_blocks(classification, ms_type, title, outline_width)}"
         "END\n"
     )
 
@@ -1060,6 +1693,7 @@ def apply_layer_style(name: str) -> bool:
         srid=match["srid"],
         classification=cfg.get("classification"),
         max_scale_denom=cfg.get("maxScaleDenom"),
+        outline_width=cfg.get("outlineWidth"),
     )
     # No-op when the block is already what it should be. Matters on startup,
     # which runs this for every layer: an unconditional purge there would throw
@@ -1126,7 +1760,7 @@ def unique_table_name(base: str) -> str:
     with engine().begin() as conn:
         existing = {
             r[0] for r in conn.execute(
-                text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'raw'")
+                text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'dwh'")
             ).all()
         }
     name = f"upload_{base}"
@@ -1205,12 +1839,12 @@ def sweep_upload_tmp_dir() -> None:
 
 
 @app.post("/upload")
-async def upload(
+def upload(
     file: UploadFile | None = File(None),
     title: str | None = Form(None),
     layer: str | None = Form(None),
     upload_token: str | None = Form(None),
-    user: dict = Depends(require_role("admin")),
+    user: dict = Depends(require_tier("pro")),
 ):
     sweep_upload_tmp_dir()
     UPLOAD_TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -1239,7 +1873,7 @@ async def upload(
         tmp_path = UPLOAD_TMP_DIR / f"{uuid.uuid4().hex}{suffix}"
         size = 0
         with open(tmp_path, "wb") as tmp:
-            while chunk := await file.read(1024 * 1024):
+            while chunk := file.file.read(1024 * 1024):
                 size += len(chunk)
                 if size > MAX_BYTES:
                     tmp_path.unlink(missing_ok=True)
@@ -1268,6 +1902,21 @@ async def upload(
     finally:
         tmp_path.unlink(missing_ok=True)
 
+    base_name = title or (Path(original_name).stem if original_name else layer) or tmp_path.stem
+    return ingest_geodataframe(gdf, base_name, user)
+
+
+def ingest_geodataframe(gdf, base_name: str, user: dict | None, *, require_crs: bool = False) -> dict:
+    """The shared tail of POST /upload and the QGIS-processing finalizer: an
+    in-memory GeoDataFrame becomes a dwh table and a published layer.
+
+    `require_crs` is the one real difference between the two callers. For a
+    user's uploaded file a missing CRS is assumed to be 4326 — a pragmatic
+    guess for a file someone hand-picked. For an algorithm result it is an
+    error instead: quietly assuming 4326 for the output of, say, a
+    reprojection would put the layer somewhere entirely wrong with nothing on
+    screen to suggest it.
+    """
     if gdf.empty:
         raise HTTPException(400, "File contains no features")
     if gdf.geometry.isna().all():
@@ -1278,28 +1927,42 @@ async def upload(
         raise HTTPException(400, f"Unsupported or mixed geometry types: {sorted(gdf.geom_type.unique())}")
     ms_type = families.pop()
 
-    gdf = gdf.set_crs(4326) if gdf.crs is None else gdf.to_crs(4326)
+    if gdf.crs is None:
+        if require_crs:
+            raise HTTPException(400, "Ergebnis hat kein Koordinatenbezugssystem")
+        gdf = gdf.set_crs(4326)
+    else:
+        gdf = gdf.to_crs(4326)
 
-    base_name = title or (Path(original_name).stem if original_name else layer) or tmp_path.stem
     slug = slugify(base_name)
     table = unique_table_name(slug)
     geom_col = gdf.geometry.name
 
     eng = engine()
     try:
-        gdf.to_postgis(table, eng, schema="raw", if_exists="fail", index=False)
+        gdf.to_postgis(table, eng, schema="dwh", if_exists="fail", index=False)
+        # ensure_unique_column() rather than a hardcoded "ADD COLUMN gid": a
+        # QGIS algorithm result copies its source table's columns verbatim, and
+        # every layer this app publishes already has a "gid", so adding one
+        # unconditionally collides every single time. That is the same trap
+        # ensure_unique_column() was written for on the /geoprocess path — it
+        # falls back to gid_2, gid_3, ... — so reuse it instead of growing a
+        # second answer to the same question. An uploaded file normally has no
+        # gid, so /upload still gets a plain "gid" exactly as before.
+        unique_col = ensure_unique_column("dwh", table)
         with eng.begin() as conn:
-            conn.execute(text(f'ALTER TABLE "raw"."{table}" ADD COLUMN gid SERIAL PRIMARY KEY'))
-            conn.execute(text(f'CREATE INDEX "{table}_geom_gist" ON "raw"."{table}" USING GIST ("{geom_col}")'))
-            conn.execute(text(f'ANALYZE "raw"."{table}"'))
+            conn.execute(text(f'CREATE INDEX "{table}_geom_gist" ON "dwh"."{table}" USING GIST ("{geom_col}")'))
+            conn.execute(text(f'ANALYZE "dwh"."{table}"'))
     except Exception as e:
         with eng.begin() as conn:
-            conn.execute(text(f'DROP TABLE IF EXISTS "raw"."{table}"'))
+            conn.execute(text(f'DROP TABLE IF EXISTS "dwh"."{table}"'))
         raise HTTPException(500, f"Failed to load into PostGIS: {e}")
 
-    append_layer_block(build_layer_block(table, base_name, ms_type, "raw", table, geom_col, "gid", 4326))
-    seed_layer_style(table, ms_type, "raw", table)
+    append_layer_block(build_layer_block(table, base_name, ms_type, "dwh", table, geom_col, unique_col, 4326))
+    seed_layer_style(table, ms_type, "dwh", table)
     generate_mapproxy_config()
+    if user is not None:
+        record_layer_owner(table, user)
 
     return {
         "layer": table,
@@ -1369,9 +2032,10 @@ def build_raster_overviews(path: Path) -> None:
 
 def unique_raster_name(base: str) -> str:
     """Same collision-avoidance shape as publish_derived_table()'s inline
-    dbtable_ loop, checked against read_layers() — there is no PostGIS table
-    to check unique_table_name()-style against for a raster."""
-    existing = {l["name"] for l in read_layers()}
+    dbtable_ loop, checked against all_layers() — there is no PostGIS table
+    to check unique_table_name()-style against for a raster, and the name has
+    to be unique against point clouds too, which live outside the mapfile."""
+    existing = {l["name"] for l in all_layers()}
     name = f"raster_{base}"
     n = 2
     while name in existing:
@@ -1431,6 +2095,7 @@ def build_raster_layer_block(
 
 def publish_raster_layer(
     name: str, title: str, path: Path, bands: int, batch: str | None = None, batch_title: str | None = None,
+    user: dict | None = None,
 ) -> dict:
     """The raster analogue of publish_derived_table()'s tail. No
     seed_layer_style() call — a continuous/RGB raster has no CLASS-based
@@ -1438,12 +2103,14 @@ def publish_raster_layer(
     anyway."""
     append_layer_block(build_raster_layer_block(name, title, path, bands, batch, batch_title))
     generate_mapproxy_config()
+    if user is not None:
+        record_layer_owner(name, user)
     return {"layer": name, "title": title, "geometry_type": "RASTER"}
 
 
 def normalize_tile_and_publish(
     src: Path, base_title: str, *, bands: int, width: int, height: int, data_type: str | None,
-    batch: str | None = None, batch_title: str | None = None,
+    batch: str | None = None, batch_title: str | None = None, user: dict | None = None,
 ) -> dict:
     """Shared tail of every raster-publish path: reproject+tile, build
     overviews, land it in RASTERS_DIR under a unique name, append the LAYER
@@ -1464,7 +2131,7 @@ def normalize_tile_and_publish(
         # filesystem, and os.replace() can't cross devices.
         shutil.move(str(normalized_path), str(final_path))
 
-        result = publish_raster_layer(name, base_title, final_path, bands, batch, batch_title)
+        result = publish_raster_layer(name, base_title, final_path, bands, batch, batch_title, user)
     except Exception:
         if final_path is not None:
             final_path.unlink(missing_ok=True)
@@ -1477,10 +2144,10 @@ def normalize_tile_and_publish(
 
 
 @app.post("/upload-raster")
-async def upload_raster(
+def upload_raster(
     file: UploadFile = File(...),
     title: str | None = Form(None),
-    user: dict = Depends(require_role("admin")),
+    user: dict = Depends(require_tier("pro")),
 ):
     check_raster_volume()
     UPLOAD_TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -1492,7 +2159,7 @@ async def upload_raster(
     tmp_path = UPLOAD_TMP_DIR / f"{uuid.uuid4().hex}{suffix}"
     size = 0
     with open(tmp_path, "wb") as tmp:
-        while chunk := await file.read(1024 * 1024):
+        while chunk := file.file.read(1024 * 1024):
             size += len(chunk)
             if size > MAX_BYTES:
                 tmp_path.unlink(missing_ok=True)
@@ -1506,7 +2173,7 @@ async def upload_raster(
         result = normalize_tile_and_publish(
             tmp_path, base_name,
             bands=len(info["bands"]), width=info["size"][0], height=info["size"][1],
-            data_type=band.get("type"),
+            data_type=band.get("type"), user=user,
         )
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -1595,10 +2262,10 @@ def extract_raster_zip(zip_path: Path, dest: Path) -> list[dict]:
 
 
 @app.post("/upload-raster-zip")
-async def upload_raster_zip(
+def upload_raster_zip(
     file: UploadFile = File(...),
     title: str | None = Form(None),
-    user: dict = Depends(require_role("admin")),
+    user: dict = Depends(require_tier("pro")),
 ):
     """Every raster-readable member of the zip gets published immediately,
     each as its own single-band layer — no per-band choice at upload time
@@ -1620,7 +2287,7 @@ async def upload_raster_zip(
     zip_path = UPLOAD_TMP_DIR / f"{uuid.uuid4().hex}.zip"
     size = 0
     with open(zip_path, "wb") as tmp:
-        while chunk := await file.read(1024 * 1024):
+        while chunk := file.file.read(1024 * 1024):
             size += len(chunk)
             if size > MAX_BYTES:
                 zip_path.unlink(missing_ok=True)
@@ -1648,7 +2315,7 @@ async def upload_raster_zip(
                     published.append(normalize_tile_and_publish(
                         Path(tmpdir) / m["path"], m["band_label"] or Path(m["path"]).stem,
                         bands=m["bands"], width=m["width"], height=m["height"], data_type=m["data_type"],
-                        batch=batch, batch_title=batch_title,
+                        batch=batch, batch_title=batch_title, user=user,
                     ))
                 except HTTPException as e:
                     failed.append({"input": m["path"], "error": e.detail})
@@ -1677,7 +2344,7 @@ def raster_layer_or_400(layers_by_name: dict[str, dict], name: str, role: str) -
 
 
 @app.post("/raster-composite")
-def raster_composite(body: RasterCompositeBody, user: dict = Depends(require_role("admin"))):
+def raster_composite(body: RasterCompositeBody, user: dict = Depends(require_tier("pro"))):
     """Composes three already-published single-band raster layers into one
     RGB layer — "on the fly" in the literal sense: every raster this app
     publishes is already reprojected to EPSG:4326 at its own publish time
@@ -1705,7 +2372,289 @@ def raster_composite(body: RasterCompositeBody, user: dict = Depends(require_rol
     # sidecar — build_raster_overviews() is already generic enough to not
     # care which of the two shapes it's building for.
     build_raster_overviews(dst)
-    return publish_raster_layer(name, base_title, dst, bands=3)
+    return publish_raster_layer(name, base_title, dst, bands=3, user=user)
+
+
+# ------------------------------------------------------- /upload-pointcloud
+
+# LAS point formats that carry red/green/blue dimensions. Anything else has
+# no per-point color at all, which is why the frontend defaults such a layer
+# to a flat single color — an uncolored cloud renders white and, against the
+# globe's white base color, looks like a failed upload rather than a working
+# layer with no color data.
+POINTCLOUD_RGB_FORMATS = {2, 3, 5, 7, 8, 10}
+
+# How many points probe_pointcloud() looks at to decide whether the file has
+# meaningful classification. A LAS where everything is class 0/1 (never
+# classified / unassigned) gets no "colour by classification" option, and
+# finding that out must not mean reading two gigabytes to answer a question
+# about a dropdown.
+POINTCLOUD_CLASS_SAMPLE = 2_000_000
+
+
+def run_py3dtiles(cmd: list[str], timeout: int) -> None:
+    """py3dtiles' analogue of run_gdal(): shell out, surface the tool's own
+    stderr on failure, bound the runtime. Separate from run_gdal() only for
+    the timeout — 300s is right for a gdalwarp pass and far too short for a
+    point-cloud conversion, which is the slow part of this whole route."""
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout)
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(400, f"py3dtiles failed: {e.stderr.strip()[-2000:]}")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(
+            400,
+            "Die Konvertierung hat zu lange gedauert. Die Datei ist zu gross für den "
+            "synchronen Upload — bitte in kleinere Kacheln aufteilen.",
+        )
+
+
+def probe_pointcloud(path: Path) -> dict:
+    """laspy header sniff, run before any conversion so a bad file fails fast.
+
+    Also the defense against extension spoofing, exactly as probe_raster() is
+    for GeoTIFFs: anything that is not really a LAS/LAZ fails the header parse
+    here and 400s with laspy's own message, rather than being handed to
+    py3dtiles and producing a confusing failure several minutes later.
+    """
+    try:
+        with laspy.open(str(path)) as f:
+            header = f.header
+            crs = header.parse_crs()
+            point_format = header.point_format.id
+            point_count = header.point_count
+            mins, maxs = header.mins, header.maxs
+
+            # py3dtiles builds its --extra-fields list from the point format's
+            # *dtype* field names, not laspy's logical dimension names. In
+            # point formats 0-5 the classification is packed into a shared
+            # byte exposed as "raw_classification", so "classification" is not
+            # a dtype field there and py3dtiles silently writes a column of
+            # zeros instead of refusing — a layer that colours every point the
+            # same and looks broken. Verified directly against both shapes;
+            # only formats 6+ expose it standalone.
+            classification_convertible = "classification" in header.point_format.dtype().fields
+
+            has_classification = False
+            if point_count and classification_convertible:
+                # Chunked, and capped: this is only deciding whether to offer
+                # a dropdown entry, so a partial answer on a huge file is the
+                # right trade. Classes 0 and 1 both mean "not classified".
+                seen = 0
+                for chunk in f.chunk_iterator(1_000_000):
+                    if set(np.unique(chunk.classification)) - {0, 1}:
+                        has_classification = True
+                        break
+                    seen += len(chunk.classification)
+                    if seen >= POINTCLOUD_CLASS_SAMPLE:
+                        break
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Datei konnte nicht als LAS/LAZ gelesen werden: {e}")
+
+    return {
+        "point_count": int(point_count),
+        "epsg": crs.to_epsg() if crs is not None else None,
+        "point_format": point_format,
+        "has_color": point_format in POINTCLOUD_RGB_FORMATS,
+        "has_classification": has_classification,
+        "mins": list(mins),
+        "maxs": list(maxs),
+    }
+
+
+def pointcloud_bbox_wgs84(epsg: int, mins: list, maxs: list) -> dict | None:
+    """Source-CRS corner coordinates -> the WGS84 bbox the layer panel's
+    zoom-to-extent needs.
+
+    always_xy=True is load-bearing, not decoration: EPSG:4326 declares
+    latitude first, so without it pyproj returns (lat, lon) here and the bbox
+    comes out silently transposed — a layer that zooms to the wrong hemisphere
+    rather than failing.
+    """
+    try:
+        tf = pyproj.Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
+        xs, ys = tf.transform([mins[0], maxs[0]], [mins[1], maxs[1]])
+    except Exception as e:
+        log.warning("could not project point cloud bbox", extra={"error": str(e)})
+        return None
+    if not all(map(math.isfinite, (*xs, *ys))):
+        return None
+    return {"west": min(xs), "south": min(ys), "east": max(xs), "north": max(ys)}
+
+
+def unique_pointcloud_name(base: str) -> str:
+    """Same collision-avoidance shape as unique_raster_name(), but checked
+    against all_layers() so a point cloud can never take a name a mapfile
+    layer already holds (or the reverse — the raster and vector paths check
+    the same combined set).
+
+    The prefix must not be `upload_`: collectionFor() in wms.ts falls back to
+    dwh.<name> for anything named that way, which would offer an attribute
+    table against a PostGIS table that does not exist.
+    """
+    existing = {l["name"] for l in all_layers()}
+    name = f"pointcloud_{base}"
+    n = 2
+    while name in existing:
+        name = f"pointcloud_{base}_{n}"
+        n += 1
+    return name
+
+
+def publish_pointcloud_layer(name: str, title: str, probe: dict, srs_in: int, user: dict | None) -> dict:
+    """The point-cloud analogue of publish_raster_layer()'s tail — and much
+    shorter, because none of the mapfile machinery applies. No
+    append_layer_block() (there is no block), no generate_mapproxy_config()
+    (nothing to cache — the tileset is served straight off disk), and no
+    seed_layer_style() (no CLASS-based styling for a 3D Tiles tileset).
+    """
+    bbox = pointcloud_bbox_wgs84(srs_in, probe["mins"], probe["maxs"])
+    with engine().begin() as conn:
+        conn.execute(text(
+            "INSERT INTO configdb.point_clouds "
+            "(layer_name, title, point_count, srs_in, west, south, east, north, "
+            " has_color, has_classification) "
+            "VALUES (:n, :t, :pc, :srs, :w, :s, :e, :no, :hc, :hcl)"
+        ), {
+            "n": name, "t": title, "pc": probe["point_count"], "srs": str(srs_in),
+            "w": bbox["west"] if bbox else None, "s": bbox["south"] if bbox else None,
+            "e": bbox["east"] if bbox else None, "no": bbox["north"] if bbox else None,
+            "hc": probe["has_color"], "hcl": probe["has_classification"],
+        })
+    if user is not None:
+        record_layer_owner(name, user)
+    return {
+        "layer": name,
+        "title": title,
+        "geometry_type": "POINTCLOUD",
+        "tileset_url": f"/pointclouds/{name}/tileset.json",
+        "point_count": probe["point_count"],
+        "bbox": bbox,
+        "has_color": probe["has_color"],
+        "has_classification": probe["has_classification"],
+    }
+
+
+def delete_pointcloud_layer(name: str, delete_files: bool) -> bool:
+    """Unpublishes a point cloud, or reports that `name` is not one.
+
+    Returns False for a name with no registry row, which is what lets DELETE
+    /layers fall through to its normal mapfile path — the caller has already
+    done the ownership check, so this is only ever deciding which kind of
+    layer it is holding.
+    """
+    with engine().begin() as conn:
+        deleted = conn.execute(
+            text("DELETE FROM configdb.point_clouds WHERE layer_name = :n RETURNING layer_name"),
+            {"n": name},
+        ).first()
+    if deleted is None:
+        return False
+    if delete_files:
+        # Reconstructed from the name the registry just confirmed, never from
+        # a stored path — the same reasoning the raster branch below gives.
+        shutil.rmtree(POINTCLOUDS_DIR / name, ignore_errors=True)
+    return True
+
+
+@app.post("/upload-pointcloud")
+def upload_pointcloud(
+    file: UploadFile = File(...),
+    title: str | None = Form(None),
+    srs: str | None = Form(None),
+    user: dict = Depends(require_tier("pro")),
+):
+    check_pointcloud_volume()
+    UPLOAD_TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in POINTCLOUD_ALLOWED_EXT:
+        raise HTTPException(
+            400,
+            f"Unsupported file type '{suffix}'. Allowed: {', '.join(sorted(POINTCLOUD_ALLOWED_EXT))}",
+        )
+
+    tmp_path = UPLOAD_TMP_DIR / f"{uuid.uuid4().hex}{suffix}"
+    size = 0
+    with open(tmp_path, "wb") as tmp:
+        while chunk := file.file.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_BYTES:
+                tmp_path.unlink(missing_ok=True)
+                raise HTTPException(413, f"File exceeds the {MAX_BYTES // (1024*1024)} MB limit")
+            tmp.write(chunk)
+
+    work_dir = UPLOAD_TMP_DIR / uuid.uuid4().hex
+    final_dir: Path | None = None
+    try:
+        probe = probe_pointcloud(tmp_path)
+
+        # The input CRS is required, never guessed: putting a cloud on the
+        # globe with the wrong one silently drops it in the ocean or
+        # underground, which is far worse than refusing the upload. The
+        # header is preferred, the form field is the fallback, and if there
+        # is neither the error says exactly what to supply.
+        srs_in = probe["epsg"]
+        if srs:
+            try:
+                srs_in = int(str(srs).strip().upper().removeprefix("EPSG:"))
+            except ValueError:
+                raise HTTPException(400, f"Ungültiger EPSG-Code: '{srs}'")
+        if srs_in is None:
+            raise HTTPException(
+                400,
+                "Die Datei enthält kein Koordinatensystem — bitte EPSG-Code angeben, z.B. 25832.",
+            )
+
+        base_title = title or Path(file.filename or "").stem or "punktwolke"
+        name = unique_pointcloud_name(slugify(base_title))
+
+        # Only asked for when probe_pointcloud() proved it will actually
+        # arrive: py3dtiles warns but still succeeds when the field is
+        # missing, writing zeros, so passing it unconditionally would produce
+        # a "colour by classification" option that greys the whole cloud out.
+        extra_fields = ["--extra-fields", "classification"] if probe["has_classification"] else []
+
+        run_py3dtiles([
+            PY3DTILES_BIN, "convert", str(tmp_path),
+            "--out", str(work_dir),
+            "--srs_in", str(srs_in),
+            "--srs_out", POINTCLOUD_SRS_OUT,
+            "--overwrite",
+            *extra_fields,
+            # Bounded rather than the CPU-count default: this runs inside a
+            # request on a box that is also serving the rest of the stack.
+            "--jobs", "2",
+            # Docker gives a container 64MB of /dev/shm by default, which is
+            # exactly the "environment lacking shared memory" this flag
+            # exists for. Cheaper than raising shm_size on the service.
+            "--disable-processpool",
+        ], timeout=POINTCLOUD_CONVERT_TIMEOUT)
+
+        # py3dtiles can exit 0 having written nothing usable, so the presence
+        # of the tileset is checked rather than assumed — publishing a row for
+        # an empty directory would produce a layer that 404s for everyone.
+        if not (work_dir / "tileset.json").exists():
+            raise HTTPException(400, "Die Konvertierung hat kein tileset.json erzeugt.")
+
+        final_dir = POINTCLOUDS_DIR / name
+        # shutil.move(), not os.replace(): the upload temp dir and the
+        # POINTCLOUDS_DIR bind mount are not guaranteed to be the same
+        # filesystem, same as normalize_tile_and_publish() documents.
+        shutil.move(str(work_dir), str(final_dir))
+
+        result = publish_pointcloud_layer(name, base_title, probe, srs_in, user)
+    except Exception:
+        if final_dir is not None:
+            shutil.rmtree(final_dir, ignore_errors=True)
+        raise
+    finally:
+        tmp_path.unlink(missing_ok=True)
+        shutil.rmtree(work_dir, ignore_errors=True)  # no-op once moved
+
+    return result
 
 
 # --------------------------------------------------------- /register-table
@@ -1762,7 +2711,7 @@ def non_geometry_columns(schema: str, table: str, geom_col: str) -> list[str]:
     return [r[0] for r in rows]
 
 
-def publish_derived_table(schema: str, table: str, title: str | None) -> dict:
+def publish_derived_table(schema: str, table: str, title: str | None, user: dict | None = None) -> dict:
     """The shared tail of /register-table and /geoprocess: a table that
     already exists in PostGIS, published as a new LAYER block."""
     geom_col, srid = find_geometry_column(schema, table)
@@ -1771,7 +2720,9 @@ def publish_derived_table(schema: str, table: str, title: str | None) -> dict:
 
     resolved_title = title or table
     base = slugify(f"{schema}_{table}")
-    existing_names = {l["name"] for l in read_layers()}
+    # all_layers(), not read_layers(): a published name has to be unique
+    # across both sources, since point clouds are not in the mapfile.
+    existing_names = {l["name"] for l in all_layers()}
     name = f"dbtable_{base}"
     n = 2
     while name in existing_names:
@@ -1781,6 +2732,8 @@ def publish_derived_table(schema: str, table: str, title: str | None) -> dict:
     append_layer_block(build_layer_block(name, resolved_title, ms_type, schema, table, geom_col, unique_col, srid))
     seed_layer_style(name, ms_type, schema, table)
     generate_mapproxy_config()
+    if user is not None:
+        record_layer_owner(name, user)
 
     return {
         "layer": name,
@@ -1904,23 +2857,80 @@ def column_stats(
     }
 
 
+GROUPBY_LABEL_SEP = " / "
+GROUPBY_AGGS = {"count", "sum", "avg", "min", "max"}
+
+
+def column_is_numeric(schema: str, table: str, column: str) -> bool:
+    with engine().begin() as conn:
+        data_type = conn.execute(
+            text(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_schema = :s AND table_name = :t AND column_name = :c"
+            ),
+            {"s": schema, "t": table, "c": column},
+        ).scalar()
+    return data_type in (
+        "smallint", "integer", "bigint", "decimal", "numeric", "real", "double precision",
+    )
+
+
 @app.get("/column-groupby")
 def column_groupby(
-    schema: str, table: str, column: str, filter: str | None = None, user: dict = Depends(require_login)
+    schema: str, table: str, column: str, filter: str | None = None,
+    value_column: str | None = None, agg: str = "count",
+    user: dict = Depends(require_tier("pro")),
 ):
     """
-    Value + count per distinct value, ordered by count descending — the
-    server-side equivalent of the client-side group-by SelectionDashboard.tsx
-    does over a real selection's in-memory features, for the "everything
-    selected" overview where there are none. Capped like /distinct-values;
+    Value + count per distinct value (or, for `column` given as a
+    comma-separated list, per distinct *combination* of values — premium
+    only, see below), ordered by count descending — the server-side
+    equivalent of the client-side group-by SelectionDashboard.tsx does over
+    a real selection's in-memory features, for the "everything selected"
+    overview where there are none. Capped like /distinct-values;
     `totalCount` is an exact count across every value (not just the capped
     ones returned), so the frontend can compute an exact "Andere" remainder
     even beyond the cap. `filter`, when given, scopes both queries to that
     layer's active attribute filter — see build_filter_where().
+
+    `value_column`/`agg` are optional — when given, each bucket also carries
+    `sum`/`min`/`max` alongside `count` (now COUNT(value_column), not
+    COUNT(*)), and `agg` picks which of those four orders the result (still
+    capped/returned as all four either way, cheap in the same GROUP BY — the
+    frontend picks which one to display and needs the others anyway to
+    reconstruct an exact "Andere" bucket for count/sum/avg; see
+    SelectionDashboard.tsx's bucketTopNByAgg()). `sum` (and therefore `avg`,
+    which the frontend derives from sum/count rather than a fifth number)
+    only ever applies to a numeric column — checked via information_schema
+    here rather than trusting the frontend, since a raw SUM() on a text
+    column is a Postgres error, not a 0.
     """
     schema = check_identifier(schema, "schema name")
     table = check_identifier(table, "table name")
-    column = check_identifier(column, "column name")
+    columns = [check_identifier(c.strip(), "column name") for c in column.split(",") if c.strip()]
+    if not columns:
+        raise HTTPException(400, "column is required")
+    # Grouping by more than one column at once is the premium-tier feature
+    # here — a single column stays available at the existing pro+ gate
+    # (this route's own Depends above), unchanged.
+    if len(columns) > 1 and not (is_privileged_role(user) or user.get("tier") == "premium"):
+        raise HTTPException(403, "Gruppierung nach mehreren Spalten erfordert Tarif 'premium'")
+
+    if agg not in GROUPBY_AGGS:
+        raise HTTPException(400, f"agg must be one of {sorted(GROUPBY_AGGS)}")
+    value_col = check_identifier(value_column, "value column") if value_column else None
+    if value_col and agg in ("sum", "avg") and not column_is_numeric(schema, table, value_col):
+        raise HTTPException(400, f"'{value_col}' is not numeric — sum/avg require a numeric value column")
+
+    select_cols = ", ".join(f'"{c}"' for c in columns)
+    not_null = " AND ".join(f'"{c}" IS NOT NULL' for c in columns)
+
+    agg_select = ", COUNT(*) AS agg_count"
+    order_expr = "agg_count"
+    if value_col:
+        sum_select = f', SUM("{value_col}") AS agg_sum' if agg in ("sum", "avg") else ""
+        agg_select = f' , COUNT("{value_col}") AS agg_count, MIN("{value_col}") AS agg_min, MAX("{value_col}") AS agg_max{sum_select}'
+        order_expr = {"count": "agg_count", "min": "agg_min", "max": "agg_max", "sum": "agg_sum", "avg": "agg_sum"}[agg]
 
     layer_filter = parse_layer_filter(filter)
     params: dict = {"limit": DISTINCT_VALUES_LIMIT + 1}
@@ -1931,29 +2941,39 @@ def column_groupby(
     with engine().begin() as conn:
         rows = conn.execute(
             text(
-                f'SELECT "{column}", COUNT(*) FROM "{schema}"."{table}" '
-                f'WHERE "{column}" IS NOT NULL {extra_where} GROUP BY "{column}" ORDER BY COUNT(*) DESC LIMIT :limit'
+                f'SELECT {select_cols}{agg_select} FROM "{schema}"."{table}" '
+                f'WHERE {not_null} {extra_where} GROUP BY {select_cols} ORDER BY {order_expr} DESC NULLS LAST LIMIT :limit'
             ),
             params,
-        ).all()
+        ).mappings().all()
         total_params: dict = {}
         total_where = build_filter_where(layer_filter, total_params)
         if total_where:
             total_where = f"AND {total_where}"
         total = conn.execute(
-            text(f'SELECT COUNT(*) FROM "{schema}"."{table}" WHERE "{column}" IS NOT NULL {total_where}'),
+            text(f'SELECT COUNT(*) FROM "{schema}"."{table}" WHERE {not_null} {total_where}'),
             total_params,
         ).scalar()
 
+    def bucket(r: dict) -> dict:
+        label = GROUPBY_LABEL_SEP.join(str(r[c]) for c in columns)
+        b = {"value": label, "count": r["agg_count"]}
+        if value_col:
+            b["min"] = r.get("agg_min")
+            b["max"] = r.get("agg_max")
+            if "agg_sum" in r:
+                b["sum"] = r["agg_sum"]
+        return b
+
     return {
-        "buckets": [{"value": str(r[0]), "count": r[1]} for r in rows[:DISTINCT_VALUES_LIMIT]],
+        "buckets": [bucket(r) for r in rows[:DISTINCT_VALUES_LIMIT]],
         "totalCount": total,
         "truncated": len(rows) > DISTINCT_VALUES_LIMIT,
     }
 
 
 @app.get("/table-count")
-def table_count(schema: str, table: str, filter: str | None = None, user: dict = Depends(require_login)):
+def table_count(schema: str, table: str, filter: str | None = None, user: dict = Depends(require_tier("pro"))):
     """
     Plain row count for a whole table — the dashboard overview card's
     headline number (the "everything selected" equivalent of a real
@@ -2003,10 +3023,10 @@ def list_tables(user: dict = Depends(require_login)):
 
 
 @app.post("/register-table")
-def register_table(body: RegisterTableBody, user: dict = Depends(require_role("admin"))):
+def register_table(body: RegisterTableBody, user: dict = Depends(require_tier("pro"))):
     schema = check_identifier(body.schema_name, "schema name")
     table = check_identifier(body.table, "table name")
-    return publish_derived_table(schema, table, body.title)
+    return publish_derived_table(schema, table, body.title, user)
 
 
 # ----------------------------------------------------------- /geoprocess
@@ -2024,7 +3044,7 @@ class GeoprocessBody(BaseModel):
 
 
 @app.post("/geoprocess")
-def geoprocess(body: GeoprocessBody, user: dict = Depends(require_role("admin"))):
+def geoprocess(body: GeoprocessBody, user: dict = Depends(require_tier("pro"))):
     return _execute_geoprocess(body, user)
 
 
@@ -2069,7 +3089,7 @@ def _execute_geoprocess(body: GeoprocessBody, user: dict) -> dict:
                 sep = ", " if other_cols else ""
                 conn.execute(
                     text(
-                        f'CREATE TABLE "raw"."{new_table}" AS '
+                        f'CREATE TABLE "dwh"."{new_table}" AS '
                         f'SELECT {other_cols}{sep}ST_Buffer(geography("{geom_a}"), :distance)::geometry AS "{geom_a}" '
                         f'FROM "{schema_a}"."{table_a}"'
                     ),
@@ -2082,7 +3102,7 @@ def _execute_geoprocess(body: GeoprocessBody, user: dict) -> dict:
                 group_by = f'GROUP BY "{group_col}"' if group_col else ""
                 conn.execute(
                     text(
-                        f'CREATE TABLE "raw"."{new_table}" AS '
+                        f'CREATE TABLE "dwh"."{new_table}" AS '
                         f'SELECT {group_select}ST_Union("{geom_a}") AS "{geom_a}" '
                         f'FROM "{schema_a}"."{table_a}" {group_by}'
                     )
@@ -2097,7 +3117,7 @@ def _execute_geoprocess(body: GeoprocessBody, user: dict) -> dict:
                 # intersect requires both inputs share a family).
                 conn.execute(
                     text(
-                        f'CREATE TABLE "raw"."{new_table}" AS '
+                        f'CREATE TABLE "dwh"."{new_table}" AS '
                         f'SELECT {other_cols}{sep}ST_CollectionExtract('
                         f'ST_Intersection(a."{geom_a}", b."{geom_b}"), 3) AS "{geom_a}" '
                         f'FROM "{schema_a}"."{table_a}" a '
@@ -2116,7 +3136,7 @@ def _execute_geoprocess(body: GeoprocessBody, user: dict) -> dict:
                 b_cols = ", ".join(f'b."{c}" AS "joined_{c}"' for c in join_cols)
                 conn.execute(
                     text(
-                        f'CREATE TABLE "raw"."{new_table}" AS '
+                        f'CREATE TABLE "dwh"."{new_table}" AS '
                         f'SELECT DISTINCT ON (a."{unique_a}") a.*, {b_cols} '
                         f'FROM "{schema_a}"."{table_a}" a '
                         f'LEFT JOIN "{schema_b}"."{table_b}" b ON ST_Intersects(a."{geom_a}", b."{geom_b}") '
@@ -2133,31 +3153,46 @@ def _execute_geoprocess(body: GeoprocessBody, user: dict) -> dict:
             # to recognize the column correctly.
             conn.execute(
                 text(
-                    f'ALTER TABLE "raw"."{new_table}" ALTER COLUMN "{geom_a}" '
+                    f'ALTER TABLE "dwh"."{new_table}" ALTER COLUMN "{geom_a}" '
                     f'TYPE geometry(Geometry, 4326) USING "{geom_a}"'
                 )
             )
     except HTTPException:
         with eng.begin() as conn:
-            conn.execute(text(f'DROP TABLE IF EXISTS "raw"."{new_table}"'))
+            conn.execute(text(f'DROP TABLE IF EXISTS "dwh"."{new_table}"'))
         raise
     except Exception as e:
         with eng.begin() as conn:
-            conn.execute(text(f'DROP TABLE IF EXISTS "raw"."{new_table}"'))
+            conn.execute(text(f'DROP TABLE IF EXISTS "dwh"."{new_table}"'))
         raise HTTPException(500, f"Geoprocessing failed: {e}")
 
-    return publish_derived_table("raw", new_table, body.title)
+    return publish_derived_table("dwh", new_table, body.title, user)
 
 
 # -------------------------------------------------------------- /layers
 
 @app.get("/layers")
 def list_layers(user: dict = Depends(require_login)):
-    return {"layers": [{k: v for k, v in l.items() if k != "block"} for l in read_layers()]}
+    layers = [{k: v for k, v in l.items() if k != "block"} for l in all_layers()]
+    return {"layers": visible_layers_for(user, layers)}
 
 
 @app.delete("/layers/{name}")
-def delete_layer(name: str, drop_table: bool = False, user: dict = Depends(require_role("admin"))):
+def delete_layer(name: str, drop_table: bool = False, user: dict = Depends(require_tier("pro"))):
+    require_owner_or_admin(name, user)
+
+    # Point clouds first: they have no LAYER block, and remove_layer_block()
+    # 404s on a name it cannot find — so checking after it would make a point
+    # cloud undeletable. Nothing below this branch applies to one either;
+    # there is no tile cache to purge and no mapproxy entry to regenerate,
+    # because generate_mapproxy_config() reads read_layers() and so has never
+    # seen this layer at all.
+    if delete_pointcloud_layer(name, drop_table):
+        return {
+            "deleted": name, "table_dropped": False, "file_deleted": drop_table,
+            "schema": None, "table": None,
+        }
+
     removed = remove_layer_block(name)
     # Otherwise a layer later re-registered under the same name would be served
     # the deleted one's tiles.
@@ -2247,39 +3282,42 @@ class LayerConfigPatch(BaseModel):
     # Clearing one goes through DELETE /layer-config/{name}/maxScaleDenom,
     # since exclude_none drops an explicit null from a PATCH.
     maxScaleDenom: int | None = None
+    # Border thickness around each polygon, in pixels. Absent = the default
+    # (DEFAULT_POLYGON_OUTLINE_WIDTH); 0 = no border. Polygon layers only —
+    # points and lines carry their own size in the classification instead.
+    outlineWidth: float | None = Field(default=None, ge=0, le=MAX_POLYGON_OUTLINE_WIDTH)
 
 
 # Keys whose value changes what MapServer draws, so a write to any of them has
 # to rebuild the LAYER block, drop the layer's cached tiles, and bump
 # styleVersion so the browser stops painting the tiles it already holds.
-STYLE_KEYS = {"classification", "maxScaleDenom", "title"}
+STYLE_KEYS = {"classification", "maxScaleDenom", "title", "outlineWidth"}
 
 
 def read_layer_config() -> dict:
-    check_mapfile_volume()
-    if not LAYER_CONFIG_PATH.exists():
-        return {}
-    with open(LAYER_CONFIG_PATH, "r") as f:
-        fcntl.flock(f, fcntl.LOCK_SH)
-        try:
-            raw = f.read()
-            return json.loads(raw) if raw.strip() else {}
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+    """
+    Every layer's config, keyed by layer name — same shape the old
+    layer_config.json file held, now backed by configdb.layer_config so it
+    lives alongside the rest of the app's config instead of a machine-written
+    file (see bin/migrate-schemas.sql). Every caller here predates this and
+    is unaffected: the dict-in, dict-out contract didn't change.
+    """
+    with engine().begin() as conn:
+        rows = conn.execute(text("SELECT layer_name, config FROM configdb.layer_config")).all()
+    return {r[0]: r[1] for r in rows}
 
 
 def write_layer_config(config: dict) -> None:
-    check_mapfile_volume()
-    MAPFILE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(LAYER_CONFIG_PATH, "a+") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            f.seek(0)
-            f.truncate()
-            f.write(json.dumps(config, indent=2))
-            f.flush()
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+    with engine().begin() as conn:
+        conn.execute(text("DELETE FROM configdb.layer_config"))
+        for layer_name, entry in config.items():
+            conn.execute(
+                text(
+                    "INSERT INTO configdb.layer_config (layer_name, config, updated_at) "
+                    "VALUES (:n, CAST(:c AS jsonb), now())"
+                ),
+                {"n": layer_name, "c": json.dumps(entry)},
+            )
 
 
 @app.get("/layer-config")
@@ -2294,7 +3332,8 @@ def get_layer_config(name: str, user: dict = Depends(require_login)):
 
 
 @app.patch("/layer-config/{name}")
-def patch_layer_config(name: str, patch: LayerConfigPatch, user: dict = Depends(require_role("admin"))):
+def patch_layer_config(name: str, patch: LayerConfigPatch, user: dict = Depends(require_tier("pro"))):
+    require_owner_or_admin(name, user)
     config = read_layer_config()
     # exclude_unset only, deliberately not exclude_none: an explicit null has
     # to survive, because that is how "no scale cap, on purpose" is recorded.
@@ -2313,7 +3352,8 @@ def patch_layer_config(name: str, patch: LayerConfigPatch, user: dict = Depends(
 
 
 @app.delete("/layer-config/{name}")
-def delete_layer_config(name: str, user: dict = Depends(require_role("admin"))):
+def delete_layer_config(name: str, user: dict = Depends(require_tier("pro"))):
+    require_owner_or_admin(name, user)
     config = read_layer_config()
     previous = config.pop(name, None)
     # styleVersion survives the wipe, still incremented: dropping it would
@@ -2331,7 +3371,8 @@ def delete_layer_config(name: str, user: dict = Depends(require_role("admin"))):
 
 
 @app.delete("/layer-config/{name}/{key}")
-def delete_layer_config_key(name: str, key: str, user: dict = Depends(require_role("admin"))):
+def delete_layer_config_key(name: str, key: str, user: dict = Depends(require_tier("pro"))):
+    require_owner_or_admin(name, user)
     config = read_layer_config()
     entry = config.get(name)
     if entry and key in entry:
@@ -2349,11 +3390,249 @@ def delete_layer_config_key(name: str, key: str, user: dict = Depends(require_ro
     return config.get(name, {})
 
 
+# ----------------------------------------------------- /groups, /layer-grants
+# The per-user/group ACL backing visible_layers_for(). Admin-only, plain CRUD
+# over configdb.groups/group_members/layer_grants — same check_identifier-
+# style validation and engine()/text() idiom as everywhere else in this file.
+# 'guests' (seeded by ensure_users_table()) is what a guest session's
+# visibility resolves against; it can be granted layers like any other group
+# but should not be deleted (nothing stops it structurally — see GroupsAdmin.tsx).
+
+class GroupBody(BaseModel):
+    name: str
+
+
+class LayerGrantBody(BaseModel):
+    layer_name: str
+    principal_type: Literal["user", "group"]
+    principal_id: int
+
+
+@app.get("/groups")
+def list_groups(user: dict = Depends(require_role("admin"))):
+    with engine().begin() as conn:
+        groups = conn.execute(text("SELECT id, name FROM configdb.groups ORDER BY name")).mappings().all()
+        members = conn.execute(text(
+            "SELECT gm.group_id, u.id AS user_id, u.username "
+            "FROM configdb.group_members gm JOIN userdb.users u ON u.id = gm.user_id "
+            "ORDER BY u.username"
+        )).mappings().all()
+    by_group: dict[int, list[dict]] = {}
+    for m in members:
+        by_group.setdefault(m["group_id"], []).append({"id": m["user_id"], "username": m["username"]})
+    return [{"id": g["id"], "name": g["name"], "members": by_group.get(g["id"], [])} for g in groups]
+
+
+@app.post("/groups")
+def create_group(body: GroupBody, user: dict = Depends(require_role("admin"))):
+    with engine().begin() as conn:
+        existing = conn.execute(text("SELECT 1 FROM configdb.groups WHERE name = :n"), {"n": body.name}).first()
+        if existing:
+            raise HTTPException(409, "Gruppe existiert bereits")
+        group_id = conn.execute(
+            text("INSERT INTO configdb.groups (name) VALUES (:n) RETURNING id"), {"n": body.name}
+        ).scalar_one()
+    return {"id": group_id, "name": body.name, "members": []}
+
+
+@app.delete("/groups/{group_id}")
+def delete_group(group_id: int, user: dict = Depends(require_role("admin"))):
+    with engine().begin() as conn:
+        row = conn.execute(text("DELETE FROM configdb.groups WHERE id = :g RETURNING name"), {"g": group_id}).first()
+    if not row:
+        raise HTTPException(404, "Unbekannte Gruppe")
+    return {"deleted": row.name}
+
+
+@app.post("/groups/{group_id}/members/{user_id}")
+def add_group_member(group_id: int, user_id: int, user: dict = Depends(require_role("admin"))):
+    with engine().begin() as conn:
+        conn.execute(
+            text("INSERT INTO configdb.group_members (group_id, user_id) VALUES (:g, :u) ON CONFLICT DO NOTHING"),
+            {"g": group_id, "u": user_id},
+        )
+    return {"ok": True}
+
+
+@app.delete("/groups/{group_id}/members/{user_id}")
+def remove_group_member(group_id: int, user_id: int, user: dict = Depends(require_role("admin"))):
+    with engine().begin() as conn:
+        conn.execute(
+            text("DELETE FROM configdb.group_members WHERE group_id = :g AND user_id = :u"),
+            {"g": group_id, "u": user_id},
+        )
+    return {"ok": True}
+
+
+@app.get("/layer-grants")
+def list_layer_grants(layer_name: str | None = None, user: dict = Depends(require_role("admin"))):
+    query = (
+        "SELECT lg.id, lg.layer_name, lg.principal_type, lg.principal_id, "
+        "CASE WHEN lg.principal_type = 'user' THEN u.username ELSE g.name END AS principal_name "
+        "FROM configdb.layer_grants lg "
+        "LEFT JOIN userdb.users u ON lg.principal_type = 'user' AND u.id = lg.principal_id "
+        "LEFT JOIN configdb.groups g ON lg.principal_type = 'group' AND g.id = lg.principal_id"
+    )
+    params: dict = {}
+    if layer_name is not None:
+        query += " WHERE lg.layer_name = :n"
+        params["n"] = layer_name
+    query += " ORDER BY lg.layer_name, principal_name"
+    with engine().begin() as conn:
+        rows = conn.execute(text(query), params).mappings().all()
+    return list(rows)
+
+
+@app.post("/layer-grants")
+def create_layer_grant(body: LayerGrantBody, user: dict = Depends(require_role("admin"))):
+    with engine().begin() as conn:
+        grant_id = conn.execute(
+            text(
+                "INSERT INTO configdb.layer_grants (layer_name, principal_type, principal_id) "
+                "VALUES (:n, :pt, :pid) ON CONFLICT (layer_name, principal_type, principal_id) DO NOTHING "
+                "RETURNING id"
+            ),
+            {"n": body.layer_name, "pt": body.principal_type, "pid": body.principal_id},
+        ).first()
+    return {"id": grant_id[0] if grant_id else None, **body.model_dump()}
+
+
+@app.delete("/layer-grants/{grant_id}")
+def delete_layer_grant(grant_id: int, user: dict = Depends(require_role("admin"))):
+    with engine().begin() as conn:
+        row = conn.execute(text("DELETE FROM configdb.layer_grants WHERE id = :g RETURNING id"), {"g": grant_id}).first()
+    if not row:
+        raise HTTPException(404, "Unbekannte Berechtigung")
+    return {"deleted": grant_id}
+
+
+# -------------------------------------------------------------- /cms
+# General-purpose CMS: any number of named pages in configdb.pages, DE/EN
+# side by side (not translation "keys" in the i18n sense — genuine
+# admin-authored copy, so a DB row per locale rather than the frontend's
+# single static translations.ts file). The in-app Handbook is just the one
+# page ("handbook") every fresh install is seeded with — see
+# postgis/initdb/01-extensions.sql / bin/migrate-schemas.sql — not special
+# beyond that; an admin can create/delete any number of others.
+
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def check_slug(slug: str) -> str:
+    if not SLUG_RE.match(slug):
+        raise HTTPException(
+            status_code=400,
+            detail="Seiten-Kennung: nur Kleinbuchstaben, Ziffern, '_' und '-', max. 64 Zeichen",
+        )
+    return slug
+
+
+class CmsPageCreate(BaseModel):
+    slug: str
+    title_de: str = ""
+    title_en: str = ""
+    body_de: str = ""
+    body_en: str = ""
+
+
+class CmsContentPatch(BaseModel):
+    title_de: str | None = None
+    title_en: str | None = None
+    body_de: str | None = None
+    body_en: str | None = None
+
+
+@app.get("/cms")
+def list_cms_pages(user: dict = Depends(require_login)):
+    """Every page's metadata (no body — kept light for a picker list), newest-edited first."""
+    with engine().begin() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT slug, title_de, title_en, updated_at "
+                "FROM configdb.pages ORDER BY updated_at DESC"
+            )
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@app.post("/cms")
+def create_cms_page(body: CmsPageCreate, user: dict = Depends(require_privileged)):
+    slug = check_slug(body.slug)
+    with engine().begin() as conn:
+        exists = conn.execute(
+            text("SELECT 1 FROM configdb.pages WHERE slug = :s"), {"s": slug}
+        ).first()
+        if exists:
+            raise HTTPException(status_code=409, detail="Seite existiert bereits")
+        row = conn.execute(
+            text(
+                "INSERT INTO configdb.pages (slug, title_de, title_en, body_de, body_en, updated_by) "
+                "VALUES (:s, :td, :te, :bd, :be, :by) "
+                "RETURNING slug, title_de, title_en, body_de, body_en, updated_at"
+            ),
+            {
+                "s": slug, "td": body.title_de, "te": body.title_en,
+                "bd": body.body_de, "be": body.body_en, "by": user["username"],
+            },
+        ).mappings().first()
+    return dict(row)
+
+
+@app.get("/cms/{slug}")
+def get_cms_content(slug: str, user: dict = Depends(require_login)):
+    with engine().begin() as conn:
+        row = conn.execute(
+            text(
+                "SELECT slug, title_de, title_en, body_de, body_en, updated_at "
+                "FROM configdb.pages WHERE slug = :s"
+            ),
+            {"s": slug},
+        ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Unbekannte Seite")
+    return dict(row)
+
+
+@app.patch("/cms/{slug}")
+def patch_cms_content(slug: str, patch: CmsContentPatch, user: dict = Depends(require_privileged)):
+    updates = patch.model_dump(exclude_unset=True)
+    if not updates:
+        return get_cms_content(slug, user)
+    set_clause = ", ".join(f"{k} = :{k}" for k in updates)
+    with engine().begin() as conn:
+        row = conn.execute(
+            text(
+                f"UPDATE configdb.pages SET {set_clause}, updated_at = now(), updated_by = :by "
+                "WHERE slug = :s "
+                "RETURNING slug, title_de, title_en, body_de, body_en, updated_at"
+            ),
+            {**updates, "by": user["username"], "s": slug},
+        ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Unbekannte Seite")
+    return dict(row)
+
+
+@app.delete("/cms/{slug}")
+def delete_cms_page(slug: str, user: dict = Depends(require_privileged)):
+    with engine().begin() as conn:
+        row = conn.execute(
+            text("DELETE FROM configdb.pages WHERE slug = :s RETURNING slug"), {"s": slug}
+        ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Unbekannte Seite")
+    return {"deleted": slug}
+
+
 @app.get("/health")
 def health(user: dict = Depends(require_login)):
     # Reports the mount explicitly rather than a bare ok: a dead bind mount is
     # the one failure that leaves this service running and answering normally.
-    return {"ok": MOUNT_SENTINEL.exists(), "mapfile_volume": MOUNT_SENTINEL.exists()}
+    return {
+        "ok": MOUNT_SENTINEL.exists(),
+        "mapfile_volume": MOUNT_SENTINEL.exists(),
+        "qgis_work_volume": QGIS_WORK_SENTINEL.exists(),
+    }
 
 
 @app.on_event("startup")
@@ -2373,7 +3652,7 @@ def materialize_saved_styles() -> None:
     try:
         layers = read_layers()
     except Exception as e:  # dead mapfile volume, unreadable file
-        print(f"[startup] skipping style materialization: {e}", flush=True)
+        log.warning("skipping style materialization", extra={"error": str(e)})
         return
     for l in layers:
         try:
@@ -2382,11 +3661,11 @@ def materialize_saved_styles() -> None:
             # never set, so a deliberately cleared one is not resurrected.
             seed_layer_style(l["name"], l["geometry_type"], l["schema"], l["table"])
         except Exception as e:
-            print(f"[startup] could not apply style for {l['name']}: {e}", flush=True)
+            log.error("could not apply style", extra={"layer": l['name'], "error": str(e)})
     try:
         generate_mapproxy_config()
     except Exception as e:
-        print(f"[startup] could not generate mapproxy.yaml: {e}", flush=True)
+        log.error("could not generate mapproxy.yaml", extra={"error": str(e)})
 
 
 # --------------------------------------------------------------------- /ai
@@ -2427,7 +3706,7 @@ class AiExecuteActionBody(BaseModel):
 def _load_user_ai_key(user: dict) -> tuple[str, str]:
     with engine().begin() as conn:
         row = conn.execute(
-            text("SELECT ai_provider, ai_key_ciphertext FROM users WHERE id = :id"),
+            text("SELECT ai_provider, ai_key_ciphertext FROM userdb.users WHERE id = :id"),
             {"id": int(user["sub"])},
         ).first()
     if not row or not row.ai_key_ciphertext:
@@ -2441,7 +3720,7 @@ def get_ai_key(user: dict = Depends(require_etl_access)):
     # returned here or anywhere else, only a masked last4 indicator.
     with engine().begin() as conn:
         row = conn.execute(
-            text("SELECT ai_provider, ai_key_last4 FROM users WHERE id = :id"),
+            text("SELECT ai_provider, ai_key_last4 FROM userdb.users WHERE id = :id"),
             {"id": int(user["sub"])},
         ).first()
     configured = bool(row and row.ai_key_last4)
@@ -2461,7 +3740,7 @@ def set_ai_key(body: SetAiKeyBody, user: dict = Depends(require_etl_access)):
     last4 = ai_agent.mask(key)
     with engine().begin() as conn:
         conn.execute(text(
-            "UPDATE users SET ai_provider = :p, ai_key_ciphertext = :c, ai_key_last4 = :l4, "
+            "UPDATE userdb.users SET ai_provider = :p, ai_key_ciphertext = :c, ai_key_last4 = :l4, "
             "ai_key_updated_at = now() WHERE id = :id"
         ), {"p": body.provider, "c": ciphertext, "l4": last4, "id": int(user["sub"])})
     return {"provider": body.provider, "last4": last4}
@@ -2471,7 +3750,7 @@ def set_ai_key(body: SetAiKeyBody, user: dict = Depends(require_etl_access)):
 def delete_ai_key(user: dict = Depends(require_etl_access)):
     with engine().begin() as conn:
         conn.execute(text(
-            "UPDATE users SET ai_provider = NULL, ai_key_ciphertext = NULL, ai_key_last4 = NULL, "
+            "UPDATE userdb.users SET ai_provider = NULL, ai_key_ciphertext = NULL, ai_key_last4 = NULL, "
             "ai_key_updated_at = NULL WHERE id = :id"
         ), {"id": int(user["sub"])})
     return {"ok": True}
@@ -2518,3 +3797,499 @@ def ai_execute_action(body: AiExecuteActionBody, user: dict = Depends(require_et
     if action.kind == "etl_run":
         return _execute_etl_run(user)
     raise HTTPException(400, f"Unbekannte Aktion: {action.kind}")
+
+
+# ======================================================================
+#                      QGIS processing + print export
+# ======================================================================
+#
+# Two capabilities that MapServer/PostGIS cannot provide on their own, both
+# served by the `qgis-processing` worker (see qgis-processing/worker.py):
+#
+#   * running QGIS algorithms against a published layer, and
+#   * rendering a real composed map to PDF through QGIS Server's GetPrint.
+#
+# The worker has no auth and no gateway route — it is reachable only inside
+# the compose network, exactly like Dagster. Everything user-facing (tier
+# gates, layer visibility, job ownership) is enforced here, and every dwh and
+# mapfile write stays in this service, which already owns both.
+
+QGIS_WORKER_URL = os.getenv("QGIS_WORKER_URL", "http://qgis-processing:8000")
+QGIS_SERVER_URL = os.getenv("QGIS_SERVER_URL", "http://qgis-server/")
+QGIS_WORK_DIR = Path("/qgis-work")
+# Written by the worker at startup, not shipped in git like the other volume
+# sentinels. That makes this a strictly stronger check than the ones above: it
+# proves not merely "this mount is alive" but "both containers are on the same
+# volume", which is the failure a compose edit can actually introduce here.
+QGIS_WORK_SENTINEL = QGIS_WORK_DIR / ".volume-ok"
+
+# A result GeoPackage is read with geopandas, which materializes the whole
+# thing in memory, so it needs a ceiling that a streaming ogr2ogr would not.
+QGIS_MAX_OUTPUT_BYTES = int(os.getenv("QGIS_MAX_OUTPUT_BYTES", str(512 * 1024 * 1024)))
+QGIS_ALG_ID_RE = re.compile(r"^[a-z0-9_]+:[a-zA-Z0-9_]+$")
+
+PRINT_TEMPLATES = [
+    {"key": "a4-landscape", "label_de": "A4 quer", "label_en": "A4 landscape", "width_mm": 297, "height_mm": 210},
+    {"key": "a4-portrait", "label_de": "A4 hoch", "label_en": "A4 portrait", "width_mm": 210, "height_mm": 297},
+    {"key": "a3-landscape", "label_de": "A3 quer", "label_en": "A3 landscape", "width_mm": 420, "height_mm": 297},
+]
+PRINT_TEMPLATES_BY_KEY = {t["key"]: t for t in PRINT_TEMPLATES}
+# Bounded so one export cannot sit on a worker slot and the gateway timeout
+# for minutes: DPI and page area are the two things that actually drive
+# GetPrint's cost.
+QGIS_PRINT_MAX_DPI = 300
+
+
+def check_qgis_work_volume() -> None:
+    if not QGIS_WORK_SENTINEL.exists():
+        raise HTTPException(
+            503,
+            f"QGIS work volume not shared: {QGIS_WORK_SENTINEL} is missing, so a "
+            "GeoPackage written by qgis-processing would be invisible here. "
+            "Recreate both: docker compose up -d --force-recreate "
+            "qgis-processing upload-api",
+        )
+
+
+def check_algorithm_id(alg_id: str) -> str:
+    """The algorithm id is threaded into a subprocess argv on the worker, so it
+    gets the same treatment check_identifier() gives a SQL identifier."""
+    if not QGIS_ALG_ID_RE.match(alg_id or ""):
+        raise HTTPException(400, f"Ungültige Algorithmus-ID: {alg_id!r}")
+    return alg_id
+
+
+def qgis_worker(method: str, path: str, payload: dict | None = None, timeout: int = 30):
+    """The second cross-container HTTP client in this file, alongside
+    dagster_graphql() — same plain-urllib shape and the same reason: separate
+    images with no shared in-process import path."""
+    url = f"{QGIS_WORKER_URL}{path}"
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"Content-Type": "application/json"} if data else {},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            body = res.read().decode()
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode()[:400]
+        raise HTTPException(502, f"QGIS-Worker meldet einen Fehler: {detail}")
+    except urllib.error.URLError as e:
+        raise HTTPException(502, f"QGIS-Worker nicht erreichbar: {e}")
+
+
+def ensure_qgis_jobs_table() -> None:
+    with engine().begin() as conn:
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS configdb"))
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS configdb.qgis_jobs ("
+            "  job_id text PRIMARY KEY,"
+            # text, not an int FK: a guest session has a synthetic identity and
+            # no userdb.users row at all (see issue_guest_token()).
+            "  user_id text NOT NULL,"
+            "  algorithm text NOT NULL,"
+            "  status text NOT NULL,"
+            "  message text,"
+            "  layer_name text,"
+            "  layer_title text,"
+            "  created_at timestamptz NOT NULL DEFAULT now(),"
+            "  updated_at timestamptz NOT NULL DEFAULT now())"
+        ))
+        # A job only lives as long as the thread watching it, so any row still
+        # claiming to be running at startup belongs to a process that is gone —
+        # otherwise a rebuild mid-run leaves a notification spinning forever in
+        # the browser. Safe here because this runs before uvicorn accepts
+        # requests, so no live job can be caught by it.
+        conn.execute(text(
+            "UPDATE configdb.qgis_jobs SET status = 'failed', updated_at = now(), "
+            "message = 'upload-api wurde neu gestartet, während der Job lief' "
+            "WHERE status IN ('queued', 'running', 'ingesting')"
+        ))
+
+
+@app.on_event("startup")
+def create_qgis_jobs_table_if_missing() -> None:
+    try:
+        ensure_qgis_jobs_table()
+    except Exception as e:
+        log.error("could not ensure configdb.qgis_jobs", extra={"error": str(e)})
+
+
+def _qgis_job_set(job_id: str, **fields) -> None:
+    if not fields:
+        return
+    assigns = ", ".join(f"{k} = :{k}" for k in fields)
+    with engine().begin() as conn:
+        conn.execute(
+            text(f"UPDATE configdb.qgis_jobs SET {assigns}, updated_at = now() WHERE job_id = :job_id"),
+            {**fields, "job_id": job_id},
+        )
+
+
+def _qgis_job_row(job_id: str) -> dict | None:
+    with engine().begin() as conn:
+        row = conn.execute(
+            text("SELECT job_id, user_id, algorithm, status, message, layer_name, layer_title "
+                 "FROM configdb.qgis_jobs WHERE job_id = :job_id"),
+            {"job_id": job_id},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def resolve_layer_source(layer_name: str, user: dict) -> tuple[str, str]:
+    """Turn a layer name the client sent into the (schema, table) behind it,
+    for a layer this user is actually allowed to see.
+
+    Deliberately stricter than /geoprocess, which takes a raw schema/table pair
+    and validates only that they are well-formed identifiers — that lets any
+    caller who passes the tier gate read any table in dwh, including one behind
+    a layer_grants ACL. Resolving through visible_layers_for() instead means
+    the ACL that governs the layer panel governs this too, and the frontend
+    gets simpler as well (it already has layer names). Worth retrofitting onto
+    /geoprocess later.
+    """
+    visible = visible_layers_for(user, all_layers())
+    match = next((l for l in visible if l["name"] == layer_name), None)
+    if match is None:
+        raise HTTPException(404, f"Layer nicht gefunden oder nicht freigegeben: {layer_name}")
+    if not match.get("schema") or not match.get("table"):
+        raise HTTPException(400, f"Layer {layer_name} hat keine Tabelle (Raster oder Punktwolke)")
+    # Defense in depth: these came from the mapfile, not from the request, but
+    # they are about to be interpolated into a DSN on the worker.
+    return check_identifier(match["schema"], "schema name"), check_identifier(match["table"], "table name")
+
+
+class QgisRunBody(BaseModel):
+    algorithm: str
+    layer: str
+    title: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.get("/qgis-process/algorithms")
+def qgis_algorithms(advanced: bool = False, user: dict = Depends(require_tier("premium"))):
+    """The curated catalog, optionally plus everything else the worker reports.
+
+    The curated entries are cross-checked against the worker's live catalog and
+    marked `available: false` rather than silently offered when missing — a
+    typo or a QGIS version bump then shows up as a greyed entry instead of a
+    job that fails at submit time.
+    """
+    try:
+        live = qgis_worker("GET", "/algorithms", timeout=60).get("algorithms", [])
+    except HTTPException:
+        live = []
+    live_ids = {a["id"] for a in live}
+
+    out = []
+    for alg in qgis_catalog.CURATED:
+        entry = alg.as_json()
+        entry["params"] = [p.as_json() for p in qgis_catalog.curated_params(alg)]
+        entry["available"] = (not live_ids) or alg.id in live_ids
+        if not entry["available"]:
+            log.error("curated qgis algorithm unavailable", extra={"algorithm": alg.id})
+        out.append(entry)
+
+    if advanced:
+        for alg in live:
+            if alg["id"] in qgis_catalog.CURATED_BY_ID:
+                continue
+            out.append({
+                "id": alg["id"],
+                "label": {"de": alg["label"], "en": alg["label"]},
+                "group": alg.get("group") or alg.get("provider"),
+                "geometry": None,
+                "note": {"de": None, "en": None},
+                "curated": False,
+                "available": True,
+                # Advanced entries are resolved lazily: introspecting all 300+
+                # would mean one qgis_process invocation each.
+                "params": None,
+            })
+    return {"algorithms": out, "advancedAvailable": bool(live_ids)}
+
+
+@app.get("/qgis-process/algorithms/{alg_id:path}")
+def qgis_algorithm_detail(alg_id: str, user: dict = Depends(require_tier("premium"))):
+    """One algorithm's parameters, in the same shape the curated catalog uses —
+    so the frontend has exactly one parameter renderer and never has to know
+    which catalog an entry came from."""
+    check_algorithm_id(alg_id)
+    curated = qgis_catalog.CURATED_BY_ID.get(alg_id)
+    if curated is not None:
+        entry = curated.as_json()
+        entry["params"] = [p.as_json() for p in qgis_catalog.curated_params(curated)]
+        entry["supported"] = True
+        return entry
+
+    detail = qgis_worker("GET", f"/algorithms/{alg_id}", timeout=60)
+    supported = qgis_catalog.supports_algorithm(detail)
+    params = qgis_catalog.advanced_params(detail) if supported else []
+    name = (detail.get("algorithm_details") or {}).get("name") or alg_id
+    return {
+        "id": alg_id,
+        "label": {"de": name, "en": name},
+        "group": (detail.get("algorithm_details") or {}).get("group"),
+        "geometry": None,
+        "note": {"de": None, "en": None},
+        "curated": False,
+        "available": True,
+        "supported": supported,
+        "params": [p.as_json() for p in params],
+    }
+
+
+@app.post("/qgis-process/run")
+def qgis_run(body: QgisRunBody, user: dict = Depends(require_tier("premium"))):
+    check_qgis_work_volume()
+    check_algorithm_id(body.algorithm)
+
+    curated = qgis_catalog.CURATED_BY_ID.get(body.algorithm)
+    if curated is not None:
+        known = {p.key for p in qgis_catalog.curated_params(curated)}
+        unknown = set(body.params) - known
+        if unknown:
+            raise HTTPException(400, f"Unbekannte Parameter: {sorted(unknown)}")
+
+    schema_a, table_a = resolve_layer_source(body.layer, user)
+
+    # Every layer-valued parameter is resolved the same way, so a second input
+    # can no more reach an ungranted table than the first can.
+    worker_params: dict[str, dict] = {
+        "INPUT": {"type": "pgtable", "schema_name": schema_a, "table": table_a}
+    }
+    for key, value in body.params.items():
+        if isinstance(value, dict) and "layer" in value:
+            schema_b, table_b = resolve_layer_source(value["layer"], user)
+            worker_params[key] = {"type": "pgtable", "schema_name": schema_b, "table": table_b}
+        else:
+            worker_params[key] = {"type": "scalar", "value": value}
+
+    job_id = uuid.uuid4().hex
+    title = (body.title or "").strip() or f"{body.algorithm.split(':')[-1]} {body.layer}"
+    with engine().begin() as conn:
+        conn.execute(
+            text("INSERT INTO configdb.qgis_jobs (job_id, user_id, algorithm, status, layer_title) "
+                 "VALUES (:job_id, :user_id, :algorithm, 'running', :title)"),
+            {"job_id": job_id, "user_id": str(user.get("sub")), "algorithm": body.algorithm, "title": title},
+        )
+
+    payload = {"job_id": job_id, "algorithm": body.algorithm, "params": worker_params}
+    request_id = request_id_ctx.get()
+    threading.Thread(
+        target=_watch_qgis_job, args=(job_id, payload, title, user, request_id), daemon=True
+    ).start()
+    return {"jobId": job_id, "status": "running"}
+
+
+def _watch_qgis_job(job_id: str, payload: dict, title: str, user: dict, request_id: str) -> None:
+    """Runs the algorithm and publishes its result, off the request thread.
+
+    The work deliberately does not live in the polling handler: an ingest can
+    take tens of seconds while the client polls every two seconds, so doing it
+    there would need a lock and would still lose the run the moment the user
+    closed the tab. Started at submit time instead, exactly like the ETL
+    trigger's own progress model.
+
+    This assumes uvicorn runs as a single process — it does (no --workers in
+    the Dockerfile's CMD). Adding workers later would give one watcher per
+    worker process per job; the fix then is a pg advisory lock, not a rewrite.
+    """
+    request_id_ctx.set(request_id)
+    try:
+        # No urllib timeout short of the worker's own: the worker caps the
+        # algorithm itself (QGIS_RUN_TIMEOUT) and returns 504 on overrun, which
+        # is a better error than a truncated connection here.
+        result = qgis_worker("POST", "/run", payload, timeout=1000)
+    except HTTPException as e:
+        _qgis_job_set(job_id, status="failed", message=str(e.detail)[:2000])
+        return
+    except Exception as e:  # noqa: BLE001
+        _qgis_job_set(job_id, status="failed", message=f"QGIS-Lauf fehlgeschlagen: {e}"[:2000])
+        return
+
+    if not result.get("ok") or not result.get("output"):
+        message = (result.get("stderr_tail") or result.get("stdout_tail")
+                   or "Algorithmus lieferte kein Ergebnis")
+        _qgis_job_set(job_id, status="failed", message=str(message)[-2000:])
+        return
+
+    output = Path(result["output"])
+    _qgis_job_set(job_id, status="ingesting")
+    try:
+        if not output.exists():
+            raise HTTPException(500, "Ergebnisdatei ist hier nicht sichtbar (geteiltes Volume?)")
+        size = output.stat().st_size
+        if size > QGIS_MAX_OUTPUT_BYTES:
+            raise HTTPException(
+                413,
+                f"Ergebnis ist {size // (1024 * 1024)} MB groß und überschreitet das Limit "
+                f"von {QGIS_MAX_OUTPUT_BYTES // (1024 * 1024)} MB",
+            )
+        layers = gpd.list_layers(output)
+        if len(layers) != 1:
+            raise HTTPException(400, f"Ergebnis enthält {len(layers)} Layer, erwartet wurde genau einer")
+        gdf = gpd.read_file(output)
+        published = ingest_geodataframe(gdf, title, user, require_crs=True)
+    except HTTPException as e:
+        _qgis_job_set(job_id, status="failed", message=str(e.detail)[:2000])
+        return
+    except Exception as e:  # noqa: BLE001
+        _qgis_job_set(job_id, status="failed", message=f"Ergebnis konnte nicht geladen werden: {e}"[:2000])
+        return
+    finally:
+        try:
+            qgis_worker("DELETE", f"/run/{job_id}", timeout=15)
+        except Exception:  # noqa: BLE001 - cleanup is best-effort, the worker sweeps too
+            pass
+
+    _qgis_job_set(job_id, status="published", layer_name=published["layer"],
+                  layer_title=published["title"], message=None)
+    log.info("qgis job published", extra={"job_id": job_id, "layer": published["layer"]})
+
+
+@app.get("/qgis-process/run/{job_id}")
+def qgis_run_status(job_id: str, user: dict = Depends(require_tier("premium"))):
+    row = _qgis_job_row(job_id)
+    if row is None:
+        raise HTTPException(404, "Job nicht gefunden")
+    if row["user_id"] != str(user.get("sub")) and not is_privileged_role(user):
+        raise HTTPException(404, "Job nicht gefunden")
+    return {
+        "jobId": row["job_id"],
+        "status": row["status"],
+        "message": row["message"],
+        "layer": row["layer_name"],
+        "title": row["layer_title"],
+        "algorithm": row["algorithm"],
+    }
+
+
+@app.get("/qgis-process/health")
+def qgis_worker_health(user: dict = Depends(require_tier("premium"))):
+    health = qgis_worker("GET", "/healthz", timeout=30)
+    health["shared_volume"] = QGIS_WORK_SENTINEL.exists()
+    return health
+
+
+# ------------------------------------------------------------ print export
+
+class QgisPrintBody(BaseModel):
+    layers: list[str] = Field(default_factory=list)
+    west: float
+    south: float
+    east: float
+    north: float
+    template: str = "a4-landscape"
+    title: str | None = None
+    subtitle: str | None = None
+    basemap: bool = True
+    legend: bool = True
+    scalebar: bool = True
+    dpi: int = 150
+
+
+@app.get("/qgis-print/templates")
+def qgis_print_templates(user: dict = Depends(require_tier("premium"))):
+    return {"templates": PRINT_TEMPLATES}
+
+
+@app.post("/qgis-print")
+def qgis_print(body: QgisPrintBody, user: dict = Depends(require_tier("premium"))):
+    """Renders the given layers at the given extent to a PDF via QGIS Server.
+
+    Synchronous, unlike the processing routes, and deliberately so: a PDF is a
+    download, and making it a job would mean inventing a download-token dance
+    for what is a handful of seconds' work. DPI and page size are capped so
+    that stays true.
+
+    upload-api proxies the GetPrint rather than handing the browser a
+    `/qgis?MAP=...` URL: it keeps generated project paths out of the client
+    (nobody can craft an arbitrary MAP=), and it makes the whole export one
+    request from one button.
+    """
+    template = PRINT_TEMPLATES_BY_KEY.get(body.template)
+    if template is None:
+        raise HTTPException(400, f"Unbekannte Vorlage: {body.template}")
+    if body.east <= body.west or body.north <= body.south:
+        raise HTTPException(400, "Ungültiger Kartenausschnitt")
+
+    # The layer list is rebuilt from what this user may see rather than trusted
+    # from the request. Without this the print route would be a broader read
+    # than /layers is, since QGIS Server itself has no per-user concept.
+    visible = {l["name"]: l for l in visible_layers_for(user, all_layers())}
+    requested = [n for n in body.layers if n in visible]
+    printable = [
+        {"name": n, "title": visible[n].get("title") or n, "opacity": 1.0}
+        for n in requested
+        # A point cloud has no MapServer layer at all and can never be in a WMS
+        # request; skipping it here is why the caller may pass its whole
+        # visible-layer list without filtering.
+        if visible[n].get("geometry_type") != "POINTCLOUD"
+    ]
+    if not printable and not body.basemap:
+        raise HTTPException(400, "Keine druckbaren Layer ausgewählt")
+
+    project = qgis_worker("POST", "/print/project", {
+        "layers": printable,
+        "extent": {"west": body.west, "south": body.south, "east": body.east, "north": body.north},
+        "basemap": body.basemap,
+        "title": body.title or "",
+        "subtitle": body.subtitle or "",
+        "legend": body.legend,
+        "scalebar": body.scalebar,
+        "width_mm": template["width_mm"],
+        "height_mm": template["height_mm"],
+    }, timeout=180)
+
+    project_path = project["project"]
+    project_id = Path(project_path).stem
+    extent = _print_extent_3857(body)
+    query = urllib.parse.urlencode({
+        "MAP": project_path,
+        "SERVICE": "WMS",
+        "VERSION": "1.3.0",
+        "REQUEST": "GetPrint",
+        "TEMPLATE": project.get("template", "vibegis"),
+        "FORMAT": "pdf",
+        "DPI": str(min(max(body.dpi, 72), QGIS_PRINT_MAX_DPI)),
+        "CRS": "EPSG:3857",
+        "map0:EXTENT": extent,
+    })
+    url = f"{QGIS_SERVER_URL}?{query}"
+    try:
+        with urllib.request.urlopen(url, timeout=180) as res:
+            content_type = res.headers.get("Content-Type", "")
+            payload = res.read()
+    except urllib.error.URLError as e:
+        raise HTTPException(502, f"QGIS Server nicht erreichbar: {e}")
+    finally:
+        try:
+            qgis_worker("DELETE", f"/print/project/{project_id}", timeout=15)
+        except Exception:  # noqa: BLE001 - the worker's own sweep is the backstop
+            pass
+
+    # QGIS Server answers a failed GetPrint with 200 and an XML
+    # ServiceExceptionReport, so the status code proves nothing — the content
+    # type is what distinguishes a real PDF from an error document.
+    if "pdf" not in content_type.lower():
+        detail = payload.decode("utf-8", "replace")[:600]
+        raise HTTPException(502, f"QGIS Server lieferte kein PDF: {detail}")
+
+    filename = f"vibegis-karte-{time.strftime('%Y%m%d-%H%M%S')}.pdf"
+    return Response(
+        content=payload,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _print_extent_3857(body: QgisPrintBody) -> str:
+    """map0:EXTENT has to be in the layout map's own CRS (EPSG:3857), while the
+    frontend reports the visible ground area in WGS84 degrees."""
+    tr = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+    minx, miny = tr.transform(body.west, body.south)
+    maxx, maxy = tr.transform(body.east, body.north)
+    return f"{minx},{miny},{maxx},{maxy}"

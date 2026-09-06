@@ -6,21 +6,23 @@
  */
 import { useEffect, useState } from 'react'
 import {
-  ActionIcon, Alert, Button, Checkbox, Group, Modal, PasswordInput, Select, Stack, Table, Text, TextInput,
+  ActionIcon, Alert, Button, Group, Modal, PasswordInput, Select, Stack, Table, Text, TextInput,
 } from '@mantine/core'
 import { IconAlertCircle, IconTrash, IconUserPlus } from '@tabler/icons-react'
+import { useTranslation } from 'react-i18next'
 
-import { USERS_URL, useAuth } from './auth'
+import { USERS_URL, useAuth, type Role, type Tier } from './auth'
 
 interface UserRow {
   id: number
   username: string
-  role: 'admin' | 'viewer'
-  premium: boolean
+  role: Role
+  subscription_tier: Tier
   created_at: string
 }
 
 export default function UserAdmin({ opened, onClose }: { opened: boolean; onClose: () => void }) {
+  const { t } = useTranslation()
   const currentUser = useAuth((s) => s.user)
   const [users, setUsers] = useState<UserRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -28,8 +30,8 @@ export default function UserAdmin({ opened, onClose }: { opened: boolean; onClos
 
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [role, setRole] = useState<'admin' | 'viewer'>('viewer')
-  const [premium, setPremium] = useState(false)
+  const [role, setRole] = useState<Role>('viewer')
+  const [tier, setTier] = useState<'free' | 'pro' | 'premium'>('free')
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
 
@@ -38,7 +40,7 @@ export default function UserAdmin({ opened, onClose }: { opened: boolean; onClos
     setListError(null)
     try {
       const res = await fetch(USERS_URL)
-      if (!res.ok) throw new Error(`Benutzerliste: HTTP ${res.status}`)
+      if (!res.ok) throw new Error(`${t('userAdmin.listLoadError')}: HTTP ${res.status}`)
       setUsers(await res.json())
     } catch (e) {
       setListError(e instanceof Error ? e.message : String(e))
@@ -59,14 +61,14 @@ export default function UserAdmin({ opened, onClose }: { opened: boolean; onClos
       const res = await fetch(USERS_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: username.trim(), password, role, premium }),
+        body: JSON.stringify({ username: username.trim(), password, role, subscription_tier: tier }),
       })
       const body = await res.json().catch(() => null)
-      if (!res.ok) throw new Error(body?.detail ?? `Speichern fehlgeschlagen: HTTP ${res.status}`)
+      if (!res.ok) throw new Error(body?.detail ?? `${t('userAdmin.saveError')}: HTTP ${res.status}`)
       setUsername('')
       setPassword('')
       setRole('viewer')
-      setPremium(false)
+      setTier('free')
       await reload()
     } catch (e) {
       setFormError(e instanceof Error ? e.message : String(e))
@@ -80,7 +82,7 @@ export default function UserAdmin({ opened, onClose }: { opened: boolean; onClos
     try {
       const res = await fetch(`${USERS_URL}/${encodeURIComponent(name)}`, { method: 'DELETE' })
       const body = await res.json().catch(() => null)
-      if (!res.ok) throw new Error(body?.detail ?? `Löschen fehlgeschlagen: HTTP ${res.status}`)
+      if (!res.ok) throw new Error(body?.detail ?? `${t('userAdmin.deleteError')}: HTTP ${res.status}`)
       await reload()
     } catch (e) {
       setListError(e instanceof Error ? e.message : String(e))
@@ -88,7 +90,7 @@ export default function UserAdmin({ opened, onClose }: { opened: boolean; onClos
   }
 
   return (
-    <Modal opened={opened} onClose={onClose} title="Benutzer verwalten" centered size="md">
+    <Modal opened={opened} onClose={onClose} title={t('userAdmin.modalTitle')} centered size="md">
       <Stack gap="sm">
         {listError && (
           <Alert color="red" variant="light" icon={<IconAlertCircle size={16} />}>{listError}</Alert>
@@ -97,9 +99,9 @@ export default function UserAdmin({ opened, onClose }: { opened: boolean; onClos
         <Table striped highlightOnHover>
           <Table.Thead>
             <Table.Tr>
-              <Table.Th>Benutzername</Table.Th>
-              <Table.Th>Rolle</Table.Th>
-              <Table.Th>Premium</Table.Th>
+              <Table.Th>{t('userAdmin.username')}</Table.Th>
+              <Table.Th>{t('userAdmin.role')}</Table.Th>
+              <Table.Th>{t('userAdmin.tier')}</Table.Th>
               <Table.Th />
             </Table.Tr>
           </Table.Thead>
@@ -108,12 +110,12 @@ export default function UserAdmin({ opened, onClose }: { opened: boolean; onClos
               <Table.Tr key={u.id}>
                 <Table.Td>{u.username}</Table.Td>
                 <Table.Td>{u.role}</Table.Td>
-                <Table.Td>{u.premium ? 'ja' : '–'}</Table.Td>
+                <Table.Td>{u.subscription_tier}</Table.Td>
                 <Table.Td>
                   <ActionIcon
                     variant="subtle"
                     color="red"
-                    aria-label={`${u.username} löschen`}
+                    aria-label={t('userAdmin.deleteAriaLabel', { username: u.username })}
                     disabled={u.username === currentUser?.username}
                     onClick={() => deleteUser(u.username)}
                   >
@@ -124,40 +126,50 @@ export default function UserAdmin({ opened, onClose }: { opened: boolean; onClos
             ))}
             {!loading && users.length === 0 && (
               <Table.Tr>
-                <Table.Td colSpan={4}><Text c="dimmed" size="sm">Keine Benutzer</Text></Table.Td>
+                <Table.Td colSpan={4}><Text c="dimmed" size="sm">{t('userAdmin.empty')}</Text></Table.Td>
               </Table.Tr>
             )}
           </Table.Tbody>
         </Table>
 
-        <Text fw={600} size="sm" mt="sm">Benutzer hinzufügen / Passwort zurücksetzen</Text>
-        <TextInput label="Benutzername" value={username} onChange={(e) => setUsername(e.currentTarget.value)} />
-        <PasswordInput label="Passwort" value={password} onChange={(e) => setPassword(e.currentTarget.value)} />
+        <Text fw={600} size="sm" mt="sm">{t('userAdmin.addSectionTitle')}</Text>
+        <TextInput label={t('userAdmin.username')} value={username} onChange={(e) => setUsername(e.currentTarget.value)} />
+        <PasswordInput label={t('login.password')} value={password} onChange={(e) => setPassword(e.currentTarget.value)} />
         <Select
-          label="Rolle"
-          data={[{ value: 'admin', label: 'admin' }, { value: 'viewer', label: 'viewer' }]}
+          label={t('userAdmin.role')}
+          data={[
+            { value: 'admin', label: 'admin' },
+            { value: 'editor', label: 'editor' },
+            { value: 'viewer', label: 'viewer' },
+          ]}
           value={role}
-          onChange={(v) => setRole((v as 'admin' | 'viewer') ?? 'viewer')}
+          onChange={(v) => setRole((v as Role) ?? 'viewer')}
           comboboxProps={{ withinPortal: false }}
         />
-        <Checkbox
-          label="Premium-Zugang (ETL-Tasks)"
-          checked={premium}
-          onChange={(e) => setPremium(e.currentTarget.checked)}
+        <Select
+          label={t('userAdmin.tier')}
+          data={[
+            { value: 'free', label: 'Free' },
+            { value: 'pro', label: 'Pro' },
+            { value: 'premium', label: 'Premium' },
+          ]}
+          value={tier}
+          onChange={(v) => setTier((v as 'free' | 'pro' | 'premium') ?? 'free')}
+          comboboxProps={{ withinPortal: false }}
         />
         {formError && (
           <Alert color="red" variant="light" icon={<IconAlertCircle size={16} />}>{formError}</Alert>
         )}
 
         <Group justify="flex-end">
-          <Button variant="subtle" color="gray" onClick={onClose}>Schliessen</Button>
+          <Button variant="subtle" color="gray" onClick={onClose}>{t('common.close')}</Button>
           <Button
             leftSection={<IconUserPlus size={16} />}
             loading={saving}
             disabled={!username.trim() || !password}
             onClick={addUser}
           >
-            Speichern
+            {t('common.save')}
           </Button>
         </Group>
       </Stack>

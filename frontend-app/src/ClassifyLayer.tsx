@@ -147,6 +147,12 @@ export default function ClassifyLayer({
   const existing = useApp((s) => s.layerConfigs[layerName]?.classification)
   const aliases = useApp((s) => s.layerConfigs[layerName]?.columnAliases)
   const cachedColumns = useApp((s) => s.layerColumns[layerName])
+  // The range a graduated/numeric-ranges classification gets seeded with
+  // should reflect what's actually visible right now, not the whole
+  // unfiltered table — same reasoning AttributeTable.tsx's Kartenansicht
+  // and SelectionDashboard.tsx's overview already scope to a layer's active
+  // filter for.
+  const activeFilter = useApp((s) => s.attributeFilters[layerName])
   const saveClassification = useApp((s) => s.saveClassification)
   const clearClassification = useApp((s) => s.clearClassification)
   // Same field Scene.tsx reads for WMS rendering — the size control only
@@ -222,7 +228,7 @@ export default function ClassifyLayer({
     }
     setLoading(true)
     setError(null)
-    fetchColumnStats(schema, table, column)
+    fetchColumnStats(schema, table, column, activeFilter)
       .then(({ min, max }) => {
         setStats({ min, max })
         const bounds = equalIntervalBounds(min, max, numClasses)
@@ -233,8 +239,11 @@ export default function ClassifyLayer({
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened, column, schema, table, usesRanges])
+    // numClasses/mode/rampColor deliberately excluded — this only re-seeds
+    // when the column, table, or active filter changes, not on every knob
+    // tweak (those go through regenerateWithCount()/recolorRamp() instead,
+    // which reuse the already-fetched `stats` rather than re-fetching).
+  }, [opened, column, schema, table, usesRanges, activeFilter])
 
   function regenerateWithCount(n: number) {
     setNumClasses(n)

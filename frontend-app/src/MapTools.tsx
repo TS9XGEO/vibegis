@@ -35,6 +35,7 @@ import { useSelection } from './selection'
 import { bboxOf, circlePolygon, featuresInShape, nearestFeatureAtPoint, padBbox } from './spatial'
 import { formatArea, formatDistance, identifyAt, useTools } from './tools'
 import ToolboxControls, { useSelectCandidates } from './ToolboxControls'
+import { TourTarget } from './tour/TourTarget'
 import { useDraggable } from './useDraggable'
 import { usePanels } from './panels'
 import { useApp } from './wms'
@@ -476,6 +477,7 @@ export default function MapTools() {
   return (
     <Transition mounted={panelOpen} transition="fade" duration={180} timingFunction="ease">
       {(transitionStyles) => (
+    <TourTarget id="map-tools">
     <Paper
       shadow="md"
       radius="md"
@@ -521,6 +523,7 @@ export default function MapTools() {
       </Box>
       <ToolboxControls />
     </Paper>
+    </TourTarget>
       )}
     </Transition>
   )

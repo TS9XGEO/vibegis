@@ -9,6 +9,28 @@
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&display=swap" rel="stylesheet" />
     <style>
       html, body, #root { height: 100%; margin: 0; padding: 0; overflow: hidden; }
+
+      /* Global UI size — see frontend-app/src/uiScale.ts, picked from the
+         sideband ("Klein" = 1, "Standard" = 1.25, "Groß" = 1.5). Everything
+         Mantine draws scales through the theme's own `scale` (main.tsx); this
+         one rule covers what it cannot reach — the icons, whose size is a px
+         prop on the SVG. The `scale` property rather than `transform` so it
+         composes with the transforms some icons already carry (rotating
+         chevrons, CompassButton) instead of overwriting them, and because a
+         16px icon at 1.5 still fits its 28px button, so nothing has to move.
+
+         Deliberately NOT a `zoom` or a `transform` on a container: both do
+         scale the whole app in one line, both were tried, and both break the
+         same way. They re-lay-out the boxes but leave getBoundingClientRect()
+         and hit-testing in a different coordinate space than the px values
+         components write back, so anything measuring itself lands wrong —
+         `zoom` misplaced every click, and under `transform` Mantine's
+         SegmentedControl indicator (its FloatingIndicator does
+         `targetRect.left - parentRect.left` and writes it back as a px
+         transform) sat beside its own segment. dnd-kit's layer reordering
+         measures the same way. Scaling real CSS lengths distorts nothing. */
+      :root { --ui-scale: 1; }
+      svg.tabler-icon, svg[data-ui-icon] { scale: var(--ui-scale); }
       body { background: #0f1115; }
 
       /* Shared by LoginScreen and AuthSplash (see colorScheme.ts) */
@@ -37,6 +59,21 @@
          Loader it replaced did. */
       @keyframes etlRingSpin {
         100% { transform: rotate(360deg); }
+      }
+
+      /* Guided tour (see frontend-app/src/tour/) — the currently-spotlighted
+         real control gets this class (via useTourHighlight()) so it visibly
+         reacts on top of Joyride's own dimmed overlay, not just a tooltip
+         floating nearby. */
+      @keyframes tourPulse {
+        0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 var(--mantine-color-teal-5, #12b886); }
+        50% { transform: scale(1.08); box-shadow: 0 0 0 8px rgba(18, 184, 134, 0); }
+      }
+      .tour-highlight {
+        animation: tourPulse 1.4s ease-in-out infinite;
+        border-radius: 8px;
+        position: relative;
+        z-index: 10001;
       }
 
       /* Cesium's own logo watermark — not the data-source credit text next

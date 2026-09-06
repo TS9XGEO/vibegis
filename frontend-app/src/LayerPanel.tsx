@@ -30,6 +30,7 @@ import {
   useMantineColorScheme,
 } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
+import PrintExportButton from './PrintExportButton'
 import {
   IconChevronDown,
   IconChevronRight,
@@ -49,6 +50,7 @@ import {
   IconTags,
   IconTrash,
   IconUpload,
+  IconShieldLock,
   IconUsers,
   IconX,
 } from '@tabler/icons-react'
@@ -70,17 +72,22 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { Rectangle } from 'cesium'
+import { useTranslation } from 'react-i18next'
 
 import AttributeFilterButton from './AttributeFilter'
+import { TourTarget } from './tour/TourTarget'
 import ClassifyLayer from './ClassifyLayer'
 import LegendSymbols from './Legend'
 import UploadLayer from './UploadLayer'
+import AccessAdmin from './AccessAdmin'
 import UserAdmin from './UserAdmin'
-import { useAuth } from './auth'
+import { hasFullAccess, useAuth } from './auth'
 import { accentEdge, panelBg, panelBorder } from './colorScheme'
 import { usePanels } from './panels'
 import { useSelection } from './selection'
 import { useUpload } from './uploadState'
+import { notifications } from '@mantine/notifications'
+import { DEFAULT_POLYGON_OUTLINE_WIDTH } from './legend'
 import type { LayerState } from './wms'
 import { LAYERS_URL, RASTER_COMPOSITE_URL, collectionFor, isManaged, useApp } from './wms'
 
@@ -91,7 +98,13 @@ function DeleteLayerButton({ layer }: { layer: LayerState }) {
   const [opened, setOpened] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const isRaster = layer.geomType === 'raster'
+  // Three kinds of "the layer's data", three different things drop_table=true
+  // actually deletes: a PostGIS table, a raster file, or a tileset directory.
+  const backingLabels = layer.pointCloud
+    ? { both: 'Layer + Dateien löschen', only: 'Nur Layer löschen (Dateien bleiben)' }
+    : layer.geomType === 'raster'
+      ? { both: 'Layer + Datei löschen', only: 'Nur Layer löschen (Datei bleibt)' }
+      : { both: 'Layer + Datenbanktabelle löschen', only: 'Nur Layer löschen (Tabelle bleibt)' }
 
   async function doDelete(dropTable: boolean) {
     setBusy(true)
@@ -136,10 +149,10 @@ function DeleteLayerButton({ layer }: { layer: LayerState }) {
           </Group>
           {error && <Text size="xs" c="red">{error}</Text>}
           <Button size="xs" color="red" loading={busy} onClick={() => doDelete(true)}>
-            {isRaster ? 'Layer + Datei löschen' : 'Layer + Datenbanktabelle löschen'}
+            {backingLabels.both}
           </Button>
           <Button size="xs" variant="default" loading={busy} onClick={() => doDelete(false)}>
-            {isRaster ? 'Nur Layer löschen (Datei bleibt)' : 'Nur Layer löschen (Tabelle bleibt)'}
+            {backingLabels.only}
           </Button>
         </Stack>
       </Popover.Dropdown>
@@ -154,6 +167,59 @@ type TreeItem =
   | { kind: 'single'; layer: LayerState }
   | { kind: 'batch'; batch: string; title: string; layers: LayerState[] }
 
+/**
+ * Polygon border thickness, one value for the whole layer.
+ *
+ * Unlike the opacity slider above it, this is *persisted server-side*: it
+ * rewrites the layer's CLASS blocks in uploads.map and drops that layer's
+ * cached tiles. So the slider tracks locally while dragging and only writes on
+ * release (`onChangeEnd`) — committing on every pixel of drag would rebuild the
+ * mapfile and purge the cache dozens of times per gesture.
+ */
+function OutlineWidthSlider({ layerName }: { layerName: string }) {
+  const { t } = useTranslation()
+  const saved = useApp((s) => s.layerConfigs[layerName]?.outlineWidth)
+  const saveOutlineWidth = useApp((s) => s.saveOutlineWidth)
+  const stored = saved ?? DEFAULT_POLYGON_OUTLINE_WIDTH
+  const [draft, setDraft] = useState<number | null>(null)
+  const value = draft ?? stored
+
+  async function commit(next: number) {
+    setDraft(next)
+    try {
+      await saveOutlineWidth(layerName, next)
+    } catch (e) {
+      setDraft(null)          // fall back to what the server actually holds
+      notifications.show({
+        color: 'red',
+        title: t('layerPanel.outlineFailed'),
+        message: e instanceof Error ? e.message : String(e),
+      })
+    }
+  }
+
+  return (
+    <Group gap={8} pl={30} pr={4} pt={2} wrap="nowrap">
+      <Text size="10px" c="dimmed" style={{ whiteSpace: 'nowrap' }}>{t('layerPanel.outline')}</Text>
+      <Slider
+        size="xs"
+        style={{ flex: 1, minWidth: 0 }}
+        min={0}
+        max={5}
+        step={0.1}
+        value={value}
+        onChange={setDraft}
+        onChangeEnd={commit}
+        label={null}
+      />
+      <Text size="10px" c="dimmed" w={26} ta="right">
+        {value.toFixed(1)}
+      </Text>
+    </Group>
+  )
+}
+
+
 function LayerRow({
   layer, onOpenTable, channel,
 }: {
@@ -167,6 +233,8 @@ function LayerRow({
   const toggleClustered = useApp((s) => s.toggleClustered)
   const clusterTruncated = useApp((s) => s.clusterTruncated[layer.name])
   const setOpacity = useApp((s) => s.setOpacity)
+  const setPointSize = useApp((s) => s.setPointSize)
+  const setPointColorMode = useApp((s) => s.setPointColorMode)
   const move = useApp((s) => s.move)
   const camera = useApp((s) => s.camera)
   const layerConfigs = useApp((s) => s.layerConfigs)
@@ -331,7 +399,9 @@ function LayerRow({
             </ActionIcon>
           </Tooltip>
 
-          {layer.geomType !== 'raster' && (
+          {/* A point cloud has no GetLegendGraphic behind it, same as a
+              raster — there is no MapServer layer at all. */}
+          {layer.geomType !== 'raster' && layer.geomType !== 'pointcloud' && (
             <Tooltip label="Legende" withArrow>
               <ActionIcon
                 variant="subtle"
@@ -427,6 +497,46 @@ function LayerRow({
           <Text size="10px" c="dimmed" w={30} ta="right">
             {Math.round(layer.opacity * 100)}%
           </Text>
+        </Group>
+      )}
+
+      {/* Server-side style, so it is offered only for polygon layers this API
+          actually manages — a hand-authored layer's block is not ours to rewrite. */}
+      {layer.visible && layer.geomType === 'polygon' && deletable && (
+        <OutlineWidthSlider layerName={layer.name} />
+      )}
+
+      {layer.visible && layer.pointCloud && (
+        <Group gap={8} pl={30} pr={4} pt={4} wrap="nowrap">
+          <Text size="10px" c="dimmed">Punkte</Text>
+          <Slider
+            size="xs"
+            style={{ flex: 1 }}
+            min={1}
+            max={8}
+            step={1}
+            value={layer.pointCloud.pointSize}
+            onChange={(v) => setPointSize(layer.name, v)}
+            label={null}
+          />
+          <Select
+            size="xs"
+            w={130}
+            comboboxProps={{ withinPortal: true }}
+            value={layer.pointCloud.colorMode}
+            onChange={(v) => v && setPointColorMode(layer.name, v as 'rgb' | 'single' | 'classification')}
+            // Only offered when the file actually carries the data: a mode
+            // that resolves to nothing renders the cloud invisible or
+            // uniformly grey, which reads as a bug rather than as "this file
+            // has no colours".
+            data={[
+              ...(layer.pointCloud.hasColor ? [{ label: 'Originalfarben', value: 'rgb' }] : []),
+              { label: 'Einfarbig', value: 'single' },
+              ...(layer.pointCloud.hasClassification
+                ? [{ label: 'Klassifikation', value: 'classification' }]
+                : []),
+            ]}
+          />
         </Group>
       )}
 
@@ -729,6 +839,7 @@ function RasterCompositeButton() {
 }
 
 export default function LayerPanel() {
+  const { t } = useTranslation()
   const layers = useApp((s) => s.layers)
   const layerConfigs = useApp((s) => s.layerConfigs)
   const loading = useApp((s) => s.loading)
@@ -750,14 +861,18 @@ export default function LayerPanel() {
   const tilesAvailable = useApp((s) => s.tilesAvailable)
   const lighting = useApp((s) => s.lighting)
   const setLighting = useApp((s) => s.setLighting)
+  const tiltLimited = useApp((s) => s.tiltLimited)
+  const setTiltLimited = useApp((s) => s.setTiltLimited)
 
   const isAdmin = useAuth((s) => s.user?.role === 'admin')
+  const hasProAccess = useAuth((s) => hasFullAccess(s.user, 'pro'))
   const scheme = useComputedColorScheme('dark')
   const { setColorScheme } = useMantineColorScheme()
 
   const openLayerTab = useSelection((s) => s.openLayerTab)
   const openUpload = useUpload((s) => s.open)
   const [userAdminOpen, setUserAdminOpen] = useState(false)
+  const [accessAdminOpen, setAccessAdminOpen] = useState(false)
   const [search, setSearch] = useState('')
 
   const filteredLayers = search.trim()
@@ -835,6 +950,7 @@ export default function LayerPanel() {
           the same small "splash of color" motif instead of being the one
           box without it. */}
       <Box style={{ height: 2, flexShrink: 0, background: accentEdge(scheme) }} />
+      <TourTarget id="layer-panel-header">
       <Group
         justify="space-between"
         px="sm"
@@ -844,52 +960,69 @@ export default function LayerPanel() {
       >
         <Group gap={6}>
           {opened ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
-          <Text fw={600} size="sm">Layer</Text>
+          <Text fw={600} size="sm">{t('layerPanel.title')}</Text>
         </Group>
         <Group gap={4}>
           {!loading && <Badge size="xs" variant="light" color="yellow">{layers.length}</Badge>}
-          <Tooltip label="Layer hochladen" withArrow>
-            <ActionIcon
-              variant="subtle"
-              color="gray"
-              size="sm"
-              aria-label="Layer hochladen"
-              onClick={(e) => { e.stopPropagation(); openUpload() }}
-            >
-              <IconUpload size={14} />
-            </ActionIcon>
-          </Tooltip>
-          <RasterCompositeButton />
-          {isAdmin && (
-            <Tooltip label="Benutzer verwalten" withArrow>
+          <Tooltip label={hasProAccess ? t('layerPanel.uploadTooltip') : t('layerPanel.uploadProTooltip')} withArrow multiline>
+            <TourTarget id="upload-btn">
               <ActionIcon
                 variant="subtle"
                 color="gray"
                 size="sm"
-                aria-label="Benutzer verwalten"
+                aria-label={t('layerPanel.uploadTooltip')}
+                onClick={(e) => { e.stopPropagation(); hasProAccess && openUpload() }}
+                style={{ opacity: hasProAccess ? 1 : 0.5 }}
+              >
+                <IconUpload size={14} />
+              </ActionIcon>
+            </TourTarget>
+          </Tooltip>
+          <PrintExportButton />
+          <RasterCompositeButton />
+          {isAdmin && (
+            <Tooltip label={t('layerPanel.userAdminTooltip')} withArrow>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                aria-label={t('layerPanel.userAdminTooltip')}
                 onClick={(e) => { e.stopPropagation(); setUserAdminOpen(true) }}
               >
                 <IconUsers size={14} />
               </ActionIcon>
             </Tooltip>
           )}
-          <Tooltip label={scheme === 'dark' ? 'Helles Design' : 'Dunkles Design'} withArrow>
+          {isAdmin && (
+            <Tooltip label={t('accessAdmin.modalTitle')} withArrow>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                aria-label={t('accessAdmin.modalTitle')}
+                onClick={(e) => { e.stopPropagation(); setAccessAdminOpen(true) }}
+              >
+                <IconShieldLock size={14} />
+              </ActionIcon>
+            </Tooltip>
+          )}
+          <Tooltip label={scheme === 'dark' ? t('layerPanel.lightTheme') : t('layerPanel.darkTheme')} withArrow>
             <ActionIcon
               variant="subtle"
               color="gray"
               size="sm"
-              aria-label="Design wechseln"
+              aria-label={t('layerPanel.themeAriaLabel')}
               onClick={(e) => { e.stopPropagation(); setColorScheme(scheme === 'dark' ? 'light' : 'dark') }}
             >
               {scheme === 'dark' ? <IconSun size={14} /> : <IconMoonStars size={14} />}
             </ActionIcon>
           </Tooltip>
-          <Tooltip label="Layerliste ausblenden" withArrow>
+          <Tooltip label={t('layerPanel.hidePanelTooltip')} withArrow>
             <ActionIcon
               variant="subtle"
               color="gray"
               size="sm"
-              aria-label="Layerliste ausblenden"
+              aria-label={t('layerPanel.hidePanelTooltip')}
               onClick={(e) => { e.stopPropagation(); hidePanel('layerPanel') }}
             >
               <IconX size={14} />
@@ -897,18 +1030,21 @@ export default function LayerPanel() {
           </Tooltip>
         </Group>
       </Group>
+      </TourTarget>
 
       <UploadLayer />
       {isAdmin && <UserAdmin opened={userAdminOpen} onClose={() => setUserAdminOpen(false)} />}
+      {isAdmin && <AccessAdmin opened={accessAdminOpen} onClose={() => setAccessAdminOpen(false)} />}
 
       <Collapse in={opened} style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <ScrollArea style={{ flex: 1 }}>
           <Stack gap="xs" p="xs">
+            <TourTarget id="layer-list">
             <Box>
-              <Text size="10px" fw={700} c={scheme === 'dark' ? 'teal.6' : 'teal.8'} tt="uppercase" mb={4}>Daten</Text>
+              <Text size="10px" fw={700} c={scheme === 'dark' ? 'teal.6' : 'teal.8'} tt="uppercase" mb={4}>{t('layerPanel.dataSection')}</Text>
 
               {loading && (
-                <Group gap={8}><Loader size="xs" /><Text size="xs" c="dimmed">lade…</Text></Group>
+                <Group gap={8}><Loader size="xs" /><Text size="xs" c="dimmed">{t('layerPanel.loading')}</Text></Group>
               )}
 
               {error && (
@@ -925,9 +1061,7 @@ export default function LayerPanel() {
               {!loading && layersServiceDown && (
                 <Alert color="yellow" variant="light" p="xs">
                   <Text size="xs">
-                    Upload-Dienst nicht verfügbar — Hochladen, Registrieren, Filter und
-                    Klassifizierung funktionieren derzeit nicht. Sachdatentabelle und
-                    Löschen funktionieren weiterhin.
+                    {t('layerPanel.serviceDown')}
                   </Text>
                   {layersServiceError && (
                     <Text size="xs" c="dimmed" mt={4} style={{ wordBreak: 'break-word' }}>
@@ -938,26 +1072,28 @@ export default function LayerPanel() {
               )}
 
               {!loading && !error && (
-                <TextInput
-                  size="xs"
-                  placeholder="Layer suchen…"
-                  leftSection={<IconSearch size={13} />}
-                  rightSection={search ? (
-                    <ActionIcon size="xs" variant="subtle" color="gray" onClick={() => setSearch('')}>
-                      <IconX size={12} />
-                    </ActionIcon>
-                  ) : null}
-                  value={search}
-                  onChange={(e) => setSearch(e.currentTarget.value)}
-                  mb={6}
-                />
+                <TourTarget id="layer-search">
+                  <TextInput
+                    size="xs"
+                    placeholder={t('layerPanel.searchPlaceholder')}
+                    leftSection={<IconSearch size={13} />}
+                    rightSection={search ? (
+                      <ActionIcon size="xs" variant="subtle" color="gray" onClick={() => setSearch('')}>
+                        <IconX size={12} />
+                      </ActionIcon>
+                    ) : null}
+                    value={search}
+                    onChange={(e) => setSearch(e.currentTarget.value)}
+                    mb={6}
+                  />
+                </TourTarget>
               )}
 
               {!loading && !error && filteredLayers.length === 0 && (
                 <Text size="xs" c="dimmed" ta="center" mt={4}>
                   {layers.length === 0
-                    ? 'Keine Layer veröffentlicht'
-                    : 'Keine Treffer'}
+                    ? t('layerPanel.noLayers')
+                    : t('layerPanel.noMatches')}
                 </Text>
               )}
 
@@ -990,46 +1126,59 @@ export default function LayerPanel() {
               )}
 
               <Text size="10px" c="dimmed" mt={6}>
-                Oben = wird zuerst gezeichnet. Ziehen oder Pfeile benutzen.
+                {t('layerPanel.drawOrderHint')}
               </Text>
             </Box>
+            </TourTarget>
 
+            <TourTarget id="three-d-section">
             <Box>
-              <Text size="10px" fw={700} c={scheme === 'dark' ? 'teal.6' : 'teal.8'} tt="uppercase" mb={4}>3D</Text>
+              <Text size="10px" fw={700} c={scheme === 'dark' ? 'teal.6' : 'teal.8'} tt="uppercase" mb={4}>{t('layerPanel.threeDSection')}</Text>
               <Stack gap={6}>
                 <Switch
                   size="xs"
-                  label="Gelände (quantized-mesh)"
+                  label={t('layerPanel.terrainLabel')}
                   checked={terrainOn}
                   disabled={terrainAvailable === false}
                   onChange={(e) => setTerrain(e.currentTarget.checked)}
                 />
                 <Switch
                   size="xs"
-                  label="3D-Gebäude"
+                  label={t('layerPanel.buildingsLabel')}
                   checked={tilesOn}
                   disabled={tilesAvailable === false}
                   onChange={(e) => setTiles(e.currentTarget.checked)}
                 />
                 <Switch
                   size="xs"
-                  label="Beleuchtung"
+                  label={t('layerPanel.lightingLabel')}
                   checked={lighting}
                   onChange={(e) => setLighting(e.currentTarget.checked)}
+                />
+                {/* Phrased as the freedom, not the restriction, so "on" is
+                    the more capable state like every other switch here —
+                    the store's flag is the inverse (tiltLimited). */}
+                <Switch
+                  size="xs"
+                  label={t('layerPanel.freeTiltLabel')}
+                  description={t('layerPanel.freeTiltDescription')}
+                  checked={!tiltLimited}
+                  onChange={(e) => setTiltLimited(!e.currentTarget.checked)}
                 />
               </Stack>
               {terrainAvailable === false && (
                 <Text size="10px" c="dimmed" mt={4}>
-                  Keine Kacheln unter /terrain — ctb-Profil noch nicht gelaufen.
+                  {t('layerPanel.terrainUnavailable')}
                 </Text>
               )}
             </Box>
+            </TourTarget>
 
             <Box>
-              <Text size="10px" fw={700} c={scheme === 'dark' ? 'teal.6' : 'teal.8'} tt="uppercase" mb={4}>Hintergrund</Text>
+              <Text size="10px" fw={700} c={scheme === 'dark' ? 'teal.6' : 'teal.8'} tt="uppercase" mb={4}>{t('layerPanel.backgroundSection')}</Text>
               <Switch
                 size="xs"
-                label="OpenStreetMap (extern)"
+                label={t('layerPanel.osmLabel')}
                 checked={osmVisible}
                 onChange={(e) => setOsm(e.currentTarget.checked)}
               />

@@ -162,13 +162,13 @@
  */
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ActionIcon, Badge, Box, Group, Loader, RingProgress, SegmentedControl, Select, Stack, Switch,
+  ActionIcon, Badge, Box, Group, Loader, MultiSelect, RingProgress, SegmentedControl, Stack, Switch,
   Text, TextInput, Tooltip, useComputedColorScheme,
 } from '@mantine/core'
 import { BarChart, DonutChart, PieChart } from '@mantine/charts'
 import {
   IconBookmark, IconChevronRight, IconCircle, IconClick, IconDownload, IconExternalLink, IconFilter, IconLasso,
-  IconTrash, IconX,
+  IconLock, IconTrash, IconX,
 } from '@tabler/icons-react'
 import { Math as CesiumMath } from 'cesium'
 
@@ -185,6 +185,7 @@ import { useTools } from './tools'
 import { useSelectCandidates } from './ToolboxControls'
 import { collectionFor, useApp, type LayerFilter } from './wms'
 import { useSelection, type SelectedEntry } from './selection'
+import { hasFullAccess, useAuth } from './auth'
 
 /** A layer's active filter, or null if it has none — or none of its conditions are
  * actually usable (mirrors filter.ts's buildCql()'s own "usable" check). Shared by
@@ -356,7 +357,7 @@ function AggregatesTable({
  * on-demand fetch) their own mode needs. */
 function BreakdownColumns({
   buckets, color, chartType, setChartType, showLabels, setShowLabels, highlightedLabel, loadingLabel,
-  onRowClick, onDrillThrough, drillThroughTooltip, donutCenterLabel,
+  onRowClick, onDrillThrough, drillThroughTooltip, donutCenterLabel, canUnfoldOther,
 }: {
   buckets: CountBucket[]
   color: string
@@ -370,6 +371,10 @@ function BreakdownColumns({
   onDrillThrough?: (label: string) => void
   drillThroughTooltip?: string
   donutCenterLabel: string
+  /** Unfolding "Andere" back into its individual values is premium-only —
+   * everyone else still sees the summed "Andere" bucket, just can't expand
+   * it. */
+  canUnfoldOther: boolean
 }) {
   const [andereOpen, setAndereOpen] = useState(false)
   const maxCount = buckets.length > 0 ? Math.max(...buckets.map((b) => b.count)) : 0
@@ -417,13 +422,22 @@ function BreakdownColumns({
           />
           <Group gap={2} wrap="nowrap" style={{ position: 'relative', minWidth: 0 }}>
             {isAndere && (
-              <ActionIcon
-                variant="transparent" size="xs" aria-label={andereOpen ? 'Andere einklappen' : 'Andere aufklappen'}
-                onClick={(e) => { e.stopPropagation(); setAndereOpen((o) => !o) }}
-                style={{ flexShrink: 0 }}
+              <Tooltip
+                label={canUnfoldOther ? (andereOpen ? 'Andere einklappen' : 'Andere aufklappen') : 'Andere aufklappen (Premium)'}
+                withArrow
+                position="top"
               >
-                <IconChevronRight size={12} style={{ transform: andereOpen ? 'rotate(90deg)' : undefined, transition: 'transform 150ms' }} />
-              </ActionIcon>
+                <ActionIcon
+                  variant="transparent" size="xs"
+                  aria-label={canUnfoldOther ? (andereOpen ? 'Andere einklappen' : 'Andere aufklappen') : 'Andere aufklappen (Premium)'}
+                  onClick={(e) => { e.stopPropagation(); if (canUnfoldOther) setAndereOpen((o) => !o) }}
+                  style={{ flexShrink: 0, opacity: canUnfoldOther ? 1 : 0.45, cursor: canUnfoldOther ? 'pointer' : 'default' }}
+                >
+                  {canUnfoldOther
+                    ? <IconChevronRight size={12} style={{ transform: andereOpen ? 'rotate(90deg)' : undefined, transition: 'transform 150ms' }} />
+                    : <IconLock size={11} />}
+                </ActionIcon>
+              </Tooltip>
             )}
             <Text size="xs" c="dimmed" truncate>{b.label}</Text>
           </Group>
@@ -549,6 +563,33 @@ function BreakdownColumns({
  * `count` is `null` while LayerOverviewCard's async row count hasn't
  * resolved yet (a real selection's `entries.length` is always known
  * synchronously, so this only ever shows "…" in overview mode). */
+/**
+ * The layer names the dashboard is currently able to show, in the order it
+ * lists them: the layers a real selection spans, or — with nothing selected —
+ * every visible layer whose collection can be resolved ("everything selected"
+ * overview mode).
+ *
+ * Exported because DataViewBand.tsx needs the same answer to decide whether
+ * its "auswerten" button can actually do anything for a given layer. Keeping
+ * that one derivation here means the button can never offer a layer the
+ * dashboard would then silently refuse to select.
+ */
+export function useDashboardLayerNames(): string[] {
+  const selected = useSelection((s) => s.selected)
+  const layers = useApp((s) => s.layers)
+  const dynamicCollections = useApp((s) => s.dynamicCollections)
+  return useMemo(() => {
+    const fromSelection: string[] = []
+    selected.forEach((entry) => {
+      if (!fromSelection.includes(entry.layer)) fromSelection.push(entry.layer)
+    })
+    if (fromSelection.length > 0) return fromSelection
+    return layers
+      .filter((l) => l.visible && !!(l.source ?? collectionFor(l.name, dynamicCollections)))
+      .map((l) => l.name)
+  }, [selected, layers, dynamicCollections])
+}
+
 function LayerNavRow({
   title, color, count, active, hasFilter, onClick,
 }: {
@@ -610,12 +651,28 @@ function computeAggregates(entries: SelectedEntry[], numericCols: Column[]) {
  * Shared by LayerSummary (a real selection) and LayerOverviewCard's
  * Kartenansicht mode (a viewport-bounded fetch) — both have real entries to
  * group, unlike LayerOverviewCard's Alle-Zeilen mode, which only ever gets
- * `{label, count}` back from the server (see bucketTopN above instead). */
-function computeEntryBreakdown(entries: SelectedEntry[], groupBy: string): Bucket[] {
+ * `{label, count}` back from the server (see bucketTopN above instead).
+ * `groupBy` grouping by more than one column at once is the premium-tier
+ * feature (see the MultiSelect's `maxValues` in LayerSummary/
+ * LayerOverviewCard) — composite labels join each column's value with the
+ * same " / " separator upload-api's /column-groupby uses server-side, so
+ * switching between Kartenansicht (this, client-side) and Alle Zeilen
+ * (server-side) reads consistently either way. */
+const GROUPBY_LABEL_SEP = ' / '
+
+function entryGroupLabel(props: Record<string, unknown>, groupBy: string[]): string {
+  return groupBy
+    .map((col) => {
+      const raw = props[col]
+      return raw === null || raw === undefined || raw === '' ? '(leer)' : String(raw)
+    })
+    .join(GROUPBY_LABEL_SEP)
+}
+
+function computeEntryBreakdown(entries: SelectedEntry[], groupBy: string[]): Bucket[] {
   const groups = new Map<string, SelectedEntry[]>()
   for (const e of entries) {
-    const raw = e.feature.properties[groupBy]
-    const label = raw === null || raw === undefined || raw === '' ? '(leer)' : String(raw)
+    const label = entryGroupLabel(e.feature.properties, groupBy)
     const arr = groups.get(label)
     if (arr) arr.push(e)
     else groups.set(label, [e])
@@ -651,10 +708,11 @@ function LayerSummary({
   const aliases = layerConfigs[layerName]?.columnAliases || {}
   const collection = collectionFor(layerName, dynamicCollections)
   const color = layerColor(layerName)
+  const canGroupByMultiple = useAuth((s) => hasFullAccess(s.user, 'premium'))
 
   const [columns, setColumns] = useState<Column[] | null>(null)
   const [colError, setColError] = useState<string | null>(null)
-  const [groupBy, setGroupBy] = useState<string | null>(null)
+  const [groupBy, setGroupBy] = useState<string[]>([])
   // Per layer, not global — a layer with a handful of categories often reads
   // better as a pie/donut, while one capped to the top 8 + "Andere" often
   // reads better as a bar; local state here (alongside groupBy) means each
@@ -679,7 +737,7 @@ function LayerSummary({
   const aggregates = useMemo(() => computeAggregates(entries, numericCols), [numericCols, entries])
 
   const breakdown = useMemo<Bucket[] | null>(
-    () => (groupBy ? computeEntryBreakdown(entries, groupBy) : null),
+    () => (groupBy.length > 0 ? computeEntryBreakdown(entries, groupBy) : null),
     [groupBy, entries],
   )
 
@@ -733,16 +791,20 @@ function LayerSummary({
         />
         {categoricalCols.length > 0 && (
           <>
-            <Select
+            <MultiSelect
               size="xs"
               mt={4}
-              placeholder="Gruppieren nach…"
+              placeholder={groupBy.length === 0 ? 'Gruppieren nach…' : undefined}
               clearable
+              maxValues={canGroupByMultiple ? undefined : 1}
               data={categoricalCols.map((c) => ({ value: c.key, label: columnLabel(aliases, c.key) }))}
               value={groupBy}
               onChange={setGroupBy}
               comboboxProps={{ withinPortal: false }}
             />
+            {!canGroupByMultiple && (
+              <Text size="9px" c="dimmed" mt={2}>Mehrere Spalten gleichzeitig: Premium</Text>
+            )}
             {breakdown && (
               <BreakdownColumns
                 buckets={breakdown}
@@ -752,6 +814,7 @@ function LayerSummary({
                 showLabels={showLabels}
                 setShowLabels={setShowLabels}
                 highlightedLabel={highlight.layerName === layerName ? highlight.label : null}
+                canUnfoldOther={canGroupByMultiple}
                 onRowClick={(label) => {
                   const b = bucketByLabel.get(label)
                   if (b) toggleHighlight(b)
@@ -798,6 +861,7 @@ function LayerOverviewCard({
   const aliases = layerConfigs[layerName]?.columnAliases || {}
   const color = layerColor(layerName)
   const [schema, table] = collection.split(/\.(.+)/)
+  const canGroupByMultiple = useAuth((s) => hasFullAccess(s.user, 'premium'))
 
   // This layer's active attribute filter (AttributeFilter.tsx/wms.ts), if
   // any — makes "everything selected" mean "everything matching the
@@ -818,7 +882,7 @@ function LayerOverviewCard({
 
   const [columns, setColumns] = useState<Column[] | null>(null)
   const [colError, setColError] = useState<string | null>(null)
-  const [groupBy, setGroupBy] = useState<string | null>(null)
+  const [groupBy, setGroupBy] = useState<string[]>([])
   const [chartType, setChartType] = useState<ChartType>('bar')
   const [showLabels, setShowLabels] = useState(true)
   const [numericStats, setNumericStats] = useState<Record<string, ColumnStats>>({})
@@ -916,7 +980,7 @@ function LayerOverviewCard({
   }, [isActive, viewMode, numericCols, schema, table, activeFilter])
 
   useEffect(() => {
-    if (viewMode !== 'all' || !groupBy) { setGroupBuckets(null); return }
+    if (viewMode !== 'all' || groupBy.length === 0) { setGroupBuckets(null); return }
     setGroupError(null)
     fetchColumnGroupBy(schema, table, groupBy, activeFilter)
       .then((r) => setGroupBuckets(bucketTopN(r.buckets.map((b) => ({ label: b.value, count: b.count })), r.totalCount)))
@@ -925,7 +989,7 @@ function LayerOverviewCard({
 
   const viewportAggregates = useMemo(() => computeAggregates(viewportEntries, numericCols), [viewportEntries, numericCols])
   const viewportBuckets = useMemo<Bucket[] | null>(
-    () => (groupBy ? computeEntryBreakdown(viewportEntries, groupBy) : null),
+    () => (groupBy.length > 0 ? computeEntryBreakdown(viewportEntries, groupBy) : null),
     [groupBy, viewportEntries],
   )
   const viewportBucketByLabel = useMemo(
@@ -954,8 +1018,12 @@ function LayerOverviewCard({
   // filter.ts changes, so it's shown but not clickable. Alle Zeilen only —
   // Kartenansicht already has every bucket's real entries in memory.
   async function fetchBucketEntries(label: string): Promise<SelectedEntry[] | null> {
-    if (!groupBy) return null
-    const cql = buildCql([{ column: groupBy, op: 'eq', value: label }], 'and')
+    if (groupBy.length === 0) return null
+    // A multi-column bucket's label is groupBy's values joined by GROUPBY_LABEL_SEP
+    // (see entryGroupLabel) — split it back apart and AND one eq condition per column.
+    const values = label.split(GROUPBY_LABEL_SEP)
+    if (values.length !== groupBy.length) return null
+    const cql = buildCql(groupBy.map((col, i) => ({ column: col, op: 'eq' as const, value: values[i] })), 'and')
     if (!cql) return null
     const { features } = await fetchFeaturesWithFilter(collection, cql)
     return features.map((feature) => ({ layer: layerName, feature }))
@@ -1057,16 +1125,20 @@ function LayerOverviewCard({
         )}
         {categoricalCols.length > 0 && (
           <>
-            <Select
+            <MultiSelect
               size="xs"
               mt={4}
-              placeholder="Gruppieren nach…"
+              placeholder={groupBy.length === 0 ? 'Gruppieren nach…' : undefined}
               clearable
+              maxValues={canGroupByMultiple ? undefined : 1}
               data={categoricalCols.map((c) => ({ value: c.key, label: columnLabel(aliases, c.key) }))}
               value={groupBy}
               onChange={setGroupBy}
               comboboxProps={{ withinPortal: false }}
             />
+            {!canGroupByMultiple && (
+              <Text size="9px" c="dimmed" mt={2}>Mehrere Spalten gleichzeitig: Premium</Text>
+            )}
             {viewMode === 'all' && groupError && <Text size="xs" c="red" mt={4}>{groupError}</Text>}
             {viewMode === 'viewport' && viewportBuckets && (
               <BreakdownColumns
@@ -1077,6 +1149,7 @@ function LayerOverviewCard({
                 showLabels={showLabels}
                 setShowLabels={setShowLabels}
                 highlightedLabel={highlight.layerName === layerName ? highlight.label : null}
+                canUnfoldOther={canGroupByMultiple}
                 onRowClick={(label) => {
                   const b = viewportBucketByLabel.get(label)
                   if (b) toggleViewportHighlight(b)
@@ -1101,6 +1174,7 @@ function LayerOverviewCard({
                 setShowLabels={setShowLabels}
                 highlightedLabel={highlight.layerName === layerName ? highlight.label : null}
                 loadingLabel={loadingLabel}
+                canUnfoldOther={canGroupByMultiple}
                 onRowClick={onRowClick}
                 onDrillThrough={onDrillThrough}
                 drillThroughTooltip="In Tabelle öffnen (ersetzt die Auswahl)"
@@ -1333,12 +1407,15 @@ export default function SelectionDashboardPanel({ isActive }: { isActive: boolea
   // same layer name is still present in the current list; only falls back
   // to "pick the first one" when it genuinely isn't there any more, so a
   // clear/re-select doesn't force you back to the top of the list every time.
-  const [selectedLayerName, setSelectedLayerName] = useState<string | null>(null)
+  // In selection.ts, not local state, so DataViewBand's "auswerten" button can
+  // open the dashboard directly on a chosen layer — see `dashboardLayer`.
+  const selectedLayerName = useSelection((s) => s.dashboardLayer)
+  const setSelectedLayerName = useSelection((s) => s.setDashboardLayer)
+  const dashboardNames = useDashboardLayerNames()
   useEffect(() => {
-    const names = byLayer.size > 0 ? Array.from(byLayer.keys()) : overviewLayers.map((o) => o.layer.name)
-    if (selectedLayerName && names.includes(selectedLayerName)) return
-    setSelectedLayerName(names[0] ?? null)
-  }, [byLayer, overviewLayers, selectedLayerName])
+    if (selectedLayerName && dashboardNames.includes(selectedLayerName)) return
+    setSelectedLayerName(dashboardNames[0] ?? null)
+  }, [dashboardNames, selectedLayerName, setSelectedLayerName])
 
   return (
     <div

@@ -37,127 +37,152 @@ globals:
   http:
     client_timeout: 120
 layers:
-- name: dbtable_gis_roads
-  title: dbtable_gis_roads
+- name: upload_admin_units
+  title: upload_admin_units
   sources:
-  - cache_dbtable_gis_roads
-- name: dbtable_raw_upload_oberbayern
-  title: dbtable_raw_upload_oberbayern
+  - cache_upload_admin_units
+- name: upload_ffentliche_verkehrsmittel
+  title: upload_ffentliche_verkehrsmittel
   sources:
-  - cache_dbtable_raw_upload_oberbayern
-- name: dbtable_raw_osm_landuse
-  title: dbtable_raw_osm_landuse
+  - cache_upload_ffentliche_verkehrsmittel
+- name: upload_bahntrassen
+  title: upload_bahntrassen
   sources:
-  - cache_dbtable_raw_osm_landuse
-- name: upload_test
-  title: upload_test
+  - cache_upload_bahntrassen
+- name: dbtable_dwh_upload_buffer_upload_ffentliche_verk
+  title: dbtable_dwh_upload_buffer_upload_ffentliche_verk
   sources:
-  - cache_upload_test
-- name: upload_lau_rg_01m_2024_3035
-  title: upload_lau_rg_01m_2024_3035
+  - cache_dbtable_dwh_upload_buffer_upload_ffentliche_verk
+- name: upload_testqgis
+  title: upload_testqgis
   sources:
-  - cache_upload_lau_rg_01m_2024_3035
+  - cache_upload_testqgis
+- name: upload_voronoi_polygons_ffentliche_verkehrsmitt
+  title: upload_voronoi_polygons_ffentliche_verkehrsmitt
+  sources:
+  - cache_upload_voronoi_polygons_ffentliche_verkehrsmitt
 caches:
-  cache_dbtable_gis_roads:
+  cache_upload_admin_units:
     grids:
     - webmercator
     - geodetic
     sources:
-    - src_dbtable_gis_roads
+    - src_upload_admin_units
     format: image/png
-    cache_dir: /mapproxy/cache_data/dbtable_gis_roads
+    cache_dir: /mapproxy/cache_data/upload_admin_units
     cache:
       type: file
-  cache_dbtable_raw_upload_oberbayern:
+  cache_upload_ffentliche_verkehrsmittel:
     grids:
     - webmercator
     - geodetic
     sources:
-    - src_dbtable_raw_upload_oberbayern
+    - src_upload_ffentliche_verkehrsmittel
     format: image/png
-    cache_dir: /mapproxy/cache_data/dbtable_raw_upload_oberbayern
+    cache_dir: /mapproxy/cache_data/upload_ffentliche_verkehrsmittel
     cache:
       type: file
-  cache_dbtable_raw_osm_landuse:
+  cache_upload_bahntrassen:
     grids:
     - webmercator
     - geodetic
     sources:
-    - src_dbtable_raw_osm_landuse
+    - src_upload_bahntrassen
     format: image/png
-    cache_dir: /mapproxy/cache_data/dbtable_raw_osm_landuse
+    cache_dir: /mapproxy/cache_data/upload_bahntrassen
     cache:
       type: file
-  cache_upload_test:
+  cache_dbtable_dwh_upload_buffer_upload_ffentliche_verk:
     grids:
     - webmercator
     - geodetic
     sources:
-    - src_upload_test
+    - src_dbtable_dwh_upload_buffer_upload_ffentliche_verk
     format: image/png
-    cache_dir: /mapproxy/cache_data/upload_test
+    cache_dir: /mapproxy/cache_data/dbtable_dwh_upload_buffer_upload_ffentliche_verk
     cache:
       type: file
-  cache_upload_lau_rg_01m_2024_3035:
+  cache_upload_testqgis:
     grids:
     - webmercator
     - geodetic
     sources:
-    - src_upload_lau_rg_01m_2024_3035
+    - src_upload_testqgis
     format: image/png
-    cache_dir: /mapproxy/cache_data/upload_lau_rg_01m_2024_3035
+    cache_dir: /mapproxy/cache_data/upload_testqgis
+    cache:
+      type: file
+  cache_upload_voronoi_polygons_ffentliche_verkehrsmitt:
+    grids:
+    - webmercator
+    - geodetic
+    sources:
+    - src_upload_voronoi_polygons_ffentliche_verkehrsmitt
+    format: image/png
+    cache_dir: /mapproxy/cache_data/upload_voronoi_polygons_ffentliche_verkehrsmitt
     cache:
       type: file
 sources:
-  src_dbtable_gis_roads:
+  src_upload_admin_units:
     type: wms
     req:
       url: http://mapserver/
-      layers: dbtable_gis_roads
+      layers: upload_admin_units
       transparent: true
     supported_srs:
     - EPSG:4326
     - EPSG:3857
     wms_opts:
       version: 1.3.0
-  src_dbtable_raw_upload_oberbayern:
+  src_upload_ffentliche_verkehrsmittel:
     type: wms
     req:
       url: http://mapserver/
-      layers: dbtable_raw_upload_oberbayern
+      layers: upload_ffentliche_verkehrsmittel
       transparent: true
     supported_srs:
     - EPSG:4326
     - EPSG:3857
     wms_opts:
       version: 1.3.0
-  src_dbtable_raw_osm_landuse:
+  src_upload_bahntrassen:
     type: wms
     req:
       url: http://mapserver/
-      layers: dbtable_raw_osm_landuse
+      layers: upload_bahntrassen
       transparent: true
     supported_srs:
     - EPSG:4326
     - EPSG:3857
     wms_opts:
       version: 1.3.0
-  src_upload_test:
+  src_dbtable_dwh_upload_buffer_upload_ffentliche_verk:
     type: wms
     req:
       url: http://mapserver/
-      layers: upload_test
+      layers: dbtable_dwh_upload_buffer_upload_ffentliche_verk
       transparent: true
     supported_srs:
     - EPSG:4326
     - EPSG:3857
     wms_opts:
       version: 1.3.0
-  src_upload_lau_rg_01m_2024_3035:
+  src_upload_testqgis:
     type: wms
     req:
       url: http://mapserver/
-      layers: upload_lau_rg_01m_2024_3035
+      layers: upload_testqgis
+      transparent: true
+    supported_srs:
+    - EPSG:4326
+    - EPSG:3857
+    wms_opts:
+      version: 1.3.0
+  src_upload_voronoi_polygons_ffentliche_verkehrsmitt:
+    type: wms
+    req:
+      url: http://mapserver/
+      layers: upload_voronoi_polygons_ffentliche_verkehrsmitt
       transparent: true
     supported_srs:
     - EPSG:4326

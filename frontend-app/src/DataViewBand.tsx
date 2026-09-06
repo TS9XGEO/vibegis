@@ -14,6 +14,14 @@
  * felt cluttered, and nothing is lost: clicking the pill
  * (selection.ts's `focusDataView()`) or any layer row in LayerPanel.tsx
  * (`openLayerTab()`) switches straight back to the normal tab strip.
+ * The header also carries an "Im Dashboard auswerten" button while a layer
+ * tab is focused — it opens the dashboard tab already showing that layer
+ * (selection.ts's `openDashboardForLayer`), so getting from a table to its
+ * summary is one click rather than "open the dashboard from Sideband, then
+ * find the layer again". It disables itself, with the reason, when the
+ * dashboard cannot show that layer at all; `useDashboardLayerNames()` in
+ * SelectionDashboard.tsx is the shared answer to which layers those are.
+ *
  * SelectionDashboard.tsx's `SelectToolsRow` (point/circle/polygon select +
  * count + clear) sits in the header next to the maximize button, shown
  * regardless of which tab is focused — selecting features is just as useful
@@ -28,7 +36,7 @@ import { IconChartBar, IconChevronsDown, IconChevronsUp, IconX } from '@tabler/i
 
 import AttributeTablePanel from './AttributeTable'
 import { accentEdge, panelBg, panelBorder } from './colorScheme'
-import SelectionDashboardPanel, { SelectToolsRow } from './SelectionDashboard'
+import SelectionDashboardPanel, { SelectToolsRow, useDashboardLayerNames } from './SelectionDashboard'
 import { useResizeHeight } from './useResizeHeight'
 import { useSelection } from './selection'
 import { useApp } from './wms'
@@ -49,6 +57,8 @@ export default function DataViewBand() {
   const focusDashboardTab = useSelection((s) => s.focusDashboardTab)
   const closeDashboardTab = useSelection((s) => s.closeDashboardTab)
   const focusDataView = useSelection((s) => s.focusDataView)
+  const openDashboardForLayer = useSelection((s) => s.openDashboardForLayer)
+  const dashboardNames = useDashboardLayerNames()
   const layers = useApp((s) => s.layers)
   const layerConfigs = useApp((s) => s.layerConfigs)
   const { height, handleProps: resizeHandleProps, maximized, toggleMaximize } =
@@ -184,6 +194,40 @@ export default function DataViewBand() {
               works the same from a plain attribute-table tab as it does
               from the dashboard — no reason to make it dashboard-only when
               the underlying select tools never were. */}
+          {/* Opens the dashboard already showing the focused tab's layer,
+              rather than making the user open it from Sideband and then find
+              the layer again in its list. Only offered while a layer tab is
+              focused — from the dashboard itself it would be a no-op.
+              Disabled (with the reason) when the dashboard genuinely cannot
+              show that layer: its list is either the layers a selection spans
+              or, with nothing selected, the visible ones. A wrapping Box is
+              what keeps the tooltip working, since a disabled control fires
+              no pointer events of its own. */}
+          {!dashboardTabActive && activeLayer && (
+            <Tooltip
+              label={
+                dashboardNames.includes(activeLayer)
+                  ? 'Im Dashboard auswerten'
+                  : 'Layer im Dashboard nicht verfügbar — dort erscheinen nur Layer mit Auswahl, sonst die sichtbaren Layer.'
+              }
+              withArrow
+              multiline
+              w={dashboardNames.includes(activeLayer) ? undefined : 240}
+            >
+              <Box style={{ display: 'flex' }}>
+                <ActionIcon
+                  variant="subtle"
+                  color="gray"
+                  size="md"
+                  aria-label="Im Dashboard auswerten"
+                  disabled={!dashboardNames.includes(activeLayer)}
+                  onClick={() => openDashboardForLayer(activeLayer)}
+                >
+                  <IconChartBar size={16} />
+                </ActionIcon>
+              </Box>
+            </Tooltip>
+          )}
           <SelectToolsRow />
           <Tooltip label={maximized ? 'Wiederherstellen' : 'Ganz nach oben ausdehnen'} withArrow>
             <ActionIcon

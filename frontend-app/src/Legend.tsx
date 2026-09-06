@@ -102,12 +102,13 @@ function ClassRow({ layerName, geometry, cls }: { layerName: string; geometry: G
 export default function LegendSymbols({ layerName, active }: { layerName: string; active: boolean }) {
   const layer = useApp((s) => s.layers.find((l) => l.name === layerName))
   const classification = useApp((s) => s.layerConfigs[layerName]?.classification)
+  const outlineWidth = useApp((s) => s.layerConfigs[layerName]?.outlineWidth)
   const geometryType = useApp((s) => s.dynamicGeometry[layerName])
   const layerFilter = useApp((s) => s.attributeFilters[layerName])
   const dynamicCollections = useApp((s) => s.dynamicCollections)
   const camera = useApp((s) => s.camera)
   const scene = useApp((s) => s.scene)
-  const legend = resolveLegend(layerName, classification, geometryType)
+  const legend = resolveLegend(layerName, classification, geometryType, outlineWidth)
   const collection = collectionFor(layerName, dynamicCollections)
   const classItem = legend?.classItem ?? null
 

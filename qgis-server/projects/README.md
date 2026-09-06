@@ -24,3 +24,11 @@ http://localhost:8080/qgis?MAP=/io/data/demo.qgs&SERVICE=WMS&VERSION=1.3.0&REQUE
 Inside the container the database host is `postgis`, not `localhost`. Either
 save the project with `host=postgis`, or add a PostgreSQL service definition
 file so the connection name resolves differently per environment.
+
+## Generated print projects are NOT here
+
+`POST /qgis-print` (upload-api) has the `qgis-processing` worker generate a `.qgs`
+per export. Those go to the `qgis-projects` named volume — `/io/generated`, rw in
+qgis-processing and ro in qgis-server — not into this directory, which stays
+hand-authored, git-tracked and read-only. A generated project is deleted as soon as
+its PDF has been streamed, with an hourly sweep as the backstop.

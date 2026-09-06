@@ -26,6 +26,7 @@ import { Cesium3DTileset, Fog, Globe, ImageryLayer, Viewer, useCesium } from 're
 import AutoOrthographic from './AutoOrthographic'
 import DashboardHighlight from './DashboardHighlight'
 import ClusteredPointLayer from './PointCluster'
+import PointCloudLayer from './PointCloudLayer'
 import SelectionHighlight from './SelectionHighlight'
 
 /** Where the map opens. Change these three numbers to move home. */
@@ -35,6 +36,17 @@ const HOME = {
   height: 3500,      // metres above ground
   pitch: -90,        // degrees; negative looks down, 0 is horizontal, -90 is straight down
 }
+
+/** Tilting down past this (towards the horizon) is disallowed — straight
+ * down (pitch -90°) is always fine, this only floors how shallow/horizontal
+ * the view can get. 30 = can't tilt closer to the horizon than a 30°
+ * look-down angle; raise towards 90 to allow flatter views, lower towards 0
+ * to force a closer-to-nadir view at all times.
+ *
+ * Enforced only while the store's `tiltLimited` is set — LayerPanel.tsx has a
+ * switch for it, and a visible point cloud releases it automatically (see
+ * below), since 3D geometry can only be read by orbiting it from the side. */
+const MIN_TILT_DEG = 30
 
 /**
  * Sets the opening view once, after Cesium is ready. Also hands the camera
@@ -46,6 +58,9 @@ function InitialView() {
   const done = useRef(false)
   const setCamera = useApp((s) => s.setCamera)
   const setScene = useApp((s) => s.setScene)
+  const tiltLimited = useApp((s) => s.tiltLimited)
+  const setTiltLimited = useApp((s) => s.setTiltLimited)
+  const pointCloudVisible = useApp((s) => s.layers.some((l) => l.pointCloud && l.visible))
 
   useEffect(() => {
     setCamera(camera ?? null)
@@ -68,6 +83,79 @@ function InitialView() {
     })
   }, [camera])
 
+  // Showing a point cloud releases the tilt limit; hiding the last one puts
+  // it back. Driven off the *transition*, not off `pointCloudVisible`
+  // directly, which is what leaves the manual switch usable in between: turn
+  // the limit back on with a cloud still showing and it stays on, because no
+  // edge has occurred since. A plain derived value would instead fight the
+  // user, silently reverting the switch on the next render.
+  const hadPointCloud = useRef(pointCloudVisible)
+  useEffect(() => {
+    if (pointCloudVisible === hadPointCloud.current) return
+    hadPointCloud.current = pointCloudVisible
+    setTiltLimited(!pointCloudVisible)
+  }, [pointCloudVisible, setTiltLimited])
+
+  // Floors how shallow a tilt the mouse/touch drag (Cesium's own
+  // ScreenSpaceCameraController — it has no built-in min/max pitch of its
+  // own) can reach — see MIN_TILT_DEG. Checked every frame via preRender
+  // rather than camera.changed, which only fires past a percentage-of-view
+  // threshold (CompassButton.tsx sets that to 0.1 for its own heading
+  // readout) and would let a fast drag overshoot well past the limit before
+  // snapping back.
+  //
+  // Restores the *entire* last valid camera (position included, not just
+  // pitch): Cesium's tilt drag orbits the camera around a ground pivot, so
+  // it moves position too, not pitch alone — fixing pitch back in place
+  // every frame while leaving that frame's position change in effect still
+  // let the camera visibly creep/pan while "stuck" at the limit. Snapping
+  // the whole camera back to the last frame that was still within bounds
+  // makes hitting the limit inert instead: further drag past it does
+  // nothing at all until the user drags back the other way.
+  const lastGood = useRef<{ position: Cartesian3; heading: number; pitch: number; roll: number } | null>(null)
+  useEffect(() => {
+    // Off entirely while the limit is released (a point cloud is showing, or
+    // the user asked for free tilt) — the listener is not registered at all
+    // rather than early-returning inside it, so nothing runs per frame.
+    if (!camera || !scene || !tiltLimited) return
+    const maxPitch = CesiumMath.toRadians(-MIN_TILT_DEG)
+    // Anything remembered from before the limit was lifted is stale: the
+    // camera has very likely been flown somewhere else in the meantime, and
+    // restoring that position would teleport the view.
+    lastGood.current = null
+    const clamp = () => {
+      if (camera.pitch <= maxPitch) {
+        lastGood.current = {
+          position: Cartesian3.clone(camera.position),
+          heading: camera.heading,
+          pitch: camera.pitch,
+          roll: camera.roll,
+        }
+        return
+      }
+      const last = lastGood.current
+      if (last) {
+        camera.setView({
+          destination: last.position,
+          orientation: { heading: last.heading, pitch: last.pitch, roll: last.roll },
+        })
+      } else {
+        // Re-enabling the limit while already tilted past it: there is no
+        // valid frame to fall back to, so tilt back up to exactly the limit
+        // and keep the position. Without this the first frame would record
+        // an out-of-bounds camera as "last good" and the view would stay
+        // stuck below the floor it was just asked to respect.
+        camera.setView({
+          orientation: { heading: camera.heading, pitch: maxPitch, roll: camera.roll },
+        })
+      }
+    }
+    scene.preRender.addEventListener(clamp)
+    return () => {
+      scene.preRender.removeEventListener(clamp)
+    }
+  }, [camera, scene, tiltLimited])
+
   return null
 }
 
@@ -87,10 +175,11 @@ const WmsLayer = forwardRef<{ cesiumElement?: CesiumImageryLayer }, { name: stri
   const overrides = useApp((s) => s.styleOverrides[name])
   const layerFilter = useApp((s) => s.attributeFilters[name])
   const classification = useApp((s) => s.layerConfigs[name]?.classification)
+  const outlineWidth = useApp((s) => s.layerConfigs[name]?.outlineWidth)
   const styleVersion = useApp((s) => s.layerConfigs[name]?.styleVersion ?? 0)
   const managedLayers = useApp((s) => s.managedLayers)
   const geometryType = useApp((s) => s.dynamicGeometry[name])
-  const legend = resolveLegend(name, classification, geometryType)
+  const legend = resolveLegend(name, classification, geometryType, outlineWidth)
   const hasOverrides = !!overrides && Object.keys(overrides).length > 0
   const conditionsXml = layerFilter ? buildConditionsXml(layerFilter.conditions, layerFilter.logic) : null
 
@@ -365,6 +454,9 @@ function CesiumScene({ children }: { children?: ReactNode }) {
         .slice()
         .reverse()
         .map((l) => {
+          // Point clouds first: they are 3D Tiles scene primitives, not
+          // imagery, so neither the clustering branch nor WmsLayer applies.
+          if (l.pointCloud) return <PointCloudLayer key={l.name} layer={l} />
           const collection = l.clustered ? collectionFor(l.name, dynamicCollections) : undefined
           return collection ? (
             <ClusteredPointLayer key={l.name} name={l.name} collection={collection} show={l.visible} />

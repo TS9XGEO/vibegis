@@ -42,16 +42,13 @@ AI_READONLY_PG_PASSWORD = os.environ["AI_READONLY_PG_PASSWORD"]
 
 # Schemas this app ever publishes geodata from (see postgis/initdb/01-extensions.sql
 # and app.py's /tables, which excludes only tiger/tiger_data/topology).
-AI_READABLE_SCHEMAS = ["raw", "staging", "gis", "public"]
-
-# The app's own account table lives in "gis" alongside real geodata (adm2,
-# buildings, poi, ...) rather than a separate schema — a blanket per-schema
-# GRANT would otherwise hand the agent (and so, indirectly, an end user's
-# chat) read access to every bcrypt password_hash and every other user's
-# encrypted AI key ciphertext. Explicitly revoked below after the schema-wide
-# grants. Any other non-geodata table ever added to one of AI_READABLE_SCHEMAS
-# needs the same treatment.
-AI_UNREADABLE_TABLES = ["gis.users"]
+# "userdb" (accounts, AI key ciphertext) is deliberately absent — with the
+# schema split, the sensitive table's whole schema is simply never granted to
+# ai_readonly, rather than granting schema-wide access and then revoking one
+# table back out (the previous approach, when accounts lived in "gis"
+# alongside real geodata). Any future non-geodata schema needs the same
+# omission, not an entry in an unreadable-tables list.
+AI_READABLE_SCHEMAS = ["dwh", "configdb", "public"]
 
 Provider = Literal["anthropic", "openai"]
 DEFAULT_MODEL: dict[Provider, str] = {"anthropic": "claude-sonnet-5", "openai": "gpt-5.1"}
@@ -102,10 +99,10 @@ def ensure_ai_schema(engine_factory: Callable[[], Engine]) -> None:
     help here since this DB already has data).
     """
     with engine_factory().begin() as conn:
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_provider text"))
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_key_ciphertext text"))
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_key_last4 text"))
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_key_updated_at timestamptz"))
+        conn.execute(text("ALTER TABLE userdb.users ADD COLUMN IF NOT EXISTS ai_provider text"))
+        conn.execute(text("ALTER TABLE userdb.users ADD COLUMN IF NOT EXISTS ai_key_ciphertext text"))
+        conn.execute(text("ALTER TABLE userdb.users ADD COLUMN IF NOT EXISTS ai_key_last4 text"))
+        conn.execute(text("ALTER TABLE userdb.users ADD COLUMN IF NOT EXISTS ai_key_updated_at timestamptz"))
 
         # A DO block's body is a single dollar-quoted string, not a place SQLAlchemy's
         # client-side ":name" bind-param substitution or Postgres's own extended-query
@@ -133,12 +130,6 @@ def ensure_ai_schema(engine_factory: Callable[[], Engine]) -> None:
             conn.execute(text(
                 f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}" GRANT SELECT ON TABLES TO ai_readonly'
             ))
-
-        # Carve the app's own sensitive tables back out (see AI_UNREADABLE_TABLES).
-        # Run after the loop above so it always wins regardless of ordering, and
-        # re-run on every startup in case a future migration re-grants it.
-        for qualified_name in AI_UNREADABLE_TABLES:
-            conn.execute(text(f'REVOKE ALL ON {qualified_name} FROM ai_readonly'))
 
 
 # -------------------------------------------------------------- SQL guardrail

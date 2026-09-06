@@ -26,16 +26,16 @@
 \echo ' 3D BUILDINGS  —  step 1/5: extensions'
 \echo '=========================================================='
 
-CREATE EXTENSION IF NOT EXISTS hstore;
+CREATE EXTENSION IF NOT EXISTS hstore SCHEMA public;
 
 \echo ''
 \echo ' step 2/5: manual extrusion function'
 \echo '   floor + roof + one quad per wall segment -> MultiPolygonZ'
 
-DROP FUNCTION IF EXISTS gis.extrude_safe(geometry, double precision);
-DROP FUNCTION IF EXISTS gis.extrude_manual(geometry, double precision);
+DROP FUNCTION IF EXISTS dwh.extrude_safe(geometry, double precision);
+DROP FUNCTION IF EXISTS dwh.extrude_manual(geometry, double precision);
 
-CREATE FUNCTION gis.extrude_manual(g geometry, h double precision)
+CREATE FUNCTION dwh.extrude_manual(g geometry, h double precision)
 RETURNS geometry
 LANGUAGE sql IMMUTABLE AS $fn$
     WITH polys AS (
@@ -81,9 +81,9 @@ $fn$;
 \echo ''
 \echo ' step 3/5: selecting and sanitising footprints'
 
-DROP TABLE IF EXISTS gis._prep3d;
+DROP TABLE IF EXISTS dwh._prep3d;
 
-CREATE UNLOGGED TABLE gis._prep3d AS
+CREATE UNLOGGED TABLE dwh._prep3d AS
 SELECT
     row_number() OVER (ORDER BY ST_Area(t.geom) DESC) AS rn,
     t.gid, t.kind, t.name,
@@ -105,8 +105,8 @@ FROM (
     SELECT b.gid, b.kind, b.name, b.geom,
            CASE WHEN r.other_tags IS NULL OR r.other_tags = ''
                 THEN ''::hstore ELSE r.other_tags::hstore END AS tags
-    FROM gis.buildings b
-    LEFT JOIN raw.osm_buildings r USING (gid)
+    FROM dwh.buildings b
+    LEFT JOIN dwh.osm_buildings r USING (gid)
     WHERE b.kind <> 'nebengebaeude'
       AND ST_DWithin(
             b.geom::geography,
@@ -117,7 +117,7 @@ FROM (
     LIMIT :max_rows
 ) t;
 
-CREATE INDEX ON gis._prep3d (rn);
+CREATE INDEX ON dwh._prep3d (rn);
 
 \echo ''
 \echo '   footprints selected:'
@@ -125,7 +125,7 @@ SELECT count(*) AS footprints,
        count(*) FILTER (WHERE ST_IsValid(geom_m)) AS valid,
        round(avg(height)) AS avg_h,
        round(max(height)) AS max_h
-FROM gis._prep3d;
+FROM dwh._prep3d;
 
 \echo ''
 \echo ' step 4/5: extruding  —  per-batch progress below'
@@ -133,9 +133,9 @@ FROM gis._prep3d;
 \echo '          1.7M would be a few minutes'
 \echo ''
 
-DROP TABLE IF EXISTS gis.buildings3d;
+DROP TABLE IF EXISTS dwh.buildings3d;
 
-CREATE TABLE gis.buildings3d (
+CREATE TABLE dwh.buildings3d (
     gid     bigint PRIMARY KEY,
     kind    text,
     name    text,
@@ -160,18 +160,18 @@ DECLARE
     eta_s    double precision;
     n        bigint;
 BEGIN
-    SELECT count(*) INTO total FROM gis._prep3d;
+    SELECT count(*) INTO total FROM dwh._prep3d;
     RAISE NOTICE '--> % Bauwerke zu extrudieren, Batchgroesse %', total, batch;
 
     WHILE lo <= total LOOP
         BEGIN
-            INSERT INTO gis.buildings3d (gid, kind, name, height, geom3d)
+            INSERT INTO dwh.buildings3d (gid, kind, name, height, geom3d)
             SELECT p.gid, p.kind, p.name, p.height,
                    ST_Transform(
-                       ST_CollectionExtract(gis.extrude_manual(p.geom_m, p.height), 3),
+                       ST_CollectionExtract(dwh.extrude_manual(p.geom_m, p.height), 3),
                        4326
                    )::geometry(MultiPolygonZ, 4326)
-            FROM gis._prep3d p
+            FROM dwh._prep3d p
             WHERE p.rn >= lo AND p.rn < lo + batch
               AND p.geom_m IS NOT NULL
               AND ST_IsValid(p.geom_m)
@@ -206,9 +206,9 @@ $do$;
 \echo ''
 \echo ' step 5/5: indexing'
 
-CREATE INDEX buildings3d_geom_idx ON gis.buildings3d USING GIST (geom3d);
-ANALYZE gis.buildings3d;
-DROP TABLE gis._prep3d;
+CREATE INDEX buildings3d_geom_idx ON dwh.buildings3d USING GIST (geom3d);
+ANALYZE dwh.buildings3d;
+DROP TABLE dwh._prep3d;
 
 \echo ''
 \echo '=========================================================='
@@ -216,12 +216,12 @@ DROP TABLE gis._prep3d;
 \echo '=========================================================='
 
 SELECT kind, count(*) AS n, round(avg(height)) AS avg_h
-FROM gis.buildings3d GROUP BY kind ORDER BY n DESC;
+FROM dwh.buildings3d GROUP BY kind ORDER BY n DESC;
 
 SELECT count(*) AS volumes,
        count(*) FILTER (WHERE ST_NDims(geom3d) = 3) AS with_z,
-       pg_size_pretty(pg_total_relation_size('gis.buildings3d')) AS size
-FROM gis.buildings3d;
+       pg_size_pretty(pg_total_relation_size('dwh.buildings3d')) AS size
+FROM dwh.buildings3d;
 
 \echo ''
 \echo ' Naechster Schritt (ca. 10-60 s):'

@@ -28,6 +28,8 @@ export interface LayerConfig {
   title?: string
   /** Layer is hidden above this scale denominator. Null = deliberately uncapped. */
   maxScaleDenom?: number | null
+  /** Polygon border thickness in px. Absent = the server's default (0.6); 0 = no border. */
+  outlineWidth?: number | null
   styleVersion?: number
 }
 
@@ -39,6 +41,7 @@ export const UPLOAD_URL = '/upload'          // upload-api: new layers from a fi
 export const UPLOAD_RASTER_URL = '/upload-raster'  // upload-api: new raster layer from a GeoTIFF
 export const UPLOAD_RASTER_ZIP_URL = '/upload-raster-zip'  // upload-api: zip of bands -> every band published as its own layer
 export const RASTER_COMPOSITE_URL = '/raster-composite'  // upload-api: combine 3 single-band raster layers into an RGB layer
+export const UPLOAD_POINTCLOUD_URL = '/upload-pointcloud'  // upload-api: LAS/LAZ -> Cesium 3D Tiles point cloud layer
 export const TABLES_URL = '/tables'          // upload-api: existing DB tables to register
 export const REGISTER_TABLE_URL = '/register-table'
 export const GEOPROCESS_URL = '/geoprocess'  // upload-api: buffer/dissolve/intersect/join, publishes the result
@@ -48,6 +51,10 @@ export const LAYER_CONFIG_URL = '/layer-config'  // upload-api: per-layer classi
 export const COLUMN_STATS_URL = '/column-stats'  // upload-api: min/max/sum/avg/count for a numeric column
 export const COLUMN_GROUPBY_URL = '/column-groupby'  // upload-api: value+count per distinct value, capped
 export const TABLE_COUNT_URL = '/table-count'  // upload-api: plain row count for a schema.table
+export const QGIS_ALGORITHMS_URL = '/qgis-process/algorithms'  // upload-api: QGIS algorithm catalog (curated + advanced)
+export const QGIS_RUN_URL = '/qgis-process/run'  // upload-api: start a QGIS algorithm, poll GET /qgis-process/run/<id>
+export const QGIS_PRINT_URL = '/qgis-print'  // upload-api: composed map -> PDF via QGIS Server GetPrint
+export const QGIS_PRINT_TEMPLATES_URL = '/qgis-print/templates'
 
 /** MapServer GROUP that upload-api puts every layer it creates into. */
 export const MANAGED_GROUP = 'uploads'
@@ -127,22 +134,18 @@ export function renderUrlFor(layer: string, managedLayers: ReadonlySet<string>):
  * LAYER's DATA source in the mapfiles (vibegis.map / osm-layers.map) — keep
  * in sync when a layer's source table changes. Layers with no entry here
  * (e.g. the raster "dem" layer) have no feature data and get no table button.
+ * Empty: there are currently no hand-authored layers in vibegis.map/
+ * osm-layers.map (see their own headers) — add an entry here if one is ever
+ * added back by hand.
  */
-export const FEATURE_COLLECTIONS: Record<string, string> = {
-  poi: 'gis.poi',
-  adm2_overview: 'gis.adm2_simple',
-  adm2_detail: 'raw.adm2',
-  osm_landcover: 'gis.landcover',
-  osm_roads: 'gis.roads',
-  osm_buildings: 'gis.buildings',
-}
+export const FEATURE_COLLECTIONS: Record<string, string> = {}
 
 /**
  * Resolves a layer's pg_featureserv collection id: the static table above
  * for hand-authored layers, or `dynamicCollections` (fetched from
  * upload-api's /layers — see loadDynamicCollections) for anything created
  * via upload or table registration. A file upload always lands in schema
- * "raw" under its own layer name, but a *registered* table (dbtable_*) can
+ * "dwh" under its own layer name, but a *registered* table (dbtable_*) can
  * point at any schema/table, so that mapping can't be guessed from the name
  * — it has to come from upload-api, which is the only place that knows it.
  */
@@ -151,12 +154,25 @@ export function collectionFor(layerName: string, dynamicCollections: Record<stri
   const dynamic = dynamicCollections[layerName]
   if (dynamic) return dynamic
   // Last resort when /layers is unavailable: a file upload always lands in
-  // schema "raw" with the table named after the layer (app.py's /upload passes
+  // schema "dwh" with the table named after the layer (app.py's /upload passes
   // the same string as both), so it is derivable. A registered table is not —
   // dbtable_<slug(schema_table)> flattens the schema/table boundary and cannot
   // be reversed — so those still need /layers.
-  if (layerName.startsWith('upload_')) return `raw.${layerName}`
+  if (layerName.startsWith('upload_')) return `dwh.${layerName}`
   return undefined
+}
+
+/**
+ * A point-cloud layer as upload-api reports it. These have no MapServer LAYER
+ * block and therefore never appear in GetCapabilities at all — see `load()`.
+ */
+export interface PointCloudEntry {
+  name: string
+  title: string | null
+  tilesetUrl: string
+  bbox: Bbox | null
+  hasColor: boolean
+  hasClassification: boolean
 }
 
 interface DynamicLayerInfo {
@@ -164,6 +180,17 @@ interface DynamicLayerInfo {
   geometryTypes: Record<string, string>
   /** Every layer upload-api reported, whether uploaded or registered. */
   managed: Set<string>
+  /**
+   * Just the subset of `managed` that has a mapfile block behind it, i.e.
+   * everything except point clouds. `load()`'s stale-mount health check keys
+   * off this rather than `managed`: that check asks "capabilities show
+   * uploads-group layers, so why did /layers report none?", and a point cloud
+   * — which can never be in capabilities — answering that question would mask
+   * exactly the dead-bind-mount fault it exists to catch.
+   */
+  managedMapfile: Set<string>
+  /** Layers that render as a 3D Tiles point cloud instead of a WMS tile. */
+  pointClouds: PointCloudEntry[]
   /** False when upload-api could not be reached or answered with an error. */
   ok: boolean
   /** What upload-api said went wrong, when it said anything. */
@@ -174,6 +201,8 @@ const noDynamicLayers = (ok: boolean, error: string | null = null): DynamicLayer
   collections: {},
   geometryTypes: {},
   managed: new Set(),
+  managedMapfile: new Set(),
+  pointClouds: [],
   ok,
   error,
 })
@@ -192,15 +221,33 @@ async function loadDynamicLayerInfo(): Promise<DynamicLayerInfo> {
     const collections: Record<string, string> = {}
     const geometryTypes: Record<string, string> = {}
     const managed = new Set<string>()
+    const managedMapfile = new Set<string>()
+    const pointClouds: PointCloudEntry[] = []
     for (const l of body.layers ?? []) {
       managed.add(l.name)
+      if (l.geometry_type === 'POINTCLOUD') {
+        pointClouds.push({
+          name: l.name,
+          title: l.title ?? null,
+          tilesetUrl: l.tileset_url,
+          bbox: l.bbox ?? null,
+          hasColor: !!l.has_color,
+          hasClassification: !!l.has_classification,
+        })
+        // Deliberately not recorded in geometryTypes either: only
+        // resolveLegend/ClassifyLayer read that, neither is reachable for a
+        // point cloud, and leaving it out keeps this loop's "only record what
+        // the field actually means" discipline intact.
+        continue
+      }
+      managedMapfile.add(l.name)
       // A raster layer has schema: null, table: null — skip it rather than
       // recording the literal string "null.null", which collectionFor()
       // would then report as a real (fake) collection for the layer.
       if (l.schema && l.table) collections[l.name] = `${l.schema}.${l.table}`
       if (l.geometry_type) geometryTypes[l.name] = l.geometry_type
     }
-    return { collections, geometryTypes, managed, ok: true, error: null }
+    return { collections, geometryTypes, managed, managedMapfile, pointClouds, ok: true, error: null }
   } catch {
     // Report the failure rather than folding it into "no managed layers".
     // Those two look identical from an empty result, and treating them the
@@ -279,6 +326,25 @@ export interface LayerState {
    * like visible/opacity, and reset by the same flattenLeaves() default.
    */
   clustered: boolean
+  /**
+   * Non-null exactly for a layer that renders as a Cesium 3D Tiles point
+   * cloud instead of a WMS imagery tile — the third rendering kind after
+   * WmsLayer and ClusteredPointLayer. Doubles as the type guard Scene.tsx
+   * branches on, so there is no second "is this a point cloud" predicate to
+   * keep in sync.
+   *
+   * One nullable object rather than five flat fields (the shape `bands`/
+   * `batch`/`batchTitle` use) because these five only ever make sense
+   * together, and TypeScript then narrows all of them from one check.
+   * `pointSize`/`colorMode` are session-only, like visible/opacity.
+   */
+  pointCloud: {
+    tilesetUrl: string
+    hasColor: boolean
+    hasClassification: boolean
+    pointSize: number
+    colorMode: 'rgb' | 'single' | 'classification'
+  } | null
 }
 
 // ---------------------------------------------------------------- parsing
@@ -434,12 +500,59 @@ export function flattenLeaves(
       visible: false,
       opacity: 1,
       clustered: false,
+      // A layer that came out of capabilities is by definition a MapServer
+      // layer, so it is never a point cloud.
+      pointCloud: null,
     }]
   }
   // the outermost node is the service itself, not a real group
   const nextGroup = node.name ? node.title : group
   const nextGroupName = node.name ? node.name : groupName
   return node.children.flatMap((c) => flattenLeaves(c, nextGroup, nextGroupName))
+}
+
+/**
+ * The point-cloud counterpart to one `flattenLeaves()` leaf: turns a
+ * `/layers` entry into the same `LayerState` shape, with the same session
+ * defaults, so everything downstream of the store treats it as an ordinary
+ * layer row.
+ *
+ * `source` stays null and the name is `pointcloud_`-prefixed (never
+ * `upload_`, which `collectionFor()` would resolve to a `dwh.<name>` table
+ * that does not exist) — between them, that is what excludes a point cloud
+ * from the attribute table, filter, classify and geoprocess with no new
+ * gating logic anywhere, exactly the way a raster layer already is.
+ *
+ * `geomType: 'pointcloud'` deliberately does not equal `'point'`: the
+ * clustering toggle in LayerPanel.tsx gates on the latter, and a point cloud
+ * has no `/features` collection to cluster.
+ */
+export function pointCloudLayerState(entry: PointCloudEntry): LayerState {
+  return {
+    name: entry.name,
+    title: entry.title || entry.name,
+    bbox: entry.bbox,
+    group: 'Eigene Uploads',
+    groupName: MANAGED_GROUP,
+    source: null,
+    geomType: 'pointcloud',
+    bands: null,
+    batch: null,
+    batchTitle: null,
+    visible: false,
+    opacity: 1,
+    clustered: false,
+    pointCloud: {
+      tilesetUrl: entry.tilesetUrl,
+      hasColor: entry.hasColor,
+      hasClassification: entry.hasClassification,
+      pointSize: 2,
+      // A cloud with no RGB renders white, and against the globe's white
+      // base color that reads as a broken upload rather than a working layer
+      // with no color data — so single-color is the default in that case.
+      colorMode: entry.hasColor ? 'rgb' : 'single',
+    },
+  }
 }
 
 // ------------------------------------------------------------ style overrides
@@ -528,6 +641,19 @@ interface AppState {
   tilesOn: boolean
   tilesAvailable: boolean | null
   lighting: boolean
+  /**
+   * Whether the camera is held to Scene.tsx's MIN_TILT_DEG floor, i.e. kept
+   * from tilting all the way to the horizon. On by default — the limit exists
+   * so a 2.5D map of draped imagery can't be dragged into a near-horizontal
+   * view where it degenerates into a smear.
+   *
+   * A point cloud is the case that argument does not cover: it is real 3D
+   * geometry that can only be read by orbiting it from the side, so
+   * Scene.tsx releases the limit automatically while one is visible and
+   * restores it when the last one is hidden. This flag is what both that
+   * automation and the manual switch in LayerPanel.tsx write to.
+   */
+  tiltLimited: boolean
 
   // The layer panel lives outside the Resium <Viewer> tree now (docked
   // sidebar), so it can't reach useCesium() directly. Scene stashes the
@@ -586,6 +712,8 @@ interface AppState {
   clearClassification: (layer: string) => Promise<void>
   saveColumnAliases: (layer: string, aliases: Record<string, string>) => Promise<void>
   saveTitle: (layer: string, title: string) => Promise<void>
+  /** Polygon border thickness, one value for the whole layer. null resets to the default. */
+  saveOutlineWidth: (layer: string, width: number | null) => Promise<void>
 
   load: () => Promise<void>
   toggle: (name: string) => void
@@ -600,6 +728,9 @@ interface AppState {
   zoomToLayer: (name: string) => void
   toggleClustered: (name: string) => void
   setOpacity: (name: string, opacity: number) => void
+  /** Point-cloud layers only; a no-op on anything else. */
+  setPointSize: (name: string, pointSize: number) => void
+  setPointColorMode: (name: string, colorMode: 'rgb' | 'single' | 'classification') => void
   reorder: (from: number, to: number) => void
   move: (name: string, delta: number) => void
 
@@ -607,6 +738,7 @@ interface AppState {
   setTerrain: (v: boolean) => void
   setTiles: (v: boolean) => void
   setLighting: (v: boolean) => void
+  setTiltLimited: (v: boolean) => void
   probeAssets: () => Promise<void>
 }
 
@@ -630,6 +762,7 @@ export const useApp = create<AppState>((set, get) => ({
   tilesOn: false,
   tilesAvailable: null,
   lighting: false,
+  tiltLimited: true,
 
   camera: null,
   setCamera: (camera) => set({ camera }),
@@ -726,6 +859,25 @@ export const useApp = create<AppState>((set, get) => ({
     set((s) => ({ layerConfigs: { ...s.layerConfigs, [layer]: merged } }))
   },
 
+  saveOutlineWidth: async (layer, width) => {
+    // null clears the key so the layer falls back to the server default,
+    // rather than pinning it to whatever that default happens to be today —
+    // same reason saveTitle DELETEs instead of writing the fallback.
+    const res = width === null
+      ? await fetch(`${LAYER_CONFIG_URL}/${encodeURIComponent(layer)}/outlineWidth`, { method: 'DELETE' })
+      : await fetch(`${LAYER_CONFIG_URL}/${encodeURIComponent(layer)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ outlineWidth: width }),
+        })
+    if (!res.ok) {
+      const body = await res.json().catch(() => null)
+      throw new Error(body?.detail ?? `Umrandung speichern fehlgeschlagen: HTTP ${res.status}`)
+    }
+    const merged = await res.json()
+    set((s) => ({ layerConfigs: { ...s.layerConfigs, [layer]: merged } }))
+  },
+
   saveColumnAliases: async (layer, aliases) => {
     const res = await fetch(`${LAYER_CONFIG_URL}/${encodeURIComponent(layer)}`, {
       method: 'PATCH',
@@ -752,7 +904,22 @@ export const useApp = create<AppState>((set, get) => ({
       // MapServer convention: landcover, then roads, then buildings on top.
       // The store is top-first, so reverse it — otherwise land cover would
       // default to covering everything beneath it.
-      const layers = flattenLeaves(root).reverse()
+      // Two disjoint sources, concatenated — never joined or reconciled.
+      // Capabilities remains the only source for WMS layers; point clouds
+      // have no MapServer LAYER block and so can never appear there, while a
+      // WMS layer never has a configdb.point_clouds row. That disjointness is
+      // what keeps this from inverting the existing contract: if /layers is
+      // down, point-cloud layers vanish and every WMS layer still works,
+      // exactly as before.
+      //
+      // Point clouds go on top because draw order is meaningless for them —
+      // they are scene primitives, not stacked imagery — so there is no
+      // ordering decision to make and the newest thing published is the
+      // easiest to find.
+      const layers = [
+        ...dynamicInfo.pointClouds.map(pointCloudLayerState),
+        ...flattenLeaves(root).reverse(),
+      ]
 
       // Everything capabilities could tell us on its own. /layers is layered on
       // top where it has an answer, but is no longer required for the mapping:
@@ -767,8 +934,15 @@ export const useApp = create<AppState>((set, get) => ({
       // A layer sitting in the uploads group is proof upload-api created it, so
       // /layers reporting nothing is a fault even when the request succeeded —
       // which is exactly how a stale bind mount presents: HTTP 200, empty list.
-      const managedInCapabilities = layers.some((l) => l.groupName === MANAGED_GROUP)
-      const layersServiceDown = !dynamicInfo.ok || (managedInCapabilities && dynamicInfo.managed.size === 0)
+      // managedMapfile, not managed: a point cloud is in `managed` but can
+      // never be in capabilities, so counting it here would let a single
+      // published cloud satisfy this check and hide the very fault it exists
+      // to catch.
+      const managedInCapabilities = layers.some(
+        (l) => l.groupName === MANAGED_GROUP && !l.pointCloud,
+      )
+      const layersServiceDown =
+        !dynamicInfo.ok || (managedInCapabilities && dynamicInfo.managedMapfile.size === 0)
 
       set({
         layers,
@@ -815,6 +989,20 @@ export const useApp = create<AppState>((set, get) => ({
       layers: s.layers.map((l) => (l.name === name ? { ...l, opacity } : l)),
     })),
 
+  setPointSize: (name, pointSize) =>
+    set((s) => ({
+      layers: s.layers.map((l) =>
+        l.name === name && l.pointCloud ? { ...l, pointCloud: { ...l.pointCloud, pointSize } } : l,
+      ),
+    })),
+
+  setPointColorMode: (name, colorMode) =>
+    set((s) => ({
+      layers: s.layers.map((l) =>
+        l.name === name && l.pointCloud ? { ...l, pointCloud: { ...l.pointCloud, colorMode } } : l,
+      ),
+    })),
+
   reorder: (from, to) =>
     set((s) => {
       if (from === to) return s
@@ -836,6 +1024,7 @@ export const useApp = create<AppState>((set, get) => ({
   setTerrain: (v) => set({ terrainOn: v }),
   setTiles: (v) => set({ tilesOn: v }),
   setLighting: (v) => set({ lighting: v }),
+  setTiltLimited: (v) => set({ tiltLimited: v }),
 
   probeAssets: async () => {
     const [terrain, tiles] = await Promise.all([

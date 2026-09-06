@@ -9,7 +9,8 @@ linter — `npm run typecheck` is the whole safety net.
 main.tsx        25   Mantine provider, teal/amber theme, mounts <Notifications/>
 App.tsx        223   composes Scene + Sideband + LayerPanel + DataViewBand; gates on auth
 Scene.tsx      385   the globe: imagery layers, terrain, 3D tiles; a clustered point layer
-                     renders through PointCluster.tsx instead of an ImageryLayer
+                     renders through PointCluster.tsx and a point cloud through
+                     PointCloudLayer.tsx, both instead of an ImageryLayer
 wms.ts         839   ★ zustand store `useApp`, GetCapabilities parsing, all endpoint URLs.
                      `setLayerVisible()`/`zoomToLayer()` are explicit (non-toggle) setters
                      added for aiAgent.ts, which decides show/hide/zoom from a chat
@@ -28,6 +29,10 @@ LayerPanel.tsx 958  layer tree, opacity, dnd-kit reordering, terrain/3D toggles,
 PointCluster.tsx 132  `ClusteredPointLayer` — renders one point layer as real Cesium
                      entities with EntityCluster grouping, fed from /features, when its
                      LayerState.clustered flag is on
+PointCloudLayer.tsx 97  renders one LiDAR point cloud as a Cesium3DTileset, when its
+                     LayerState.pointCloud is non-null. Point size and colour mode
+                     (Originalfarben / Einfarbig / Klassifikation) come from that same
+                     object, driven by LayerPanel.tsx's controls
 ClassifyLayer.tsx 445  categorized + graduated classification editor
 UploadLayer.tsx 406  file upload (incl. drag-and-drop from App.tsx), register a table,
                      the multi-layer picker, and a raster mode for GeoTIFFs or a zip of
@@ -87,12 +92,19 @@ columns.ts 101  features.ts 129  spatial.ts 171   shared column/feature-fetch/ge
                      (backing every exported fetch in that file — the attribute table,
                      the attribute filter's apply/select action, and the map's select
                      tools) route a 404 through freshLayerRetry.ts's retryFreshLayer()
-                     — pg_featureserv discovers a brand-new PostGIS table on its own
-                     schedule, unrelated to when the mapfile append makes a fresh
-                     upload show up in the layer panel, and has no HTTP endpoint or
-                     config knob to force it sooner (checked its API docs directly),
-                     so backoff-and-retry (~2.5 min budget) on the client is the only
-                     lever there is. Both fetchColumns() and fetchFeaturePage()/
+                     — pg_featureserv's own source (internal/data/catalog_db.go) shows
+                     its per-collection lookup (GET /collections/{name}) never
+                     refreshes its in-memory table catalog after the service's own
+                     first-ever request, full stop, no timer, no schedule; only the
+                     bare listing endpoint (GET /collections) forces a reload. Nothing
+                     else in this app ever called that endpoint, so a freshly
+                     published table could sit invisible to pg_featureserv
+                     indefinitely, not just briefly — retryFreshLayer() now calls it
+                     (warmPgFeatureservCatalog()) on every 404 before its next retry,
+                     which resolves the common case almost immediately; the
+                     backoff-and-retry loop (~2.5 min budget) around it remains only as
+                     a safety net for the rarer case where the underlying Postgres
+                     table itself isn't ready yet. Both fetchColumns() and fetchFeaturePage()/
                      fetchFeaturePageInBbox() take an optional `onRetry` callback, fired
                      on the first 404 so a caller can swap its plain loading spinner for
                      a reassuring notice instead of silently spinning for however long
@@ -153,12 +165,33 @@ Sideband.tsx   436  the docked icon band: panel toggles, reset-to-north, ETL tri
                      see its own entry below), EtlButton (its own polling state),
                      AiAgentButton (same visible-but-disabled + upsell-tooltip shape as
                      EtlButton, toggles aiAgent.ts's `open` instead of polling),
-                     Geoprocessing/Handbook (modal opens), and the Auswahl-Dashboard
+                     Geoprocessing/Pages (modal opens), and the Auswahl-Dashboard
                      toggle (selection.ts's `dashboardTabOpen`/`toggleDashboardTab()`,
                      since it's a tab-strip slot now, not a `panels.ts` boolean) — kept in
                      the RAIL's old visual position even though it's no longer a RAIL entry
 Geoprocessing.tsx 232  buffer/dissolve/intersect/join modal, admin-only, publishes
                      the result as a new layer via /geoprocess (mirrors UploadLayer.tsx)
+QgisProcessing.tsx 213  QGIS algorithm modal (Premium). Holds no algorithm knowledge
+                     of its own — the list and every parameter come from upload-api's
+                     /qgis-process/algorithms, so adding an algorithm is a backend-only
+                     change. A "Erweitert" switch swaps the curated catalog for the full
+                     introspected QGIS one. Submitting closes the dialog and hands off to
+                     qgis.ts's notification-driven poll loop, so a long run survives the
+                     user closing the modal (same reason EtlButton polls the way it does)
+qgisParams.tsx 150  ★ the ONE generic renderer for a QGIS parameter (kind -> Mantine
+                     control). Both catalogs arrive in the same QgisParam shape —
+                     upload-api's qgis_catalog.py translates QGIS's own descriptors into
+                     it — so this component never learns which catalog a parameter came
+                     from. A mode-specific branch here is exactly how that would rot
+qgis.ts        208  types, fetches, runQgisJob() (the poll driver) and exportPrintPdf().
+                     runQgisJob() calls useApp.getState().load() on success — re-reading
+                     GetCapabilities is still the only way a new layer ever appears
+PrintExportButton.tsx 105  one-click PDF export (Premium), in LayerPanel's header next to
+                     the upload button. No dialog on purpose: it prints exactly what is
+                     on screen — every visible layer, at visibleGroundBbox()'s current
+                     extent. The generated QGIS project references layers as WMS against
+                     MapServer, so a saved classification prints exactly as it renders.
+                     Point clouds are dropped server-side (no MapServer layer at all)
 aiAgent.ts     124  zustand store `useAiAgent` — the AI agent chat panel's session-only
                      state (messages, pending confirmation, open/closed). `sendMessage()`
                      posts to upload-api's `/ai/chat` (see upload-api/CLAUDE.md) and
@@ -178,7 +211,72 @@ AiSettings.tsx 142  bring-your-own-key form (provider + API key) for `/ai/settin
                      The key is write-only end to end — this component drops its own
                      local copy of the plaintext immediately after a successful save;
                      upload-api never echoes it back, only `{provider, last4}`
-Handbook.tsx    15  placeholder in-app manual, opened from Sideband
+Pages.tsx      ~260  general-purpose CMS content browser (upload-api's /cms,
+                     configdb.pages) — master-detail modal, page list left,
+                     content + admin edit right, opened from Sideband. The
+                     in-app Handbook is just the one page ("handbook") a fresh
+                     install seeds, not special beyond that
+i18n/          ~     react-i18next. translations.ts is the single source of
+                     every UI string, DE+EN side by side, namespaced by
+                     component/area — no per-locale file split, no
+                     per-component fragments. index.ts reshapes it into
+                     i18next's resources at startup and exposes setLocale()
+                     (persisted to localStorage — a deliberate, called-out
+                     exception to the "ephemeral session state" rule below).
+                     Most of the app is converted (login flow, Sideband,
+                     LayerPanel's docked chrome, UserAdmin, Pages); the deep
+                     per-feature panels (SelectionDashboard, ClassifyLayer,
+                     AttributeTable/Filter, Geoprocessing, the AI agent panel,
+                     UploadLayer's form copy) mostly aren't yet
+tour/          ~     Guided product tour (react-joyride), two tours: "upload"
+                     (admin-only — walks through publishing a first layer,
+                     using the real UploadLayer modal, not a mock) and
+                     "features" (role-aware — skips ETL/AI/geoprocessing steps
+                     a viewer can't reach). Tour.tsx owns the one useJoyride()
+                     call and publishes its `controls` into useTour.ts so any
+                     button (Sideband's tour menu, the one-time first-login
+                     offer) can start/stop a tour without prop-drilling.
+                     Each step's `before` hook drives the real UI into the
+                     right state via the existing zustand stores (opens
+                     panels.ts's layerPanel/mapTools, uploadState.ts's modal)
+                     — same "draw order is state" convention as everywhere
+                     else, never a DOM hack. TourTarget.tsx wraps one real
+                     control with a `data-tour` id (matching a step's
+                     `target`) and, while that step is active, a pulsing
+                     `.tour-highlight` class (index.html) — the actual button
+                     glows/grows, not just a tooltip floating nearby.
+                     The one auto-advance beyond click-Next: the upload
+                     tour's submit step watches wms.ts's `layers.length` and
+                     moves on the instant a real upload actually publishes —
+                     the user already did the real thing, no reason to also
+                     make them click a tour button. useTour.ts's `lastTourId`
+                     (localStorage) is what a plain "restart" (Sideband's
+                     menu, and the "Nochmal ansehen" button steps.tsx puts on
+                     each tour's own final step) replays — separate from
+                     `activeTourId`, which resets to null once a tour ends,
+                     so there's always something sensible to restart even
+                     after the tour that ran is long finished
+tips/          ~     Opportunistic "did you know" notifications — distinct
+                     from tour/: a tip is unprompted, shown once ever per
+                     browser (showTip.tsx, localStorage-tracked, own id per
+                     tip, one shared cooldown so two conditions becoming true
+                     together don't stack two notifications) the moment a
+                     specific condition first becomes true, not a
+                     scheduled/random popup and not a guided walkthrough
+                     someone chose to start. Every trigger condition lives in
+                     one place, Tips.tsx, watching the relevant zustand
+                     stores (layers.length, selection.ts's openLayers/
+                     selected) — adding one is a translations.ts entry under
+                     `tips.*` plus a showTip() call there, guarded by
+                     whatever makes it relevant. Suppressed entirely while a
+                     tour is running (tour/useTour.ts's `activeTourId`), so a
+                     tip notification never pops up over a tour tooltip
+uiScale.ts      88  zustand store `useUiScale` — the global UI size (Klein 1 / Standard 1.25
+                     / Groß 1.5), picked from Sideband.tsx's `UiScaleMenu`. Feeds
+                     main.tsx's Mantine theme `scale` and a `--ui-scale` custom property
+                     for index.html's icon rule; localStorage-persisted, like the
+                     language toggle and for the same reason. See the "real CSS lengths"
+                     note below
 panels.ts       28  zustand store `usePanels` — open/closed state for the floating boxes
                      (`mapTools` | `hud` | `layerPanel`). The Auswahl-Dashboard used to be
                      a fourth entry here but is no longer a floating box at all — see
@@ -232,11 +330,20 @@ SelectionDashboard.tsx 1449  docked into DataViewBand.tsx's tab strip as a pinne
                      same convention as the tabs elsewhere in this app) — so a layer's own
                      `groupBy`/`chartType` choice and already-fetched columns survive
                      switching to another layer in the list and back.
-                     `SelectionDashboardPanel`'s own `selectedLayerName` state tracks which
-                     row is active, auto-selecting the first one whenever the current
-                     selection isn't in the list any more (including right after a mode
-                     switch between a real selection and the "everything selected"
-                     overview). Becoming the active layer lazily
+                     Which row is active lives in `selection.ts` as `dashboardLayer`,
+                     **not** as local state here — that is what lets DataViewBand.tsx's
+                     "Im Dashboard auswerten" button open the dashboard already showing a
+                     chosen layer instead of merely requesting one and losing the race
+                     with this panel's own auto-select. The policy still lives here: the
+                     effect falls back to the first available layer whenever
+                     `dashboardLayer` names one the dashboard cannot currently show
+                     (including right after a mode switch between a real selection and the
+                     "everything selected" overview). `useDashboardLayerNames()`, exported
+                     from this file, is the single derivation of *which* layers those are
+                     (the layers a selection spans, else every visible layer with a
+                     resolvable collection) — DataViewBand imports it to decide whether
+                     its button can do anything, so the button can never offer a layer
+                     this panel would then silently refuse. Becoming the active layer lazily
                      fetches columns.ts's fetchColumns() (same call
                      AttributeFilter.tsx/ClassifyLayer.tsx/Geoprocessing.tsx already make)
                      to show numeric sum/avg/min/max and a categorical group-by
@@ -380,8 +487,38 @@ else consumes.
 - **Draw order is array order.** The store keeps `layers[]` top-first; `Scene` renders
   it reversed because Cesium draws the last-added imagery layer on top. Reordering a
   row reorders the array, and React does the rest. Never reach for `raiseToTop`.
-- **A layer renders one of two ways, chosen by `LayerState.clustered`.** Every
-  layer defaults to `WmsLayer` — MapServer bakes its `CLASS`/`STYLE` into a
+- **A layer renders one of three ways.** `LayerState.pointCloud` is checked
+  first: non-null means the layer is a LiDAR point cloud and draws through
+  `PointCloudLayer.tsx`'s `Cesium3DTileset` — a scene primitive, not imagery, so
+  draw order and opacity-as-alpha work differently and none of the WMS machinery
+  applies. Three traps found the hard way there, all of the silently-does-nothing
+  kind:
+  - **resium does not expose `pointCloudShading` as a prop** — it is in neither
+    `cesiumProps` nor `cesiumReadonlyProps` in its `Cesium3DTileset.d.ts`, so
+    passing it is dropped with no error. Set it imperatively in `onReady`.
+  - **A style `pointSize` and `pointCloudShading.attenuation` are mutually
+    exclusive**: Cesium's `PointCloudStylingStageVS.glsl` is
+    `#ifdef HAS_POINT_CLOUD_POINT_SIZE_STYLE … #elif defined(HAS_POINT_CLOUD_ATTENUATION)`,
+    so a style `pointSize` wins outright and a size slider layered on top of
+    enabled attenuation would appear dead. Pick one; this app uses the style.
+  - **Only `${COLOR}`, `${POSITION}`, `${POSITION_ABSOLUTE}` and `${NORMAL}` are
+    built in.** `${classification}` works only because upload-api asked py3dtiles
+    to carry that field, and only reports `hasClassification` when it verified
+    the field would really arrive — see upload-api/CLAUDE.md.
+  - **Every colour in a point-cloud style must be `rgba()`, never `color('#hex')`
+    and never a bare `vec4(...)`.** A point cloud's style is compiled to GLSL, so
+    anything the expression parser reads as a *string literal* throws "Error
+    generating style shader: String literals are not supported" — which crashes
+    the viewer the moment the layer is switched on. That rules out
+    `color('#hex')` and, far less obviously, **any multi-character swizzle**:
+    `${COLOR}.rgb` and `${COLOR}.xyz` are parsed as strings and fail identically,
+    while `.r`/`.g`/`.b` individually are fine. Of the forms that do compile,
+    only `rgba()` sets `shaderState.translucent`, which is what actually enables
+    alpha blending — a bare `vec4()` puts alpha in the shader but leaves the
+    render state opaque, so the opacity slider would move and change nothing.
+    All of this was established by generating the shader for each candidate form
+    against the installed Cesium; do the same before changing these expressions.
+  Otherwise a layer defaults to `WmsLayer` — MapServer bakes its `CLASS`/`STYLE` into a
   server-rendered PNG tile, and Cesium never sees individual coordinates.
   Turning clustering on for a point layer (`LayerPanel.tsx`'s "Punkte
   gruppieren" toggle, point layers only) swaps that one layer to
@@ -393,6 +530,19 @@ else consumes.
   server-side point aggregation (no `CLUSTER` object in any mapfile) — the
   WMS path stays every other layer's default, and clustering is strictly
   opt-in per point layer, never a change to the working path.
+- **The camera's tilt floor (`Scene.tsx`'s `MIN_TILT_DEG`) is conditional, and
+  a point cloud releases it automatically.** The limit keeps a 2.5D map of
+  draped imagery from being dragged into a near-horizontal smear; that argument
+  does not hold for a point cloud, which is real 3D geometry and can only be
+  read from the side. The store's `tiltLimited` is what both the manual switch
+  (LayerPanel's 3D section, phrased as "Freier Blickwinkel" so *on* is the more
+  capable state — it writes the inverse) and the automation drive. The
+  automation fires on the **transition** in "is any point cloud visible", never
+  on the derived value itself: driving it directly would silently revert the
+  manual switch on the next render instead of leaving it usable in between.
+  When the limit is switched back on while the camera is already tilted past
+  it, the clamp has no valid frame to restore, so it tilts back up to exactly
+  the limit rather than recording the out-of-bounds camera as "last good".
 - **`terrainProvider` goes on `<Globe>`, not `<Viewer>`.** Resium applies Viewer's only
   once at construction; Globe's has a working setter (`Scene.tsx:168`).
 - **Never construct the Viewer without `contextOptions` from `webgl.ts`.** Cesium asks
@@ -454,6 +604,15 @@ else consumes.
   "signal that can come back garbage" class of bug the bullet above already warns
   about for a signal that comes back *empty*. Only set the entry when both `schema`
   and `table` are present.
+- **A polygon layer's outline width is server-side style, not session state.**
+  `LayerPanel.tsx`'s `OutlineWidthSlider` sits right under the opacity slider and
+  looks like its twin, but the two are nothing alike underneath: opacity is
+  ephemeral client state (`LayerState.opacity`), while outline width PATCHes
+  `/layer-config`, rewrites the mapfile and purges that layer's tiles. That is why
+  it commits on `onChangeEnd` and only tracks locally during the drag — committing
+  per pixel of travel would rebuild the mapfile dozens of times in one gesture.
+  It is offered only for `geomType === 'polygon'` layers that `isManaged()`
+  accepts, since a hand-authored layer's block is not upload-api's to rewrite.
 - **A user classification is compiled into real `CLASS` blocks in `uploads.map`**,
   not sent as a per-request `SLD_BODY` — that used to be the only way it could reach
   the map (the mapfile held only the single default `CLASS`), but a per-request style
@@ -481,7 +640,16 @@ else consumes.
   `reachableClasses()` is also reused directly by `Legend.tsx` to hide a filtered-out
   class from the legend list itself, not just from the SLD sent to the map.
 - **The layer list comes from GetCapabilities**, never a hardcoded list. Add a `LAYER`
-  to the mapfile and it appears on reload. Per-layer extras live in module-level maps
+  to the mapfile and it appears on reload. The one exception is point clouds, which
+  have no MapServer layer at all and so can never be in capabilities: `load()`
+  concatenates them from `/layers` as a **disjoint second source** — never joined
+  or reconciled, since a point cloud is never in capabilities and a WMS layer is
+  never in `configdb.point_clouds`. That disjointness is what keeps the existing
+  degradation contract intact: with `/layers` down, point clouds vanish and every
+  WMS layer still works. It also forced a fix to `layersServiceDown`, which counts
+  `managedMapfile` rather than `managed` — a point cloud is in the latter but can
+  never be in capabilities, so counting it would let one published cloud satisfy
+  the stale-bind-mount check and mask the very fault it exists to catch. Per-layer extras live in module-level maps
   in `wms.ts`: `FEATURE_COLLECTIONS` (WMS layer → OGC API collection), `MANAGED_GROUP`.
   Which layers are cached is *not* one of these hardcoded maps any more — every
   upload-api-managed layer gets a cache automatically (`renderUrlFor()` derives it from
@@ -499,7 +667,30 @@ else consumes.
   (`uploadState.ts`) — all reset to a fixed default on reload or a new session, on
   purpose, the same way `useSelection`'s selection and open tabs do. Don't reach for
   `localStorage` for this class of state; the intent is that reloading the page always
-  hands back a clean, predictable layout.
+  hands back a clean, predictable layout. The two deliberate exceptions are the
+  language toggle (`i18n/index.ts`) and the UI size (`uiScale.ts`) — both are standing
+  preferences about the person using the app, not layout state about this session.
+- **The UI size setting scales real CSS lengths — never a container `zoom` or
+  `transform`.** `uiScale.ts` drives two things: `main.tsx` rebuilds the Mantine theme
+  with `scale: 1 | 1.25 | 1.5` (Mantine emits every size as
+  `calc(Xrem * var(--mantine-scale))`, so one number moves all of its fonts, paddings,
+  control heights and radii at once, portals included), and `index.html` has one rule —
+  `svg.tabler-icon, svg[data-ui-icon] { scale: var(--ui-scale) }` — for the icons, whose
+  size is a px prop no theme can reach. The CSS `scale` property rather than `transform`
+  so it composes with the transforms some icons already carry instead of overwriting
+  them; a 16px icon at 1.5 still fits its 28px button, so nothing has to be re-laid-out.
+  This app's own hardcoded pixel chrome does not follow either mechanism automatically —
+  where it should, write it with Mantine's `rem()` (Sideband.tsx's rail and
+  CompassButton.tsx are the ones that matter) so it rides on `--mantine-scale` too.
+  **A `zoom` or a `transform: scale()` on a container is the obvious one-line version of
+  this, and both are wrong here** — both were tried and reverted. They re-lay-out the
+  boxes correctly but leave `getBoundingClientRect()` and hit-testing in a different
+  coordinate space from the px values components write back, so anything that measures
+  itself lands wrong: `zoom` put every clickable element somewhere other than where it
+  was painted, and under `transform` Mantine's SegmentedControl indicator (its
+  `FloatingIndicator` takes `targetRect.left - parentRect.left` and writes it straight
+  back as a px transform) sat beside its own segment. dnd-kit's layer reordering and
+  Cesium's click-to-pick measure the same way and go the same way.
 - **One shared accent palette, including the login screen.** `main.tsx`'s
   `primaryColor: 'teal'` plus `colorScheme.ts`'s `accentEdge()` / `panelBorder()` and
   its `auth*()` helpers all draw from the same teal/amber pair now. The login and
@@ -512,6 +703,16 @@ else consumes.
   one case Cesium's terms actually require keeping it on screen — the data-source
   credit text next to it (OSM/terrain attribution) is left alone, since that's a
   different license's requirement, not Cesium's.
+- **The QGIS parameter renderer must stay catalog-agnostic.** `qgisParams.tsx` is
+  the single `<ParamField>` for both the curated and the advanced (introspected)
+  QGIS catalogs, because upload-api normalizes both into one `QgisParam` shape
+  before they leave the backend. If a parameter needs different handling, give it
+  a different `kind` server-side — do not branch on `curated` here.
+- **A layer-valued QGIS parameter is sent as `{layer: <name>}`, never as
+  schema/table.** upload-api resolves it through `visible_layers_for()`, so a
+  second input layer is subject to the same per-layer ACL the layer panel is.
+  Sending schema/table (the way `Geoprocessing.tsx` does for `/geoprocess`) would
+  bypass that.
 - UI strings are German. Match that when adding any.
 
 ## Requests

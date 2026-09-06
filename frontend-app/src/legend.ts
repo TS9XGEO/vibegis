@@ -32,7 +32,22 @@ export interface LegendLayer {
   classes: LegendClass[]
   /** Point size / line width for the whole layer. Undefined = the renderer's own default. */
   size?: number
+  /**
+   * Polygon border thickness in px, for the whole layer. Set only for a
+   * classification-derived legend, where it mirrors the per-layer
+   * `outlineWidth` upload-api compiled into the mapfile. A hand-authored
+   * LEGENDS entry leaves it undefined and keeps its own tuned outline colour
+   * at the original 0.5, so this change cannot disturb those.
+   */
+  outlineWidth?: number
 }
+
+/** Mirrors DEFAULT_POLYGON_OUTLINE_WIDTH in upload-api/app.py. */
+export const DEFAULT_POLYGON_OUTLINE_WIDTH = 0.6
+
+/** Mirrors POLYGON_OUTLINE_DARKEN in upload-api/app.py — including the
+ * truncation, so both renderers land on identical byte values. */
+const POLYGON_OUTLINE_DARKEN = 0.55
 
 // ------------------------------------------------------- user classification
 //
@@ -166,7 +181,11 @@ export function resolveLegend(
   layerName: string,
   classification: Classification | undefined,
   geometryType: string | null | undefined,
+  outlineWidth?: number | null,
 ): LegendLayer | undefined {
+  // Only a classification-derived legend carries a border width — see
+  // LegendLayer.outlineWidth.
+  const border = outlineWidth ?? DEFAULT_POLYGON_OUTLINE_WIDTH
   if (classification) {
     const geometry = (geometryType?.toLowerCase() as GeometryKind | undefined) ?? LEGENDS[layerName]?.geometry
     if (!geometry) return undefined
@@ -177,6 +196,7 @@ export function resolveLegend(
         classItem: null,
         classes: [{ name: 'Alle', match: null, color: hexToRgb(classification.color) }],
         size: classification.size,
+        outlineWidth: border,
       }
     }
     if (classification.mode === 'categorized') {
@@ -189,6 +209,7 @@ export function resolveLegend(
           color: hexToRgb(c.color),
         })),
         size: classification.size,
+        outlineWidth: border,
       }
     }
     // graduated
@@ -201,12 +222,26 @@ export function resolveLegend(
         color: hexToRgb(b.color),
       })),
       size: classification.size,
+      outlineWidth: border,
     }
   }
   return LEGENDS[layerName]
 }
 
 // --------------------------------------------------------------- colors
+
+/** '#5aaae6' -> '#315d7e'. The polygon outline is a darkened shade of its own
+ * fill rather than one fixed colour, so in a categorized layer every class keeps
+ * its identity instead of the map becoming a grid of black lines. Must stay
+ * identical to darken_rgb() in upload-api/app.py. */
+export function darkenHex(hex: string): string {
+  const [r, g, b] = hexToRgb(hex)
+  return rgbToHex([
+    Math.floor(r * POLYGON_OUTLINE_DARKEN),
+    Math.floor(g * POLYGON_OUTLINE_DARKEN),
+    Math.floor(b * POLYGON_OUTLINE_DARKEN),
+  ])
+}
 
 export function rgbToHex([r, g, b]: Rgb): string {
   return '#' + [r, g, b].map((c) => c.toString(16).padStart(2, '0')).join('')
@@ -262,15 +297,22 @@ function symbolizerFor(
   cls: LegendClass,
   color: string,
   size?: number,
+  outlineWidth?: number,
 ): string {
   const opacity = cls.fillOpacity ?? 1
 
   if (geometry === 'polygon') {
-    const outline = cls.outlineColor ? rgbToHex(cls.outlineColor) : color
+    const fill = `<Fill><CssParameter name="fill">${color}</CssParameter><CssParameter name="fill-opacity">${opacity}</CssParameter></Fill>`
+    // undefined = a hand-authored LEGENDS entry, which keeps the original 0.5
+    // and its own outline colour. A classification-derived legend always sets
+    // this, and 0 means the layer's border is switched off.
+    const width = outlineWidth ?? 0.5
+    if (width <= 0) return `<PolygonSymbolizer>${fill}</PolygonSymbolizer>`
+    const outline = cls.outlineColor ? rgbToHex(cls.outlineColor) : darkenHex(color)
     return (
       `<PolygonSymbolizer>` +
-      `<Fill><CssParameter name="fill">${color}</CssParameter><CssParameter name="fill-opacity">${opacity}</CssParameter></Fill>` +
-      `<Stroke><CssParameter name="stroke">${outline}</CssParameter><CssParameter name="stroke-width">0.5</CssParameter></Stroke>` +
+      fill +
+      `<Stroke><CssParameter name="stroke">${outline}</CssParameter><CssParameter name="stroke-width">${width}</CssParameter></Stroke>` +
       `</PolygonSymbolizer>`
     )
   }
@@ -436,7 +478,7 @@ export function buildSld(
       return (
         `<Rule>` +
         filterFor(layer.classItem, cls.match, extraXml) +
-        symbolizerFor(layer.geometry, cls, color, layer.size) +
+        symbolizerFor(layer.geometry, cls, color, layer.size, layer.outlineWidth) +
         `</Rule>`
       )
     })

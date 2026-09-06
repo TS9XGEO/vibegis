@@ -1,26 +1,38 @@
 /**
- * Turns geodata into a new WMS layer, via upload-api (see upload-api/app.py),
- * three ways:
+ * Turns geodata into a new layer, via upload-api (see upload-api/app.py),
+ * four ways:
  *   - a vector file (shapefile zip, GeoPackage, GeoJSON, KML, GML) gets
  *     loaded into PostGIS and a LAYER block appended to uploads.map
  *   - an existing PostGIS table gets pointed at directly, no data movement
  *   - a GeoTIFF gets reprojected/tiled by upload-api and published as a
  *     TYPE RASTER layer, no PostGIS table involved
- * Either way the layer list is always read fresh from GetCapabilities (see
- * wms.ts), so calling load() afterwards is all it takes for it to show up.
+ *   - a LAS/LAZ point cloud gets converted to Cesium 3D Tiles and published
+ *     with no MapServer layer at all — it draws as a scene primitive, not as
+ *     a WMS tile (see PointCloudLayer.tsx)
+ * Calling load() afterwards is all it takes for any of them to show up: the
+ * first three are read fresh from GetCapabilities, the fourth from /layers
+ * (see wms.ts).
  */
 import { useEffect, useState } from 'react'
 import {
   Alert, Button, FileInput, Group, Modal, SegmentedControl, Select, Stack, Text, TextInput,
 } from '@mantine/core'
-import { IconAlertCircle, IconCheck, IconDatabase, IconPhoto, IconUpload } from '@tabler/icons-react'
+import {
+  IconAlertCircle, IconCheck, IconDatabase, IconPhoto, IconUpload, IconChartDots3,
+} from '@tabler/icons-react'
 
+import { TourTarget } from './tour/TourTarget'
 import { useUpload } from './uploadState'
-import { REGISTER_TABLE_URL, TABLES_URL, UPLOAD_RASTER_URL, UPLOAD_RASTER_ZIP_URL, UPLOAD_URL, useApp } from './wms'
+import {
+  REGISTER_TABLE_URL, TABLES_URL, UPLOAD_POINTCLOUD_URL, UPLOAD_RASTER_URL,
+  UPLOAD_RASTER_ZIP_URL, UPLOAD_URL, useApp,
+} from './wms'
 
-export const ACCEPT = '.zip,.gpkg,.geojson,.json,.kml,.gml,.tif,.tiff'
+export const ACCEPT = '.zip,.gpkg,.geojson,.json,.kml,.gml,.tif,.tiff,.las,.laz'
 const RASTER_ACCEPT = '.tif,.tiff,.zip'
 const RASTER_NAME_RE = /\.tiff?$/i
+const POINTCLOUD_ACCEPT = '.las,.laz'
+const POINTCLOUD_NAME_RE = /\.la[sz]$/i
 
 interface DbTable {
   schema: string
@@ -136,7 +148,9 @@ function FilePanel({ onDone, pendingFile }: { onDone: (msg: string) => void; pen
           />
         </>
       ) : (
-        <FileInput label="Datei" placeholder="Datei auswählen" accept={ACCEPT} value={file} onChange={setFile} clearable />
+        <TourTarget id="upload-file-input">
+          <FileInput label="Datei" placeholder="Datei auswählen" accept={ACCEPT} value={file} onChange={setFile} clearable />
+        </TourTarget>
       )}
 
       <TextInput
@@ -154,14 +168,16 @@ function FilePanel({ onDone, pendingFile }: { onDone: (msg: string) => void; pen
         {layerChoice && (
           <Button variant="subtle" color="gray" onClick={backOut}>Zurück</Button>
         )}
-        <Button
-          leftSection={<IconUpload size={16} />}
-          loading={loading}
-          disabled={layerChoice ? !chosenLayer : !file}
-          onClick={submit}
-        >
-          {layerChoice ? 'Layer importieren' : 'Hochladen'}
-        </Button>
+        <TourTarget id="upload-submit-btn">
+          <Button
+            leftSection={<IconUpload size={16} />}
+            loading={loading}
+            disabled={layerChoice ? !chosenLayer : !file}
+            onClick={submit}
+          >
+            {layerChoice ? 'Layer importieren' : 'Hochladen'}
+          </Button>
+        </TourTarget>
       </Group>
     </Stack>
   )
@@ -249,6 +265,94 @@ function RasterPanel({ onDone, pendingFile }: { onDone: (msg: string) => void; p
 
       <Group justify="flex-end">
         <Button leftSection={<IconPhoto size={16} />} loading={loading} disabled={!file} onClick={submit}>
+          Hochladen
+        </Button>
+      </Group>
+    </Stack>
+  )
+}
+
+function PointCloudPanel({ onDone, pendingFile }: { onDone: (msg: string) => void; pendingFile: File | null }) {
+  const load = useApp((s) => s.load)
+  const [file, setFile] = useState<File | null>(null)
+  const [title, setTitle] = useState('')
+  const [srs, setSrs] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (pendingFile) setFile(pendingFile)
+  }, [pendingFile])
+
+  function reset() {
+    setFile(null)
+    setTitle('')
+    setSrs('')
+  }
+
+  async function submit() {
+    if (!file) return
+    setLoading(true)
+    setError(null)
+
+    const form = new FormData()
+    form.append('file', file)
+    const derivedTitle = title.trim() || file.name.replace(/\.[^.]+$/, '')
+    if (derivedTitle) form.append('title', derivedTitle)
+    // Only sent when actually filled in: upload-api prefers the LAS header's
+    // own CRS and only falls back to this, so an empty field must not
+    // override a file that already knows where it is.
+    if (srs.trim()) form.append('srs', srs.trim())
+
+    try {
+      const res = await fetch(UPLOAD_POINTCLOUD_URL, { method: 'POST', body: form })
+      const body = await res.json().catch(() => null)
+      if (!res.ok) {
+        if (!body?.detail && res.status === 413) throw new Error('Datei zu gross (Limit: 2 GB)')
+        throw new Error(body?.detail ?? `Upload fehlgeschlagen: HTTP ${res.status}`)
+      }
+      onDone(`"${body.title}" geladen (${body.point_count.toLocaleString('de-DE')} Punkte)`)
+      reset()
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <Stack gap="sm">
+      <Text size="xs" c="dimmed">
+        LAS- oder LAZ-Punktwolke (z.B. ein LiDAR-Scan). Wird serverseitig nach Cesium
+        3D Tiles konvertiert und direkt im Globus dargestellt — kein WMS-Layer, keine
+        PostGIS-Tabelle. Die Konvertierung läuft während des Uploads und kann bei
+        grossen Dateien einige Minuten dauern.
+      </Text>
+
+      <FileInput label="Datei" placeholder="Datei auswählen" accept={POINTCLOUD_ACCEPT} value={file} onChange={setFile} clearable />
+
+      <TextInput
+        label="Titel (optional)"
+        placeholder={file?.name.replace(/\.[^.]+$/, '') ?? 'wird aus dem Dateinamen abgeleitet'}
+        value={title}
+        onChange={(e) => setTitle(e.currentTarget.value)}
+      />
+
+      <TextInput
+        label="EPSG-Code (optional)"
+        description="Nur nötig, wenn die Datei kein Koordinatensystem enthält — z.B. 25832"
+        placeholder="aus der Datei gelesen"
+        value={srs}
+        onChange={(e) => setSrs(e.currentTarget.value)}
+      />
+
+      {error && (
+        <Alert color="red" variant="light" icon={<IconAlertCircle size={16} />}>{error}</Alert>
+      )}
+
+      <Group justify="flex-end">
+        <Button leftSection={<IconChartDots3 size={16} />} loading={loading} disabled={!file} onClick={submit}>
           Hochladen
         </Button>
       </Group>
@@ -354,18 +458,24 @@ function TablePanel({ opened, onDone }: { opened: boolean; onDone: (msg: string)
   )
 }
 
+type UploadMode = 'file' | 'raster' | 'pointcloud' | 'table'
+
 export default function UploadLayer() {
   const opened = useUpload((s) => s.opened)
   const pendingFile = useUpload((s) => s.pendingFile)
   const closeUpload = useUpload((s) => s.close)
-  const [mode, setMode] = useState<'file' | 'raster' | 'table'>('file')
+  const [mode, setMode] = useState<UploadMode>('file')
   const [success, setSuccess] = useState<string | null>(null)
 
   // A file dropped onto the map always means "upload a file", regardless of
   // whichever mode the modal was last left in — routed to the raster panel
-  // when it's a GeoTIFF, the vector panel otherwise.
+  // when it's a GeoTIFF, the point-cloud panel for a LAS/LAZ, the vector
+  // panel otherwise.
   useEffect(() => {
-    if (pendingFile) setMode(RASTER_NAME_RE.test(pendingFile.name) ? 'raster' : 'file')
+    if (!pendingFile) return
+    if (RASTER_NAME_RE.test(pendingFile.name)) setMode('raster')
+    else if (POINTCLOUD_NAME_RE.test(pendingFile.name)) setMode('pointcloud')
+    else setMode('file')
   }, [pendingFile])
 
   function close() {
@@ -379,16 +489,22 @@ export default function UploadLayer() {
         <SegmentedControl
           fullWidth
           value={mode}
-          onChange={(v) => { setMode(v as 'file' | 'raster' | 'table'); setSuccess(null) }}
+          onChange={(v) => { setMode(v as UploadMode); setSuccess(null) }}
+          // Shortened from "Datei hochladen"/"Raster hochladen"/"Aus
+          // Datenbank-Tabelle": a fourth full-width segment leaves no room
+          // for the longer labels, and the panel below each one already
+          // explains itself.
           data={[
-            { label: 'Datei hochladen', value: 'file' },
-            { label: 'Raster hochladen', value: 'raster' },
-            { label: 'Aus Datenbank-Tabelle', value: 'table' },
+            { label: 'Datei', value: 'file' },
+            { label: 'Raster', value: 'raster' },
+            { label: 'Punktwolke', value: 'pointcloud' },
+            { label: 'Tabelle', value: 'table' },
           ]}
         />
 
         {mode === 'file' && <FilePanel onDone={setSuccess} pendingFile={pendingFile} />}
         {mode === 'raster' && <RasterPanel onDone={setSuccess} pendingFile={pendingFile} />}
+        {mode === 'pointcloud' && <PointCloudPanel onDone={setSuccess} pendingFile={pendingFile} />}
         {mode === 'table' && <TablePanel opened={opened} onDone={setSuccess} />}
 
         {success && (

@@ -39,7 +39,7 @@ def postgis_ready(context: AssetExecutionContext) -> MaterializeResult:
 @asset(
     group_name="ingest",
     deps=[postgis_ready],
-    description="Load every vector file dropped into ./mapserver/data into schema raw.",
+    description="Load every vector file dropped into ./mapserver/data into schema dwh.",
 )
 def raw_vectors(context: AssetExecutionContext) -> MaterializeResult:
     import geopandas as gpd
@@ -59,9 +59,9 @@ def raw_vectors(context: AssetExecutionContext) -> MaterializeResult:
             context.log.warning(f"{fname} has no CRS, assuming EPSG:4326")
             gdf = gdf.set_crs(4326)
         gdf = gdf.to_crs(4326)
-        gdf.to_postgis(table, engine, schema="raw", if_exists="replace", index=False)
+        gdf.to_postgis(table, engine, schema="dwh", if_exists="replace", index=False)
         loaded[table] = len(gdf)
-        context.log.info(f"loaded {fname} -> raw.{table} ({len(gdf)} features)")
+        context.log.info(f"loaded {fname} -> dwh.{table} ({len(gdf)} features)")
 
     return MaterializeResult(
         metadata={
@@ -82,7 +82,7 @@ def published_layers(context: AssetExecutionContext) -> MaterializeResult:
         tables = conn.execute(
             text(
                 "SELECT f_table_schema, f_table_name, f_geometry_column "
-                "FROM geometry_columns WHERE f_table_schema IN ('gis','raw')"
+                "FROM geometry_columns WHERE f_table_schema = 'dwh'"
             )
         ).all()
         for schema, table, geom in tables:
@@ -110,16 +110,16 @@ def published_layers(context: AssetExecutionContext) -> MaterializeResult:
 def rndm_int_column(context: AssetExecutionContext) -> MaterializeResult:
     engine = create_engine(pg_url())
     with engine.begin() as conn:
-        # geometry_columns also lists materialized views (e.g. gis.search_index)
-        # — ALTER TABLE ADD COLUMN rejects those outright, so relkind = 'r'
-        # (ordinary table) narrows this to things that can actually take one.
+        # geometry_columns also lists materialized views — ALTER TABLE ADD
+        # COLUMN rejects those outright, so relkind = 'r' (ordinary table)
+        # narrows this to things that can actually take one.
         tables = conn.execute(
             text(
                 "SELECT gc.f_table_schema, gc.f_table_name "
                 "FROM geometry_columns gc "
                 "JOIN pg_namespace n ON n.nspname = gc.f_table_schema "
                 "JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = gc.f_table_name AND c.relkind = 'r' "
-                "WHERE gc.f_table_schema IN ('gis','raw')"
+                "WHERE gc.f_table_schema = 'dwh'"
             )
         ).all()
         for schema, table in tables:
@@ -142,7 +142,7 @@ refresh_job = define_asset_job("refresh_all", selection="*")
 # always re-running the full pipeline.
 reload_data_job = define_asset_job(
     "reload_data", selection="*raw_vectors",
-    description="Verify PostGIS and reload every vector file into raw.*.",
+    description="Verify PostGIS and reload every vector file into dwh.*.",
 )
 publish_layers_job = define_asset_job(
     "publish_layers", selection=[published_layers],

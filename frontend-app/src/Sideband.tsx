@@ -8,8 +8,8 @@
  */
 import { useEffect, useState } from 'react'
 import {
-  ActionIcon, Alert, Box, Button, Group, Loader, Modal, Paper, RingProgress, ScrollArea, Stack, Text, TextInput,
-  Tooltip, UnstyledButton, useComputedColorScheme,
+  ActionIcon, Alert, Box, Button, Group, Loader, Menu, Modal, Paper, RingProgress, ScrollArea, Stack, Text,
+  TextInput, Tooltip, UnstyledButton, rem, useComputedColorScheme,
 } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import {
@@ -19,30 +19,40 @@ import {
   IconCompass,
   IconDatabaseCog,
   IconHelp,
+  IconLanguage,
   IconLayoutSidebarRightExpand,
   IconLogout,
+  IconMap2,
   IconPlayerPlay,
   IconPlus,
+  IconRefresh,
   IconRobot,
   IconSearch,
   IconStack2,
+  IconTextIncrease,
   IconTools,
+  IconUpload,
   IconWand,
   IconX,
 } from '@tabler/icons-react'
 
+import { useTranslation } from 'react-i18next'
+
 import AiAgentPanel from './AiAgentPanel'
 import { useAiAgent } from './aiAgent'
-import { ETL_JOBS_URL, ETL_URL, useAuth } from './auth'
+import { ETL_JOBS_URL, ETL_URL, hasFullAccess, useAuth } from './auth'
 import { panelBg, panelBorder } from './colorScheme'
 import CompassButton from './CompassButton'
 import Geoprocessing from './Geoprocessing'
-import Handbook from './Handbook'
+import QgisProcessing from './QgisProcessing'
+import QgisIcon from './QgisIcon'
+import Pages from './Pages'
+import { setLocale } from './i18n'
+import { TourTarget } from './tour/TourTarget'
+import { useTour } from './tour/useTour'
 import { usePanels, type PanelId } from './panels'
+import { UI_SCALES, useUiScale } from './uiScale'
 import { useSelection } from './selection'
-
-const PREMIUM_TOOLTIP = 'ETL Tasks (Premium-Access)\n Buy Premium Access for 15€/month'
-const AI_PREMIUM_TOOLTIP = 'KI-Assistent (Premium-Zugang)\n Premium-Zugang für 15€/Monat freischalten'
 
 type EtlState = 'idle' | 'loading' | 'success' | 'error'
 
@@ -118,9 +128,106 @@ const RAIL: { id: PanelId; label: string; icon: typeof IconTools }[] = [
  * same "never hardcode a list the backend already owns" convention as the
  * layer list itself) rather than firing the run directly.
  */
+/**
+ * QGIS processing (Premium). Its own component rather than hoisted state like
+ * Geoprocessing's, matching EtlButton/AiAgentButton — it owns its gate and its
+ * modal, so Sideband's body stays readable.
+ */
+function QgisProcessingButton() {
+  const { t } = useTranslation()
+  const hasPremium = useAuth((s) => hasFullAccess(s.user, 'premium'))
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <Tooltip
+        label={
+          <span style={{ whiteSpace: 'pre-line' }}>
+            {hasPremium ? t('sideband.qgisTooltip') : t('sideband.qgisPremiumTooltip')}
+          </span>
+        }
+        position="left"
+        withArrow
+        multiline
+      >
+        <TourTarget id="qgis-btn">
+          {/* Never `disabled`: a disabled element swallows pointer events, so
+              the upsell tooltip would never fire on hover. */}
+          <UnstyledButton
+            aria-label={t('sideband.qgisAriaLabel')}
+            onClick={() => hasPremium && setOpen(true)}
+            style={{
+              width: rem(28),
+              height: rem(28),
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 6,
+              color: hasPremium ? 'var(--mantine-color-teal-5)' : 'var(--mantine-color-dimmed)',
+              cursor: hasPremium ? 'pointer' : 'default',
+            }}
+          >
+            <QgisIcon size={16} />
+          </UnstyledButton>
+        </TourTarget>
+      </Tooltip>
+      <QgisProcessing opened={open} onClose={() => setOpen(false)} />
+    </>
+  )
+}
+
+
+/**
+ * Global UI size — Klein (the app's original size) / Standard (1.25x) / Groß
+ * (1.5x). The store does the work (uiScale.ts — Mantine's own theme `scale`
+ * for everything it draws, one CSS rule for the icons); this is only the
+ * picker. Menu rather than a cycling button so any size is one
+ * click away, matching the tour menu just above it in the band.
+ */
+function UiScaleMenu() {
+  const { t } = useTranslation()
+  const scale = useUiScale((s) => s.scale)
+  const setScale = useUiScale((s) => s.setScale)
+  return (
+    <Menu position="left-start" withArrow shadow="md">
+      <Menu.Target>
+        <Tooltip label={t('uiScale.label')} position="left" withArrow>
+          <UnstyledButton
+            aria-label={t('uiScale.label')}
+            style={{
+              width: rem(28),
+              height: rem(28),
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 6,
+              color: 'var(--mantine-color-dimmed)',
+            }}
+          >
+            <IconTextIncrease size={16} />
+          </UnstyledButton>
+        </Tooltip>
+      </Menu.Target>
+      <Menu.Dropdown>
+        {UI_SCALES.map((option) => (
+          <Menu.Item
+            key={option}
+            // A fixed-width slot either way, so the labels stay aligned
+            // whichever size is active.
+            leftSection={option === scale ? <IconCheck size={14} /> : <Box w={14} />}
+            onClick={() => setScale(option)}
+          >
+            {t(`uiScale.${option}`)}
+          </Menu.Item>
+        ))}
+      </Menu.Dropdown>
+    </Menu>
+  )
+}
+
 function EtlButton() {
+  const { t } = useTranslation()
   const user = useAuth((s) => s.user)
-  const hasAccess = user?.role === 'admin' || !!user?.premium
+  const hasAccess = hasFullAccess(user, 'premium')
   const [state, setState] = useState<EtlState>('idle')
   const [pickerOpen, setPickerOpen] = useState(false)
   const [jobs, setJobs] = useState<EtlJob[]>([])
@@ -312,14 +419,14 @@ function EtlButton() {
       ? 'var(--mantine-color-red-5)'
       : 'var(--mantine-color-teal-5)'
   const tooltip = !hasAccess
-    ? PREMIUM_TOOLTIP
+    ? t('etl.premiumTooltip')
     : state === 'loading'
-      ? 'ETL-Lauf läuft…'
+      ? t('etl.stateLoading')
       : state === 'success'
-        ? 'ETL-Lauf abgeschlossen'
+        ? t('etl.stateSuccess')
         : state === 'error'
-          ? 'Start fehlgeschlagen'
-          : 'ETL-Task auswählen'
+          ? t('etl.stateError')
+          : t('etl.pickTask')
 
   return (
     <>
@@ -329,36 +436,38 @@ function EtlButton() {
         withArrow
         multiline
       >
-        <UnstyledButton
-          aria-label="ETL-Task auswählen"
-          onClick={() => hasAccess && state !== 'loading' && setPickerOpen(true)}
-          style={{
-            width: 28,
-            height: 28,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            borderRadius: 6,
-            color,
-            cursor: hasAccess ? 'pointer' : 'default',
-            transition: 'color 150ms ease',
-          }}
-        >
-          <Icon size={16} />
-        </UnstyledButton>
+        <TourTarget id="etl-btn">
+          <UnstyledButton
+            aria-label={t('etl.pickTask')}
+            onClick={() => hasAccess && state !== 'loading' && setPickerOpen(true)}
+            style={{
+              width: rem(28),
+              height: rem(28),
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 6,
+              color,
+              cursor: hasAccess ? 'pointer' : 'default',
+              transition: 'color 150ms ease',
+            }}
+          >
+            <Icon size={16} />
+          </UnstyledButton>
+        </TourTarget>
       </Tooltip>
 
       <Modal
         opened={pickerOpen}
         onClose={() => setPickerOpen(false)}
-        title="ETL-Task auswählen"
+        title={t('etl.pickTask')}
         centered
         size={ETL_MODAL_WIDTH}
       >
         <Stack gap="xs">
           {!jobsLoading && !jobsError && jobs.length > 0 && (
             <TextInput
-              placeholder="Tasks durchsuchen…"
+              placeholder={t('etl.searchPlaceholder')}
               value={jobSearch}
               onChange={(e) => setJobSearch(e.currentTarget.value)}
               leftSection={<IconSearch size={14} />}
@@ -372,10 +481,10 @@ function EtlButton() {
                 <Alert color="red" variant="light" icon={<IconAlertTriangle size={16} />}>{jobsError}</Alert>
               )}
               {!jobsLoading && !jobsError && jobs.length === 0 && (
-                <Text size="sm" c="dimmed">Keine ETL-Tasks verfügbar.</Text>
+                <Text size="sm" c="dimmed">{t('etl.noTasks')}</Text>
               )}
               {!jobsLoading && !jobsError && jobs.length > 0 && filteredJobs.length === 0 && (
-                <Text size="sm" c="dimmed">Keine Treffer für „{jobSearch}“.</Text>
+                <Text size="sm" c="dimmed">{t('etl.noMatches', { query: jobSearch })}</Text>
               )}
               {filteredJobs.map((job) => (
                 <Group key={job.name} gap="xs" wrap="nowrap">
@@ -388,8 +497,8 @@ function EtlButton() {
                   >
                     {job.label}
                   </Button>
-                  <Tooltip label="Zur Kaskade hinzufügen" position="top" withArrow>
-                    <ActionIcon variant="light" size="lg" onClick={() => addToCascade(job)} aria-label="Zur Kaskade hinzufügen">
+                  <Tooltip label={t('etl.addToCascade')} position="top" withArrow>
+                    <ActionIcon variant="light" size="lg" onClick={() => addToCascade(job)} aria-label={t('etl.addToCascade')}>
                       <IconPlus size={16} />
                     </ActionIcon>
                   </Tooltip>
@@ -427,7 +536,7 @@ function EtlButton() {
           <Stack gap="xs">
             <Group gap="xs">
               <IconStack2 size={16} />
-              <Text size="sm" fw={600}>Kaskade ({cascade.length})</Text>
+              <Text size="sm" fw={600}>{t('etl.cascadeTitle', { count: cascade.length })}</Text>
             </Group>
 
             <ScrollArea h={ETL_LIST_HEIGHT} type="auto">
@@ -436,7 +545,7 @@ function EtlButton() {
                   <Paper key={`${job.name}-${i}`} withBorder radius="sm" p="xs">
                     <Group gap="xs" justify="space-between" wrap="nowrap">
                       <Text size="sm">{i + 1}. {job.label}</Text>
-                      <ActionIcon variant="subtle" color="gray" size="sm" onClick={() => removeFromCascade(i)} aria-label="Aus Kaskade entfernen">
+                      <ActionIcon variant="subtle" color="gray" size="sm" onClick={() => removeFromCascade(i)} aria-label={t('etl.removeFromCascade')}>
                         <IconX size={14} />
                       </ActionIcon>
                     </Group>
@@ -466,12 +575,13 @@ function EtlButton() {
  * AiAgentPanel.tsx, mounted once below in the main render.
  */
 function AiAgentButton() {
+  const { t } = useTranslation()
   const user = useAuth((s) => s.user)
-  const hasAccess = user?.role === 'admin' || !!user?.premium
+  const hasAccess = hasFullAccess(user, 'premium')
   const open = useAiAgent((s) => s.open)
   const toggle = useAiAgent((s) => s.toggle)
 
-  const tooltip = !hasAccess ? AI_PREMIUM_TOOLTIP : open ? 'KI-Assistent ausblenden' : 'KI-Assistent einblenden'
+  const tooltip = !hasAccess ? t('aiAgent.premiumTooltip') : open ? t('aiAgent.hide') : t('aiAgent.show')
 
   return (
     <Tooltip
@@ -480,23 +590,25 @@ function AiAgentButton() {
       withArrow
       multiline
     >
-      <UnstyledButton
-        aria-label="KI-Assistent"
-        onClick={() => hasAccess && toggle()}
-        style={{
-          width: 28,
-          height: 28,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          borderRadius: 6,
-          color: !hasAccess ? 'var(--mantine-color-dimmed)' : open ? 'var(--mantine-color-dimmed)' : 'var(--mantine-color-teal-5)',
-          cursor: hasAccess ? 'pointer' : 'default',
-          transition: 'color 150ms ease',
-        }}
-      >
-        <IconRobot size={16} />
-      </UnstyledButton>
+      <TourTarget id="ai-btn">
+        <UnstyledButton
+          aria-label={t('aiAgent.ariaLabel')}
+          onClick={() => hasAccess && toggle()}
+          style={{
+            width: rem(28),
+            height: rem(28),
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: 6,
+            color: !hasAccess ? 'var(--mantine-color-dimmed)' : open ? 'var(--mantine-color-dimmed)' : 'var(--mantine-color-teal-5)',
+            cursor: hasAccess ? 'pointer' : 'default',
+            transition: 'color 150ms ease',
+          }}
+        >
+          <IconRobot size={16} />
+        </UnstyledButton>
+      </TourTarget>
     </Tooltip>
   )
 }
@@ -507,24 +619,32 @@ export default function Sideband() {
   const show = usePanels((s) => s.show)
   const dashboardTabOpen = useSelection((s) => s.dashboardTabOpen)
   const toggleDashboardTab = useSelection((s) => s.toggleDashboardTab)
-  const [handbookOpen, setHandbookOpen] = useState(false)
+  const [pagesOpen, setPagesOpen] = useState(false)
   const [geoprocessOpen, setGeoprocessOpen] = useState(false)
   const logout = useAuth((s) => s.logout)
-  const username = useAuth((s) => s.user?.username)
-  const isAdmin = useAuth((s) => s.user?.role === 'admin')
+  const user = useAuth((s) => s.user)
+  const username = user?.username
+  const hasProAccess = hasFullAccess(user, 'pro')
   const scheme = useComputedColorScheme('dark')
+  const { t, i18n } = useTranslation()
+  const startTour = useTour((s) => s.start)
+  const restartTour = useTour((s) => s.restart)
 
   return (
     <Box
       style={{
-        width: 40,
-        flex: '0 0 40px',
+        // rem() throughout, not raw px: these ride on Mantine's
+        // `--mantine-scale`, which the display-size picker below drives
+        // (uiScale.ts) — otherwise the rail alone would stay put while
+        // everything it sits next to grows.
+        width: rem(40),
+        flex: `0 0 ${rem(40)}`,
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        gap: 8,
-        paddingTop: 12,
+        gap: rem(8),
+        paddingTop: rem(12),
         backgroundColor: panelBg(scheme),
         borderLeft: `1px solid ${panelBorder(scheme)}`,
         borderRight: `1px solid ${panelBorder(scheme)}`,
@@ -538,8 +658,8 @@ export default function Sideband() {
               aria-label={label}
               onClick={() => (isOpen ? hide(id) : show(id))}
               style={{
-                width: 28,
-                height: 28,
+                width: rem(28),
+                height: rem(28),
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -560,95 +680,172 @@ export default function Sideband() {
           moved here so it's reachable without opening it. */}
       <CompassButton />
 
-      {/* Not a RAIL entry — the dashboard is now a pinned tab in
-          DataViewBand's tab strip (selection.ts's dashboardTabOpen/
-          dashboardTabActive), not a simple open/closed PanelId boolean, so
-          it gets its own bespoke button here, same as EtlButton/Geoprocessing/
-          Handbook below. Kept in the same rail slot the RAIL entry used to
-          occupy so the rail's visual order doesn't change. */}
-      <Tooltip label={dashboardTabOpen ? 'Auswahl-Dashboard ausblenden' : 'Auswahl-Dashboard einblenden'} position="left" withArrow>
-        <UnstyledButton
-          aria-label="Auswahl-Dashboard"
-          onClick={toggleDashboardTab}
-          style={{
-            width: 28,
-            height: 28,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            borderRadius: 6,
-            color: dashboardTabOpen ? 'var(--mantine-color-dimmed)' : 'var(--mantine-color-teal-5)',
-            transition: 'color 150ms ease',
-          }}
-        >
-          <IconChartBar size={16} />
-        </UnstyledButton>
-      </Tooltip>
-
-      <EtlButton />
-      <AiAgentButton />
-
-      {isAdmin && (
-        <Tooltip label="Geoverarbeitung" position="left" withArrow>
+      {/* Below here: the tier-gated data-capability buttons, grouped and
+          ordered to mirror CLAUDE.md's own Pro→Premium feature matrix
+          ("Pro: upload, editing own data, geo tools. Premium: ETL server
+          and AI bot") — Dashboard/Geoprocessing (Pro) first, then
+          ETL/AI Agent (Premium). Not a RAIL entry — the dashboard is now a
+          pinned tab in DataViewBand's tab strip (selection.ts's
+          dashboardTabOpen/dashboardTabActive), not a simple open/closed
+          PanelId boolean, so it gets its own bespoke button here, same as
+          EtlButton/Geoprocessing/Pages below. */}
+      <Tooltip
+        label={!hasProAccess ? t('sideband.dashboardProTooltip') : dashboardTabOpen ? t('sideband.dashboardHide') : t('sideband.dashboardShow')}
+        position="left"
+        withArrow
+        multiline
+      >
+        <TourTarget id="dashboard-btn">
           <UnstyledButton
-            aria-label="Geoverarbeitung öffnen"
-            onClick={() => setGeoprocessOpen(true)}
+            aria-label={t('sideband.dashboardAriaLabel')}
+            onClick={() => hasProAccess && toggleDashboardTab()}
             style={{
-              width: 28,
-              height: 28,
+              width: rem(28),
+              height: rem(28),
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               borderRadius: 6,
-              color: 'var(--mantine-color-teal-5)',
+              color: !hasProAccess ? 'var(--mantine-color-dimmed)' : dashboardTabOpen ? 'var(--mantine-color-dimmed)' : 'var(--mantine-color-teal-5)',
+              cursor: hasProAccess ? 'pointer' : 'default',
+              transition: 'color 150ms ease',
+            }}
+          >
+            <IconChartBar size={16} />
+          </UnstyledButton>
+        </TourTarget>
+      </Tooltip>
+
+      <Tooltip label={!hasProAccess ? t('sideband.geoprocessProTooltip') : t('sideband.geoprocessTooltip')} position="left" withArrow multiline>
+        <TourTarget id="geoprocess-btn">
+          <UnstyledButton
+            aria-label={t('sideband.geoprocessAriaLabel')}
+            onClick={() => hasProAccess && setGeoprocessOpen(true)}
+            style={{
+              width: rem(28),
+              height: rem(28),
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 6,
+              color: hasProAccess ? 'var(--mantine-color-teal-5)' : 'var(--mantine-color-dimmed)',
+              cursor: hasProAccess ? 'pointer' : 'default',
             }}
           >
             <IconWand size={16} />
           </UnstyledButton>
-        </Tooltip>
-      )}
+        </TourTarget>
+      </Tooltip>
       <Geoprocessing opened={geoprocessOpen} onClose={() => setGeoprocessOpen(false)} />
+
+      <QgisProcessingButton />
+      <EtlButton />
+      <AiAgentButton />
       <AiAgentPanel />
 
-      <Tooltip label="Handbuch" position="left" withArrow>
-        <UnstyledButton
-          aria-label="Handbuch öffnen"
-          onClick={() => setHandbookOpen(true)}
-          style={{
-            width: 28,
-            height: 28,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            borderRadius: 6,
-            color: 'var(--mantine-color-yellow-7)',
-          }}
-        >
-          <IconHelp size={16} />
-        </UnstyledButton>
+      <Menu position="left-start" withArrow shadow="md">
+        <Menu.Target>
+          <Tooltip label={t('tour.menuLabel')} position="left" withArrow>
+            <UnstyledButton
+              aria-label={t('tour.menuAriaLabel')}
+              style={{
+                width: rem(28),
+                height: rem(28),
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderRadius: 6,
+                color: 'var(--mantine-color-teal-5)',
+              }}
+            >
+              <IconMap2 size={16} />
+            </UnstyledButton>
+          </Tooltip>
+        </Menu.Target>
+        <Menu.Dropdown>
+          <Menu.Item leftSection={<IconRefresh size={14} />} onClick={restartTour}>
+            {t('tour.restart')}
+          </Menu.Item>
+          <Menu.Divider />
+          {hasProAccess && (
+            <Menu.Item leftSection={<IconUpload size={14} />} onClick={() => startTour('upload')}>
+              {t('tour.startUpload')}
+            </Menu.Item>
+          )}
+          <Menu.Item leftSection={<IconMap2 size={14} />} onClick={() => startTour('features')}>
+            {t('tour.startFeatures')}
+          </Menu.Item>
+        </Menu.Dropdown>
+      </Menu>
+
+      <Tooltip label={t('sideband.pagesTooltip')} position="left" withArrow>
+        <TourTarget id="pages-btn">
+          <UnstyledButton
+            aria-label={t('sideband.pagesAriaLabel')}
+            onClick={() => setPagesOpen(true)}
+            style={{
+              width: rem(28),
+              height: rem(28),
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 6,
+              color: 'var(--mantine-color-yellow-7)',
+            }}
+          >
+            <IconHelp size={16} />
+          </UnstyledButton>
+        </TourTarget>
       </Tooltip>
-      <Handbook opened={handbookOpen} onClose={() => setHandbookOpen(false)} />
+      <Pages opened={pagesOpen} onClose={() => setPagesOpen(false)} />
+
+      <Tooltip label={t('languageSwitcher.label')} position="left" withArrow>
+        <TourTarget id="lang-btn">
+          <UnstyledButton
+            aria-label={t('languageSwitcher.label')}
+            onClick={() => setLocale(i18n.language === 'de' ? 'en' : 'de')}
+            style={{
+              width: rem(28),
+              height: rem(28),
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 6,
+              gap: 2,
+              fontSize: 10,
+              fontWeight: 700,
+              color: 'var(--mantine-color-dimmed)',
+            }}
+          >
+            <IconLanguage size={16} />
+          </UnstyledButton>
+        </TourTarget>
+      </Tooltip>
+
+      <UiScaleMenu />
 
       {/* Pinned to the very end of the band, separate from the panel toggles
           above — logout is a global action, not tied to any box's state. */}
-      <Tooltip label={`Abmelden (${username})`} position="left" withArrow>
-        <UnstyledButton
-          aria-label="Abmelden"
-          onClick={() => logout()}
-          style={{
-            width: 28,
-            height: 28,
-            marginTop: 'auto',
-            marginBottom: 12,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            borderRadius: 6,
-            color: 'var(--mantine-color-dimmed)',
-          }}
-        >
-          <IconLogout size={16} />
-        </UnstyledButton>
+      <Tooltip label={t('sideband.logoutTooltip', { username })} position="left" withArrow>
+        <TourTarget id="logout-btn">
+          <UnstyledButton
+            aria-label={t('sideband.logoutAriaLabel')}
+            onClick={() => logout()}
+            style={{
+              width: rem(28),
+              height: rem(28),
+              marginTop: 'auto',
+              marginBottom: 12,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 6,
+              color: 'var(--mantine-color-dimmed)',
+            }}
+          >
+            <IconLogout size={16} />
+          </UnstyledButton>
+        </TourTarget>
       </Tooltip>
     </Box>
   )
