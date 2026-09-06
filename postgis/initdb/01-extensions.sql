@@ -58,8 +58,7 @@ CREATE TABLE IF NOT EXISTS configdb.layer_owners (
 );
 
 -- Per-user/group layer visibility grants — see visible_layers_for() in
--- upload-api/app.py. 'guests' is the implicit group guest sessions (no real
--- user row) resolve grants against.
+-- upload-api/app.py.
 CREATE TABLE IF NOT EXISTS configdb.groups (
     id   bigserial PRIMARY KEY,
     name text UNIQUE NOT NULL
@@ -69,8 +68,6 @@ CREATE TABLE IF NOT EXISTS configdb.group_members (
     user_id  bigint NOT NULL REFERENCES userdb.users(id) ON DELETE CASCADE,
     PRIMARY KEY (group_id, user_id)
 );
-INSERT INTO configdb.groups (name) VALUES ('guests') ON CONFLICT DO NOTHING;
-
 CREATE TABLE IF NOT EXISTS configdb.layer_grants (
     id             bigserial PRIMARY KEY,
     layer_name     text NOT NULL,
@@ -80,26 +77,16 @@ CREATE TABLE IF NOT EXISTS configdb.layer_grants (
     UNIQUE (layer_name, principal_type, principal_id)
 );
 
--- Billing history/state — separate from the enforced userdb.users.subscription_tier,
--- which only the PayPal webhook handler ever writes for a paid tier.
-CREATE TABLE IF NOT EXISTS userdb.subscriptions (
-    id                     bigserial PRIMARY KEY,
-    user_id                bigint NOT NULL REFERENCES userdb.users(id) ON DELETE CASCADE,
-    tier                   text NOT NULL CHECK (tier IN ('pro', 'premium')),
-    paypal_subscription_id text UNIQUE,
-    status                 text NOT NULL CHECK (status IN ('pending', 'active', 'cancelled', 'suspended')),
-    current_period_end     timestamptz,
-    created_at             timestamptz NOT NULL DEFAULT now(),
-    updated_at             timestamptz NOT NULL DEFAULT now()
-);
-
 CREATE TABLE IF NOT EXISTS configdb.pages (
     slug       text PRIMARY KEY,
     title_de   text NOT NULL DEFAULT '',
     title_en   text NOT NULL DEFAULT '',
     body_de    text NOT NULL DEFAULT '',
     body_en    text NOT NULL DEFAULT '',
+    -- hides the page from anyone but role == 'admin' — see app.py's /cms routes
+    admin_only boolean NOT NULL DEFAULT false,
     updated_at timestamptz NOT NULL DEFAULT now(),
     updated_by text
 );
 INSERT INTO configdb.pages (slug) VALUES ('handbook') ON CONFLICT DO NOTHING;
+INSERT INTO configdb.pages (slug, admin_only) VALUES ('architecture', true) ON CONFLICT DO NOTHING;

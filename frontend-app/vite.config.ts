@@ -33,6 +33,9 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // Off by default: a production build with source maps publishes the whole
+    // TypeScript source next to the minified bundle. Set VITE_SOURCEMAP=1 to
+    // get them back for a local debugging build.
+    sourcemap: process.env.VITE_SOURCEMAP === '1',
   },
 })

@@ -27,6 +27,23 @@ RUN printf '%s\n' \
     "application = make_wsgi_app('/mapproxy/config/mapproxy.yaml', reloader=True)" \
     > /mapproxy/wsgi.py
 
+# ---------------------------------------------------------------- non-root
+# Nothing here needs root, and this container
+# serves cached tiles.
+# UID/GID default to 1001 because that is what this repo's bind mounts are
+# owned by on the development host; an install whose host user differs sets
+# APP_UID/APP_GID in .env, which docker-compose.yml passes both as build args
+# and as the runtime `user:` (so an existing image does not need rebuilding).
+# -o on both: some base images already ship a user at this id, and a clash
+# should not fail the build.
+ARG APP_UID=1001
+ARG APP_GID=1001
+RUN groupadd -o -g ${APP_GID} app \
+ && useradd -o -u ${APP_UID} -g ${APP_GID} -m -d /home/app -s /usr/sbin/nologin app \
+ && chown -R ${APP_UID}:${APP_GID} /mapproxy
+ENV HOME=/home/app
+USER app
+
 EXPOSE 8080
 
 CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:8080", \

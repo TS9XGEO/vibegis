@@ -10,7 +10,9 @@ enough to hurt PostGIS.
 Everything reaches the browser through nginx on `:8080`, one origin, no CORS.
 
 ```
-:8080/            → frontend      Vite dev server (React, Resium, Mantine)
+:8080/            → frontend      React, Resium, Mantine. Vite dev server by
+                                  default; the built bundle under the production
+                                  overlay — see "Development vs production" below
      /mapserver   → mapserver     WMS/WMTS/OGC-API, live render from PostGIS
      /tiles/      → mapproxy      same layer names, served from disk cache
      /features    → featureserv   OGC API Features (GeoJSON); powers the search box
@@ -32,8 +34,7 @@ Everything reaches the browser through nginx on `:8080`, one origin, no CORS.
      /upload /upload-raster /upload-raster-zip /upload-pointcloud
      /raster-composite /tables /layers
      /layer-config /distinct-values /column-stats /register-table /geoprocess
-     /login /logout /auth/me /users /etl/ /cms /guest-session /register
-     /subscription/ /paypal/webhook /groups /layer-grants
+     /login /logout /auth/me /users /etl/ /cms /groups /layer-grants
                   → upload-api    file → PostGIS table → LAYER block (see upload-api/);
                                   /upload-raster instead publishes a GeoTIFF as a
                                   TYPE RASTER layer, no PostGIS table involved;
@@ -54,10 +55,10 @@ Everything reaches the browser through nginx on `:8080`, one origin, no CORS.
                                   pages (configdb.pages — the in-app Handbook is just
                                   one page, "handbook", not special beyond being the
                                   one a fresh install seeds) — see "Three Postgres
-                                  schemas" below. /guest-session, /register,
-                                  /subscription/*, /paypal/webhook, /groups and
-                                  /layer-grants are the tiers/guest/billing system —
-                                  see "Roles, tiers, guests and billing" below
+                                  schemas" below. /groups and /layer-grants are
+                                  the per-layer ACL — see "Roles and tiers" below.
+                                  There is no self-service signup, guest session or
+                                  billing endpoint: an admin creates every account.
 ```
 
 Dagster (`:3000`, ETL assets), PostGIS (`:5432`) and Grafana (`:3001`, log viewer —
@@ -74,25 +75,38 @@ via Sideband's content button — `Pages.tsx`; the in-app Handbook is just the o
 `group_members`, `layer_grants` — the per-user/group ACL, see below; `qgis_jobs` — one
 row per QGIS processing run, see below), `userdb`
 (`users`: accounts, `subscription_tier` — replacing what used to be a plain `premium`
-boolean — plus the AI agent's encrypted BYO-key columns; `subscriptions`: PayPal
-billing history). One-time migrations from the old `raw`/`staging`/`gis` layout and
-the old `premium` boolean: `bin/migrate-schemas.sql`, `bin/migrate-tiers.sql`.
+boolean — plus the AI agent's encrypted BYO-key columns). One-time migrations from
+the old `raw`/`staging`/`gis` layout, the old `premium` boolean, and the removal of
+self-service billing: `bin/migrate-schemas.sql`, `bin/migrate-tiers.sql`,
+`bin/migrate-remove-self-service.sql` (which drops `userdb.subscriptions` and the
+seeded `guests` group). `bin/migrate-roles.sql` adds the read-only
+`vibegis_render` role to an existing volume.
 `postgis/initdb/*.sql` creates the new layout directly, so these only matter on an
 existing volume. `ai_agent.py`'s `AI_READABLE_SCHEMAS` deliberately excludes
 `userdb` — the read-only AI role never has that schema granted at all, rather than a
 schema-wide grant with one table revoked back out.
 
-## Roles, tiers, guests and billing
+## Roles and tiers
 
 Two orthogonal axes on `userdb.users`: `role` (`admin`/`editor`/`viewer`) and
 `subscription_tier` (`free`/`pro`/`premium`, ranked in `upload-api/app.py`'s
 `TIER_RANK` — `require_tier(min)` is the gate, `require_etl_access` is now just
-`require_tier("premium")` by another name). Premium now covers three things:
+`require_tier("premium")` by another name). Premium covers three things:
 the Dagster ETL trigger, the AI agent, and the QGIS features (`/qgis-process/*`
-algorithms and `/qgis-print` PDF export). **Guest is not a tier value on a user
-row** — `POST /guest-session` issues a JWT with a synthetic identity and
-`tier: "guest"` baked in directly, no `userdb.users` row at all; every tier check
-treats `guest` as the floor, below `free`.
+algorithms and `/qgis-print` PDF export). Pro covers uploads (`/upload`,
+`/upload-raster`, `/upload-raster-zip`, `/upload-pointcloud`,
+`/raster-composite`), `/geoprocess`, `DELETE /layers`, the write side of
+`/layer-config`, and the `/column-groupby`//`table-count` aggregates.
+`/tables` and `/register-table` are `require_privileged` (admin or editor)
+rather than a tier gate — publishing an arbitrary existing table is
+administration, not analysis.
+
+**There is no self-service signup, no guest session and no billing.** The
+tier is an internal capability grant that the customer's own admin sets in
+`UserAdmin.tsx` or with `bin/add-user.sh`; nothing on the public surface can
+create an account or change a tier. `/register`, `/guest-session`,
+`/subscription/*` and `/paypal/webhook` were removed outright — see
+`bin/migrate-remove-self-service.sql` for the database side.
 
 **`editor` is full analysis/editing capability without a subscription** —
 `is_privileged_role()` (`app.py`) treats admin and editor identically everywhere
@@ -108,44 +122,60 @@ tooltip" pattern throughout `Sideband.tsx`/`LayerPanel.tsx`), plain
 `role === 'admin'` for the two admin-only screens (`UserAdmin.tsx`, `AccessAdmin.tsx`).
 CMS write routes (`POST`/`PATCH`/`DELETE /cms`) use the softer `require_privileged`
 (admin or editor) instead of `require_role("admin")` — content editing, not
-user/privilege management, so editor keeps that.
+user/privilege management, so editor keeps that. A CMS page can additionally be
+flagged `admin_only` (`configdb.pages`), which hides it from `/cms`'s list and
+404s a direct fetch/edit/delete for anyone but `role == "admin"` literally — the
+one place a page-level check *does* use the strict admin check rather than
+`require_privileged`, since this gates operational/internal content rather than
+general editing. The seeded `architecture` page (a technical reference, unlike the
+always-visible `handbook`) is the reason this exists; `Pages.tsx`'s create/edit
+form has a matching "Nur für Admins sichtbar" switch, admin-only itself, and shows
+a lock icon next to a hidden page in the list.
 
 **Per-layer visibility is a separate concern from tier**, chosen deliberately over
 "tier N sees layer set N": `visible_layers_for()` in `app.py` — admin sees
-everything; a guest session sees only what's granted to the implicit `guests` group
-(seeded by `ensure_users_table()`); everyone else sees what's granted to their user id
+everything; everyone else sees what's granted to their user id
 or to any group they belong to, unioned with whatever they *own*
 (`configdb.layer_owners`, written by `record_layer_owner()` at the tail of every
 publish path — a Pro user has to see a layer the moment they publish it, not only
 once an admin grants it back). Managed from the app itself via `AccessAdmin.tsx`
 (admin-only, `/groups` + `/layer-grants`).
 
-**The one enforcement gap, on purpose, documented rather than silently left**:
-`visible_layers_for()` controls what `/layers` *offers* — the layer panel, search,
-attribute table entry points. It does not touch `/mapserver`/`/tiles/`/`/features`
-themselves — `nginx.conf`'s `auth_request` only checks "is there a valid session," and
-MapServer has no per-user concept at all. A logged-in user who already knows or
-guesses another private layer's exact name can still fetch its tiles directly. Closing
-this for real means turning those three routes into an authorizing proxy through
-upload-api instead of nginx routing straight to `mapserver`/`mapproxy`/`featureserv` —
-real added latency and complexity, deliberately not built yet.
+**The ACL now covers the raw OGC routes too, and that took one design
+decision worth knowing.** `visible_layers_for()` used to control only what
+`/layers` *offers* — the layer panel, search, attribute table entry points —
+while `/mapserver`, `/tiles/`, `/features`, `/qgis` and `/pointclouds/` were
+gated by `auth_request` alone, which only asked "is there a valid session". Any
+logged-in user who guessed a private layer's name could fetch its tiles.
+
+It is closed without turning those routes into a Python proxy (the latency cost
+that made it "deliberately not built yet" before). Instead every gated location
+forwards `proxy_set_header X-Original-URI $request_uri;` and `/auth/verify`
+authorizes the *original* URI in one place — `authorize_gateway_request()` in
+`app.py`. All the layer-name parsing lives in that one Python function rather
+than being spread across nginx `map` blocks, because the names arrive in four
+different shapes (`?LAYERS=a,b`, `/tiles/<layer>/<grid>/…`,
+`/features/collections/<schema.table>/items`, `/pointclouds/<layer>/…`) and it
+has to fail closed on anything it cannot parse.
+
+**The caching there is not optional.** `auth_request` fires once per tile and
+upload-api runs a single uvicorn worker, so an uncached database round-trip per
+tile would freeze the map for everyone. `visible_layer_index()` caches the
+per-user visible set for `VISIBILITY_TTL_SECONDS` (30s), and the
+`drop_visibility_cache_on_acl_write` middleware invalidates it immediately on any
+write to `/groups`, `/layer-grants`, `/layers`, `/users` or `/layer-config`, so a
+revoked grant takes effect at once rather than 30 seconds later. Measured cost
+with the cache warm: ~18 ms per tile, unchanged from before the gate existed.
+
+Layers in the hand-authored mapfiles (`vibegis.map`, `osm-layers.map`) are
+treated as public — they are the base map, and `hand_authored_layers()` lists
+them explicitly rather than letting "not in the grant table" mean "denied" for
+layers that were never in it.
 
 **"Editing own data" (Pro)**: `require_owner_or_admin()` — admin always passes;
 anyone else must both meet the route's tier gate *and* own the specific layer
 (`configdb.layer_owners`). Used by `PATCH`/`DELETE /layer-config` and
 `DELETE /layers`.
-
-**Self-service signup and PayPal** (`upload-api/paypal.py`, sandbox/test mode — see
-`.env.example`'s `PAYPAL_*` vars and `bin/paypal-seed.sh`, run once by hand): `POST
-/register` always creates a `viewer` account; `free` activates immediately, `pro`/
-`premium` stay `free` in enforcement terms until `POST /paypal/webhook` (signature-
-verified via PayPal's own endpoint, never trusted on the redirect alone) confirms the
-subscription actually activated — nothing paid is ever granted on the client's own
-say-so, and a PayPal failure during signup rolls the just-created account back rather
-than leaving it stranded on `free`. `POST /subscription/upgrade` is the same flow for
-an *existing* account (the recurring upsell nag's call-to-action —
-`frontend-app/src/upsell/`); `POST /subscription/cancel` asks PayPal to cancel, same
-"webhook is the only path that changes tier" rule.
 
 ## Localization (DE/EN)
 
@@ -178,9 +208,15 @@ changes — they already log to stdout/stderr, which Promtail already picks up.
 
 Per-container resource usage (CPU/memory/network/disk) is a separate pipeline:
 `docker-stats-exporter` (own small `build:`-based service, `docker-stats-exporter/
-exporter.py`) polls `/containers/{id}/stats` over the same read-only Docker socket
-mount promtail already uses, and exposes it as Prometheus metrics labeled `service`
-— the same Compose service name promtail already relabels its log streams with.
+exporter.py`) polls `/containers/{id}/stats` and exposes it as Prometheus metrics
+labeled `service` — the same Compose service name promtail already relabels its log
+streams with. **Neither collector mounts `/var/run/docker.sock` any more**: both
+talk to the `docker-socket-proxy` service (`tecnativa/docker-socket-proxy`) over
+TCP, which is an HAProxy ACL allowing only the endpoints they need. A `:ro` bind of
+the socket does not make the *API* read-only — anything holding it can read every
+other container's environment, which is where `PGPASSWORD`, `AUTH_JWT_SECRET` and
+`AI_KEY_ENCRYPTION_SECRET` live in plaintext. `DOCKER_HOST` points both at the
+proxy; promtail needs `NETWORKS: "1"` on it or it fails computing network labels.
 **Not cAdvisor**, deliberately: cAdvisor needs direct cgroup/overlay2 filesystem
 access to the daemon, and this stack runs on Docker Desktop, whose engine lives in
 its own isolated VM that a sibling container's bind mounts can't reach — confirmed
@@ -203,7 +239,8 @@ share the one label name across Prometheus and Loki.
 | `frontend-app/src/**` | nothing, Vite HMR. Not picked up? set `VITE_USE_POLLING=1` |
 | `mapserver/mapfiles/*.map` | nothing — MapServer re-reads the mapfile per request. If a change won't show, `up -d --force-recreate mapserver` (see stale mounts below) |
 | `mapproxy/mapproxy.yaml` | nothing — MapProxy's reloader watches the file's mtime. Machine-written by upload-api now (see below); a hand edit works but is overwritten on the next layer change |
-| `nginx/nginx.conf` | `restart gateway` |
+| `nginx/locations.conf`, `nginx/server-settings.conf`, `nginx/security-headers.conf`, `nginx/nginx.conf` | `restart gateway`. The routes live in `locations.conf`, not `nginx.conf` — see the split below |
+| `frontend-app/**` for a **production** check | `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build frontend`; plain `up -d frontend` puts the dev server back |
 | `upload-api/app.py` | `up -d --build upload-api` — it's `build:`-based, not bind-mounted, so a plain `restart` keeps running the old image and silently ignores the edit |
 | `dagster/defs/**` | "Reload definitions" in the Dagster UI |
 | `docker-compose.yml`, `.env` | `docker compose up -d` |
@@ -232,6 +269,15 @@ docker compose logs -f mapserver
 docker compose --profile terrain run --rm ctb    # bake terrain from terrain/dem/dem.tif
 docker compose --profile tiles3d run --rm pg2b3dm
 docker compose down        # keep data   |   down -v = DELETE the database
+
+bash bin/add-user.sh <user> <pass> admin         # the only way an account is created
+bash bin/backup.sh                               # pg_dump -Fc + a tar of the file state
+bash bin/restore.sh backups/<stamp>              # and back again
+bash bin/fix-ownership.sh                        # once, when moving to non-root containers
+
+# the production stack: TLS + the built SPA instead of the dev server
+docker compose -f docker-compose.yml -f docker-compose.tls.yml \
+               -f docker-compose.prod.yml up -d --build
 ```
 
 ## Things that will bite you
@@ -316,27 +362,27 @@ docker compose down        # keep data   |   down -v = DELETE the database
   a 404. `/health` was unreachable for exactly this reason.
 - **Visual checks belong to Thomas.** For anything that has to be *looked at*, hand
   over http://localhost:8080/ rather than driving a headless browser.
-- **Real accounts, JWT-in-a-cookie, admin vs viewer vs premium.** `users` (username,
-  bcrypt password hash, role, `premium` boolean) lives in Postgres, created by
-  upload-api on startup — not via `postgis/initdb`, since that only runs on a fresh
-  volume and this DB already has data. `premium` is additive to `role`, not a third
-  role value: an admin never loses anything a premium grant would add, and "viewer +
-  premium" is a real, intended combination. `POST /login` issues an httpOnly
-  `vibegis_session` cookie (10h, signed with `AUTH_JWT_SECRET`) carrying `role` and
-  `premium`; there is no server-side revocation, so a leaked cookie — or a role/premium
-  change made after it was issued — stays as it was until the cookie expires.
-  `require_login`/`require_role("admin")`/`require_etl_access` (admin or premium) in
+- **Real accounts, JWT-in-a-cookie, `role` × `subscription_tier`.** `userdb.users`
+  (username, bcrypt password hash, `role`, `subscription_tier`) lives in Postgres,
+  created by upload-api on startup — not via `postgis/initdb`, since that only runs
+  on a fresh volume and this DB already has data. `POST /login` issues an httpOnly
+  `vibegis_session` cookie (10h, signed with `AUTH_JWT_SECRET`) carrying both; there
+  is still no server-side revocation, so a leaked cookie — or a role/tier change made
+  after it was issued — stays as it was until the cookie expires.
+  `require_login`/`require_role("admin")`/`require_privileged`/`require_tier()` in
   `upload-api/app.py` gate its own routes in-process; mapserver, mapproxy,
   pg_featureserv and qgis-server have no app code of their own, so nginx gates them
-  instead via `auth_request` against upload-api's `/auth/verify`. `/` is deliberately
-  ungated — the SPA shell has to load unauthenticated so the login screen can render.
-  First-time setup (and only then): `bash bin/add-user.sh <user> <pass> admin` to
-  create the first admin, since the in-app "Benutzer verwalten" screen needs an
-  admin session to reach in the first place. The same script takes an optional 4th
-  `premium` argument for creating a premium test account.
-- **`dagster` is an unpinned dependency** (`dagster/requirements.txt`) — a routine
-  image rebuild can pull a newer Dagster that silently breaks `dagster/defs/__init__.py`
-  on the next reload. It already happened once this way: `ScheduleDefinition`'s
+  instead via `auth_request` against upload-api's `/auth/verify` — which now
+  authorizes the *specific layers* the request names, not just the session (see
+  "Roles and tiers"). `/` is deliberately ungated — the SPA shell has to load
+  unauthenticated so the login screen can render.
+  First-time setup, and the only way an account is ever created:
+  `bash bin/add-user.sh <user> <pass> admin`, since the in-app "Benutzer verwalten"
+  screen needs an admin session to reach in the first place. The script takes an
+  optional 4th tier argument (`free`/`pro`/`premium`).
+- **`dagster/requirements.txt` is pinned now, and it has to stay that way.** A routine
+  image rebuild used to pull a newer Dagster that silently broke
+  `dagster/defs/__init__.py` on the next reload. It happened once this way: `ScheduleDefinition`'s
   `default_status_is_running` argument was removed upstream in favor of
   `default_status=DefaultScheduleStatus.STOPPED`, and the failure only showed up as
   the whole workspace refusing to load (every asset/job gone, not just the schedule).
@@ -362,55 +408,183 @@ docker compose down        # keep data   |   down -v = DELETE the database
   wider than intended, which pushed the docked layer panel completely off the visible
   viewport (clipped invisible by `index.html`'s `overflow: hidden` on `#root`, not
   removed — easy to mistake for a state bug instead of a layout one).
+- **nginx partials belong in `/etc/nginx/vibegis/`, never `conf.d/`.** The
+  official nginx image's `nginx.conf` does `include /etc/nginx/conf.d/*.conf`
+  at *http* level, so a partial full of bare `location` blocks mounted there
+  fails with `"location" directive is not allowed here` and the gateway will not
+  start. Only the server block itself goes in `conf.d/default.conf`;
+  `server-settings.conf`, `locations.conf` and `security-headers.conf` are
+  mounted under `/etc/nginx/vibegis/` and included by path.
+- **`add_header` in an inner block discards every inherited header.** nginx's
+  `add_header` does not accumulate down the hierarchy — a `location` that sets
+  one of its own drops all the ones from the enclosing `server`. That is why
+  `security-headers.conf` is included *again* inside the
+  `~ ^/terrain/(.*\.terrain)$` location, which sets its own content headers.
+- **A busybox healthcheck must use `127.0.0.1`, not `localhost`.** busybox
+  `wget` tries the `::1` entry in `/etc/hosts` first, and neither nginx nor Vite
+  listens on IPv6 here, so `http://localhost/...` fails with "Connection
+  refused" while the service is perfectly healthy — for hours, with nothing else
+  wrong. `curl` retries the next address and is unaffected; the two `wget`
+  checks in `docker-compose.yml` are the ones that matter.
+- **The non-root switch is a one-time volume migration, not just a rebuild.**
+  Docker applies the image's ownership to a named volume only the first time it
+  creates that volume, so an existing `qgis-work`/`mapproxy-cache`/`dagster-home`
+  stays root-owned and the new uid-1001 process cannot write it. `bin/
+  fix-ownership.sh` chowns them from inside a throwaway container. It asks
+  Compose for each volume's real name rather than gluing `<project>_` onto the
+  key — `docker run -v <name>:/v` silently *creates* a volume that does not
+  exist, so a wrong guess chowns a brand-new empty one and reports success.
+  (This stack has volumes left over from when the project was called `webgis`,
+  which is exactly how that was found.)
 
-## Not production ready yet
+## Development vs production
 
-This runs as a development stack. What's missing, roughly in the order worth
-fixing — every item below was checked against the config, not assumed.
+`docker-compose.yml` on its own is the **development** stack: HTTP on `:8080`,
+the SPA served by the Vite dev server with HMR, `pgadmin` available behind a
+profile. That is the daily loop and it should not need a flag.
 
-**Blockers**
+A customer install is the same file plus two overlays:
 
-- **The SPA is served by the Vite dev server.** `nginx.conf`'s `location /`
-  proxies to `frontend:5173`, HMR websocket headers and all. `npm run build`
-  exists; nothing ever serves `dist/`. Needs a build step plus either an nginx
-  `root` or a static-serving container.
-- **No TLS, and the gateway is the only thing exposed off-loopback.** nginx is
-  `listen 80;`; the session cookie is set `secure=False` (`app.py`'s
-  `set_cookie`), so credentials and sessions travel in plaintext. Every admin
-  UI is correctly `127.0.0.1`-bound already — only `"${GATEWAY_PORT}:80"` is
-  not.
-- **No login rate limiting or lockout** in `app.py`, and no `limit_req`
-  anywhere in `nginx.conf`.
-- **No session revocation** — a JWT cookie with no server-side invalidation, so
-  deleting or demoting a user only takes effect when it expires (10h).
-- **No backups.** Nothing in `bin/` touches PostGIS, and `postgis-data` is a
-  bare named volume. The same goes for the state that isn't in Postgres:
-  `pointclouds/`, `mapserver/rasters/`, and the machine-written
-  `uploads.map`/`mapproxy.yaml`.
+```bash
+docker compose -f docker-compose.yml \
+               -f docker-compose.tls.yml \
+               -f docker-compose.prod.yml up -d --build
+```
 
-**Operational**
+- `docker-compose.tls.yml` swaps `nginx/nginx.conf` for `nginx/nginx-tls.conf`
+  (443 + HSTS, `:80` redirecting to it) and mounts `nginx/tls/`. `COOKIE_SECURE`
+  stays at its default `true`, so the session cookie is TLS-only.
+- `docker-compose.prod.yml` swaps the frontend image for
+  `frontend-app/Dockerfile.prod` — `npm ci` + `vite build`, served as static
+  files by nginx. It listens on 5173, the same port as the dev server, so the
+  gateway's `location /` is byte-identical either way and the two cannot drift.
+  It carries its own image tag (`vibegis-frontend-prod`) so a later
+  `docker compose up -d` without `--build` cannot silently run the wrong one.
 
-- **No CI** (no `.github/workflows`) on a repo with no tests and no linter —
-  `npm run typecheck` is the only check and it is run by hand.
-- **Unpinned images**: `:latest` for GDAL, ctb, pgAdmin, pg_featureserv and
-  pg2b3dm, plus unpinned `dagster` — which has already silently broken the
-  Dagster workspace once (see "Things that will bite you").
-- **One healthcheck across fifteen services** (only `postgis`), so `depends_on`
-  mostly cannot wait for real readiness.
-- **Single host, no HA** — every deploy and every crash is downtime.
-- **Default secrets boot silently.** `.env.example` ships
-  `AUTH_JWT_SECRET=change_me_please...`; nothing refuses to start if it is left
-  that way, which would make every session forgeable. A startup guard is cheap.
-- **No security headers** — no CSP, HSTS, `X-Frame-Options`,
-  `X-Content-Type-Options`.
-- **PayPal is in sandbox** (`PAYPAL_MODE=sandbox`): live credentials and a
-  re-registered webhook are needed before taking real money.
+The nginx config is split into four files so the HTTP and HTTPS gateways share
+the parts that matter: `nginx.conf` and `nginx-tls.conf` are just server blocks
+that both `include /etc/nginx/vibegis/server-settings.conf` and
+`locations.conf`, with `security-headers.conf` included from
+`server-settings.conf`. **The partials must be mounted at
+`/etc/nginx/vibegis/`, not `conf.d/`** — the nginx image includes `conf.d/*.conf`
+at http level, where a bare `location` is a syntax error.
 
-**Already documented above, restated here because they are release-blocking**
+## Production hardening — what is done
 
-- The `/mapserver` `/tiles/` `/features` authorization gap — session-gated
-  only, so any logged-in user who guesses a private layer's name can fetch its
-  tiles. `/pointclouds/` inherits exactly the same gap by construction.
+Every item here was verified against a running stack, not assumed.
+
+**Authorization.** `/distinct-values`, `/column-stats`, `/column-groupby`,
+`/table-count`, `/register-table` and both `/geoprocess` inputs used to take a
+raw `schema`/`table` from the query string, check it against a bare identifier
+regex, and never consult the ACL —
+`?schema=userdb&table=users&column=password_hash` returned bcrypt hashes to any
+logged-in viewer. They all go through `authorize_table()` now: `dwh` only
+(`QUERYABLE_SCHEMAS`), and a `visible_layers_for()` match unless the caller is
+privileged. `/tables` and `/layer-config`'s GETs are ACL-filtered the same way,
+and the tile/feature gap is closed as described under "Roles and tiers".
+
+**QGIS processing.** A parameter's kind now comes from the algorithm catalog,
+not from the shape it arrived in. Before, anything that was not
+`{"layer": "<name>"}` fell through to a scalar and was appended verbatim to the
+`qgis_process` argv, so `{"OVERLAY": "PG:host=postgis … tables=layer_grants|…"}`
+gave arbitrary GDAL datasource control with the worker's own database
+credential — and the same slot took `/vsicurl/http://…`, i.e. local file read
+and SSRF. `reject_datasource_scalar()` in *both* `app.py` and
+`qgis-processing/worker.py` rejects `PG:`, `/vsi`, `http://`, `https://` and
+leading `/` as a second line, and every parameter key is validated against the
+algorithm's own descriptor, advanced algorithms included, with `OUTPUT` kept
+server-owned throughout.
+
+**Least privilege in Postgres.** `mapserver`, `qgis-server`, `qgis-processing`
+and `featureserv` connect as `vibegis_render`, which has SELECT on `dwh` and
+nothing else — no DDL, no `configdb`, no `userdb`. Created by
+`postgis/initdb/07-roles.sql` on a fresh volume, `bin/migrate-roles.sql` on an
+existing one. The AI agent's `ai_readonly` role no longer gets `configdb` at
+all, and `run_select_query()` checks the relations the planner actually reads
+(`EXPLAIN (FORMAT JSON, VERBOSE true)` — `VERBOSE` is required or every relation
+comes back attributed to `public`) against the caller's visible layers.
+
+**Non-root containers.** `upload-api`, `qgis-processing`, `dagster`, `mapproxy`
+and `docker-stats-exporter` run as uid `APP_UID`:`APP_GID` (default 1001, the
+checkout's owner), set both as a build arg and as compose's `user:` so a
+different host uid can be fixed without a rebuild. Every service has
+`security_opt: [no-new-privileges:true]`, and the eleven that can consume real
+resources have `mem_limit`/`cpus`. Switching an existing install over needs
+`bash bin/fix-ownership.sh` once — the named volumes were created while those
+services still ran as root, and Docker only applies image ownership the first
+time a volume is created. The nginx containers (`gateway`, and the frontend
+under the production overlay) are the deliberate exception: nginx's master
+process is root by design and forks unprivileged workers itself.
+
+**Secrets.** `check_secrets()` runs at import time in `app.py` and refuses to
+boot if `AUTH_JWT_SECRET`, `AI_KEY_ENCRYPTION_SECRET`, `AI_READONLY_PG_PASSWORD`
+or `PGPASSWORD` is empty, still a `change_me` placeholder, or too short — naming
+the `.env` key in the error. Compose uses `${GRAFANA_ADMIN_PASSWORD:?…}` for the
+same reason. Mapfile and QGIS `CONNECTION` strings carry neither `user=` nor
+`password=`; both come from the reading container's `PGUSER`/`PGPASSWORD`.
+
+**The gateway.** TLS overlay with HSTS; `X-Content-Type-Options`,
+`X-Frame-Options: DENY`, `Referrer-Policy` and `server_tokens off` on every
+response; `limit_req` on `/login` (10r/m) and `/ai/` (30r/m) and `limit_conn` on
+the four upload routes; `MS_MAP_NO_PATH=1` plus an nginx `map=` rejection on
+`/mapserver` and a `MAP=` pattern check on `/qgis`, so neither renderer takes a
+client-controlled path (`/proc/self/environ` in those containers holds
+`PGPASSWORD`). The wildcard `Access-Control-Allow-Origin: *` is gone from the
+four static routes — they sit behind session auth and are same-origin.
+
+**Operations.** Every image is pinned in `.env.example` (by digest where there
+is no version tag), `dagster/requirements.txt` is fully pinned, seven services
+have healthchecks, and `bin/backup.sh` / `bin/restore.sh` cover `pg_dump -Fc`
+plus the file-backed state (`pointclouds/`, `mapserver/rasters/`, the
+machine-written `uploads.map` and `mapproxy.yaml`).
+
+## Still open before a real install
+
+**CSP is `Content-Security-Policy-Report-Only`, on purpose.** Cesium needs
+workers and blob URLs and the policy has not been validated against a real
+session yet. Watch the browser console on the production overlay, then flip it
+to enforcing.
+
+**Compliance is not started, deliberately.** The scope above is technical only.
+Once it is complete, the compliance track is the next piece of work: GDPR/DSGVO
+posture, a DPA with every subprocessor, retention and deletion policy, personal
+data in the Loki log store, account export and deletion, and ISO 27001 / TISAX
+readiness if a customer asks. None of it is built and none of it should be
+claimed.
+
+**Known-deferred technical items**, judged not to block a first install:
+
+- The 2 GB upload cap lives as five separate literals (four in
+  `nginx/locations.conf`, `MAX_BYTES` in `app.py`). Make it one env var, then
+  lower it.
+- Zip bombs: `read_vector()` and `extract_raster_zip()` reject zip-slip paths but
+  cap no *uncompressed* total. Needs a cumulative-bytes ceiling and a ratio check
+  before `extractall()`.
+- No statement timeouts on the query endpoints (`ai_agent.py` already sets one
+  for the agent and is the model).
+- No semaphore around the four upload handlers, each of which reads the whole
+  file into memory.
+- Raw driver exception strings still reach the client from two paths, leaking
+  internal schema and table names.
+- No session revocation: JWT-in-a-cookie with no server-side invalidation, so a
+  demotion or deletion takes up to 10h. A `token_version` column on
+  `userdb.users` checked in `require_login` is the cheap version.
+- `cqlCondition()` (`filter.ts`) interpolates a column name into CQL unquoted.
+  The XML path escapes it; only CQL is affected, and it is reachable in practice
+  only through the AI agent's `filter_layer` tool, whose `column` is not
+  validated against the layer's real columns the way the human UI is.
+- Dagster's GraphQL API has no authentication of its own and is reachable from
+  every container on the `vibegis` network. `/etl/run` itself is well-gated; the
+  exposure is lateral movement only.
+- pgAdmin runs with `PGADMIN_CONFIG_SERVER_MODE: "False"`, which disables its
+  login. It is loopback-bound behind the `tools` profile — never run that profile
+  on a shared host.
+- One uvicorn worker, with in-memory job state (`_watch_qgis_job`, ETL polling)
+  as the reason it cannot simply be scaled out. Moving that state to Postgres is
+  the prerequisite.
+- No CI, no tests, no linter. `npm run typecheck` is still the only check and it
+  is run by hand.
+- Single host, no HA — every deploy and every crash is downtime.
 
 ## Ideas not yet built
 

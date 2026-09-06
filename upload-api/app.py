@@ -68,7 +68,6 @@ from pythonjsonlogger import jsonlogger
 from sqlalchemy import create_engine, text
 
 import ai_agent
-import paypal
 import qgis_catalog
 
 # ---------------------------------------------------------------- logging
@@ -100,10 +99,53 @@ def _configure_logging() -> logging.Logger:
 
 log = _configure_logging()
 
-# Same convention the CORS origin below already uses — never trust
-# request.url for this: nginx proxies to upload-api on its own internal
-# address, not the browser-facing one PayPal needs to redirect back to.
-PUBLIC_BASE_URL = f"http://localhost:{os.environ.get('GATEWAY_PORT', '8080')}"
+# ------------------------------------------------------------ secret guard
+#
+# .env.example ships `change_me_please...` placeholders for every secret, and
+# nothing used to check them. An operator who copies the example and misses one
+# line gets a stack that boots and looks healthy while anyone who has seen this
+# repo can forge an admin session cookie. Refusing to start is the only failure
+# mode that cannot be missed.
+#
+# Only the secrets this process actually sees are checked here. Grafana's and
+# pgAdmin's own admin passwords live in their containers' environments and are
+# unset-defaultable (docker-compose.yml falls back to admin/admin for Grafana);
+# they are loopback-bound, and .env.example calls them out.
+_PLACEHOLDER_MARKERS = ("change_me", "change-me", "changeme", "please_use_a_long_random_string")
+
+# env var -> (the .env key an operator actually edits, minimum length).
+# 32 for anything cryptographic — .env.example documents `openssl rand -hex 32`
+# for all three. The database password is a password, not a key, so it gets a
+# password-shaped floor instead.
+_REQUIRED_SECRETS = {
+    "AUTH_JWT_SECRET": ("AUTH_JWT_SECRET", 32),
+    "AI_KEY_ENCRYPTION_SECRET": ("AI_KEY_ENCRYPTION_SECRET", 32),
+    "AI_READONLY_PG_PASSWORD": ("AI_READONLY_PG_PASSWORD", 32),
+    "PGPASSWORD": ("POSTGRES_PASSWORD", 12),
+}
+
+
+def check_secrets() -> None:
+    problems = []
+    for var, (env_key, min_len) in _REQUIRED_SECRETS.items():
+        value = os.environ.get(var, "")
+        lowered = value.lower()
+        if not value:
+            problems.append(f"{env_key} is not set")
+        elif any(marker in lowered for marker in _PLACEHOLDER_MARKERS):
+            problems.append(f"{env_key} is still the placeholder from .env.example")
+        elif len(value) < min_len:
+            problems.append(f"{env_key} is {len(value)} characters, needs at least {min_len}")
+    if problems:
+        raise RuntimeError(
+            "Refusing to start — insecure secrets in .env:\n  - "
+            + "\n  - ".join(problems)
+            + "\n\nGenerate each one with: openssl rand -hex 32"
+        )
+
+
+check_secrets()
+
 
 app = FastAPI()
 app.add_middleware(
@@ -498,6 +540,14 @@ JWT_ALG = "HS256"
 JWT_EXPIRY_SECONDS = 60 * 60 * 10  # 10h
 COOKIE_NAME = "vibegis_session"
 
+# Marks the session cookie Secure, so the browser never sends it over plain
+# HTTP. Defaults to on: an install that forgets to set it should fail closed
+# (the cookie simply is not sent) rather than leak sessions in the clear. Set
+# COOKIE_SECURE=false only for a local plain-HTTP dev stack reached by IP —
+# http://localhost is exempt from the Secure rule in every current browser, so
+# the default works for local development as it is.
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").strip().lower() not in ("0", "false", "no")
+
 
 def ensure_users_table() -> None:
     with engine().begin() as conn:
@@ -551,22 +601,12 @@ def ensure_users_table() -> None:
             "user_id bigint NOT NULL REFERENCES userdb.users(id) ON DELETE CASCADE, "
             "PRIMARY KEY (group_id, user_id))"
         ))
-        conn.execute(text("INSERT INTO configdb.groups (name) VALUES ('guests') ON CONFLICT DO NOTHING"))
         conn.execute(text(
             "CREATE TABLE IF NOT EXISTS configdb.layer_grants ("
             "id bigserial PRIMARY KEY, layer_name text NOT NULL, "
             "principal_type text NOT NULL CHECK (principal_type IN ('user', 'group')), "
             "principal_id bigint NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), "
             "UNIQUE (layer_name, principal_type, principal_id))"
-        ))
-        conn.execute(text(
-            "CREATE TABLE IF NOT EXISTS userdb.subscriptions ("
-            "id bigserial PRIMARY KEY, user_id bigint NOT NULL REFERENCES userdb.users(id) ON DELETE CASCADE, "
-            "tier text NOT NULL CHECK (tier IN ('pro', 'premium')), "
-            "paypal_subscription_id text UNIQUE, "
-            "status text NOT NULL CHECK (status IN ('pending', 'active', 'cancelled', 'suspended')), "
-            "current_period_end timestamptz, "
-            "created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now())"
         ))
 
 
@@ -613,10 +653,13 @@ class CreateUserBody(BaseModel):
     subscription_tier: Literal["free", "pro", "premium"] = "free"
 
 
-# Ranked so require_tier() can do a single numeric comparison. 'guest' is
-# never a value on a users row — see issue_guest_token() — but is ranked
-# here so the same TIER_RANK/require_tier() serves guest sessions too.
-TIER_RANK = {"guest": 0, "free": 1, "pro": 2, "premium": 3}
+# Ranked so require_tier() can do a single numeric comparison. There is no
+# 'guest' rank any more — self-service signup and anonymous guest sessions
+# were removed for the per-customer deployment model, so every session now
+# belongs to a real userdb.users row. An old cookie carrying tier 'guest'
+# falls through require_tier()'s `.get(..., -1)` and is denied, which is the
+# behaviour we want while those cookies expire.
+TIER_RANK = {"free": 1, "pro": 2, "premium": 3}
 
 
 def issue_token(user_id: int | str, username: str, role: str, tier: str) -> str:
@@ -656,9 +699,8 @@ def is_privileged_role(user: dict) -> bool:
 
 def require_tier(min_tier: str):
     """Admin/editor always pass regardless of tier; everyone else needs
-    TIER_RANK[their tier] >= TIER_RANK[min_tier]. A guest session's tier is
-    always 'guest' (rank 0), so this also gates guests out of anything
-    requiring at least 'free' — a guest is never treated as a free account."""
+    TIER_RANK[their tier] >= TIER_RANK[min_tier]. An unknown tier ranks -1
+    and is therefore denied."""
     def _dep(user: dict = Depends(require_login)) -> dict:
         if is_privileged_role(user):
             return user
@@ -682,10 +724,6 @@ def require_privileged(user: dict = Depends(require_login)) -> dict:
     return user
 
 
-def is_guest(user: dict) -> bool:
-    return user.get("tier") == "guest"
-
-
 @app.post("/login")
 def login(body: LoginBody, response: Response):
     with engine().begin() as conn:
@@ -700,7 +738,7 @@ def login(body: LoginBody, response: Response):
         raise HTTPException(401, "Ungültiger Benutzername oder Passwort")
     response.set_cookie(
         COOKIE_NAME, issue_token(row.id, row.username, row.role, row.subscription_tier),
-        httponly=True, secure=False, samesite="lax", path="/", max_age=JWT_EXPIRY_SECONDS,
+        httponly=True, secure=COOKIE_SECURE, samesite="lax", path="/", max_age=JWT_EXPIRY_SECONDS,
     )
     return {"username": row.username, "role": row.role, "tier": row.subscription_tier}
 
@@ -711,209 +749,198 @@ def logout(response: Response):
     return {"ok": True}
 
 
-@app.post("/guest-session")
-def guest_session(response: Response):
-    """No credentials, no userdb.users row at all — a synthetic identity
-    baked directly into the JWT. Same cookie mechanism as /login, just a
-    'guest' tier (rank 0, below 'free') and a role of 'viewer'. See
-    visible_layers_for() for what a guest actually gets to see."""
-    guest_id = f"guest-{uuid.uuid4().hex[:8]}"
-    response.set_cookie(
-        COOKIE_NAME, issue_token(guest_id, guest_id, "viewer", "guest"),
-        httponly=True, secure=False, samesite="lax", path="/", max_age=JWT_EXPIRY_SECONDS,
-    )
-    return {"username": guest_id, "role": "viewer", "tier": "guest"}
+# ------------------------------------------- per-layer gateway authorization
+#
+# nginx's auth_request used to ask only "is there a valid session", which meant
+# /mapserver, /tiles/, /features and /pointclouds/ served any layer to anyone
+# logged in — visible_layers_for() governed what /layers *offered*, not what
+# those backends would hand over to a caller who already knew a layer's name.
+# The gateway now forwards the original request URI (nginx.conf sets
+# X-Original-URI on the subrequest) and everything below decides, in one place,
+# which layers it names and whether this user may have them.
+#
+# Doing the parsing here rather than in nginx is deliberate: the layer arrives
+# in four different shapes across those four routes, and that is nginx rewrite
+# rules versus a readable Python function.
+
+_LAYER_QUERY_KEYS = {"layers", "layer", "query_layers", "typename", "typenames"}
+
+# Mapfiles that ship with the repo rather than being written by upload-api.
+# A layer defined in one of these has no layer_grants record and never can —
+# it is installer-curated base data (basemaps, reference layers), so it is
+# available to any session, which is exactly its status today. Both files are
+# currently free of LAYER blocks, so the set is empty and the check below is
+# strict; it exists so that adding a hand-authored base layer later does not
+# silently become a 403 nobody can explain.
+HAND_AUTHORED_MAPFILES = ("vibegis.map", "osm-layers.map")
+
+_LAYER_KEYWORD_RE = re.compile(r"^\s*LAYER\s*$", re.I)
+_LAYER_NAME_RE = re.compile(r'^NAME\s+"([^"]+)"', re.I)
 
 
-USERNAME_RE = re.compile(r"[a-zA-Z0-9_.-]{3,32}")
+def _layer_names_in(mapfile_text: str) -> set[str]:
+    """The first NAME inside each LAYER block. Not a full mapfile parse — a
+    LAYER's own NAME always precedes its CLASSes, which is all this needs."""
+    names: set[str] = set()
+    in_layer = False
+    for line in mapfile_text.splitlines():
+        stripped = line.strip()
+        if _LAYER_KEYWORD_RE.match(stripped):
+            in_layer = True
+            continue
+        if in_layer:
+            m = _LAYER_NAME_RE.match(stripped)
+            if m:
+                names.add(m.group(1))
+                in_layer = False
+    return names
 
 
-class RegisterBody(BaseModel):
-    username: str
-    password: str
-    email: str | None = None
-    tier: Literal["free", "pro", "premium"] = "free"
+def hand_authored_layers() -> set[str]:
+    out: set[str] = set()
+    for filename in HAND_AUTHORED_MAPFILES:
+        path = MAPFILE_DIR / filename
+        try:
+            out |= _layer_names_in(path.read_text())
+        except OSError:
+            continue
+    return out
 
 
-@app.post("/register")
-def register(body: RegisterBody):
-    """Self-service signup — always creates a 'viewer' account (self-signup
-    can never create an admin). 'free' is active immediately; 'pro'/'premium'
-    land on 'free' in enforcement terms until the PayPal webhook below
-    confirms the subscription actually activated — nothing paid is ever
-    granted on the strength of this request alone."""
-    username = body.username.strip()
-    if not USERNAME_RE.fullmatch(username):
-        raise HTTPException(400, "Benutzername: 3-32 Zeichen, Buchstaben/Ziffern/._-")
-    if len(body.password) < 8:
-        raise HTTPException(400, "Passwort: mindestens 8 Zeichen")
-    if body.tier in ("pro", "premium") and not body.email:
-        raise HTTPException(400, "E-Mail wird für kostenpflichtige Tarife benötigt")
-
-    pw_hash = bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode()
-    with engine().begin() as conn:
-        if conn.execute(text("SELECT 1 FROM userdb.users WHERE username = :u"), {"u": username}).first():
-            raise HTTPException(409, "Benutzername bereits vergeben")
-        user_id = conn.execute(
-            text(
-                "INSERT INTO userdb.users (username, password_hash, role, subscription_tier, email) "
-                "VALUES (:u, :p, 'viewer', 'free', :e) RETURNING id"
-            ),
-            {"u": username, "p": pw_hash, "e": body.email},
-        ).scalar_one()
-
-    if body.tier == "free":
-        return {"username": username, "tier": "free", "approveUrl": None}
-
-    # Registration is all-or-nothing: a PayPal failure here must not leave a
-    # signed-up account behind with no way to know its payment never
-    # started — delete what was just created rather than silently leaving
-    # them on 'free' with a confusing error.
-    try:
-        sub = paypal.create_subscription(
-            body.tier, body.email or "",
-            return_url=f"{PUBLIC_BASE_URL}/?paypal_return=1&tier={body.tier}",
-            cancel_url=f"{PUBLIC_BASE_URL}/?paypal_cancel=1",
-        )
-        approve_url = next((l["href"] for l in sub.get("links", []) if l.get("rel") == "approve"), None)
-        if not approve_url:
-            raise RuntimeError("PayPal did not return an approval link")
-    except RuntimeError as e:
-        with engine().begin() as conn:
-            conn.execute(text("DELETE FROM userdb.users WHERE id = :u"), {"u": user_id})
-        raise HTTPException(502, f"PayPal: {e}")
-
-    with engine().begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO userdb.subscriptions (user_id, tier, paypal_subscription_id, status) "
-                "VALUES (:u, :t, :p, 'pending')"
-            ),
-            {"u": user_id, "t": body.tier, "p": sub["id"]},
-        )
-
-    return {"username": username, "tier": "free", "approveUrl": approve_url}
+# One auth_request fires per tile, and this process runs a single uvicorn
+# worker (see the note above the upload routes) — resolving the ACL from
+# Postgres and the mapfile on every one of those would make the map slower than
+# it was before it was secure. Short TTL rather than a long one plus perfect
+# invalidation: 30s of stale visibility after an admin changes a grant is
+# acceptable, silently serving a revoked layer for an hour is not.
+VISIBILITY_TTL_SECONDS = 30
+_visibility_cache: dict[str, tuple[float, set[str], set[tuple[str, str]]]] = {}
+_visibility_lock = threading.Lock()
 
 
-class SubscriptionUpgradeBody(BaseModel):
-    tier: Literal["pro", "premium"]
+def invalidate_visibility_cache() -> None:
+    with _visibility_lock:
+        _visibility_cache.clear()
 
 
-@app.post("/subscription/upgrade")
-def upgrade_subscription(body: SubscriptionUpgradeBody, user: dict = Depends(require_login)):
-    """Same PayPal flow /register's paid-tier branch uses, for an existing
-    account instead of a brand-new one — the nag notification's CTA calls
-    this. Guest sessions have no userdb.users row to attach a subscription
-    to, so this 403s them (the frontend already only shows the nag's CTA to
-    a real account for exactly this reason, but this route enforces it
-    either way rather than trusting the client)."""
-    if is_guest(user):
-        raise HTTPException(403, "Gastzugänge können nicht upgraden — bitte zuerst ein Konto erstellen")
-    with engine().begin() as conn:
-        email = conn.execute(text("SELECT email FROM userdb.users WHERE id = :u"), {"u": int(user["sub"])}).scalar()
-    try:
-        sub = paypal.create_subscription(
-            body.tier, email or "",
-            return_url=f"{PUBLIC_BASE_URL}/?paypal_return=1&tier={body.tier}",
-            cancel_url=f"{PUBLIC_BASE_URL}/?paypal_cancel=1",
-        )
-    except RuntimeError as e:
-        raise HTTPException(502, f"PayPal: {e}")
-    approve_url = next((l["href"] for l in sub.get("links", []) if l.get("rel") == "approve"), None)
-    if not approve_url:
-        raise HTTPException(502, "PayPal did not return an approval link")
-    with engine().begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO userdb.subscriptions (user_id, tier, paypal_subscription_id, status) "
-                "VALUES (:u, :t, :p, 'pending')"
-            ),
-            {"u": int(user["sub"]), "t": body.tier, "p": sub["id"]},
-        )
-    return {"approveUrl": approve_url}
+def visible_layer_index(user: dict) -> tuple[set[str], set[tuple[str, str]]]:
+    """(layer names, {(schema, table)}) this user may see, memoized briefly.
+
+    The table set is what /features needs: pg_featureserv addresses a
+    collection as `schema.table`, not by layer name.
+    """
+    key = f"{user.get('sub')}|{user.get('role')}|{user.get('tier')}"
+    now = time.monotonic()
+    with _visibility_lock:
+        hit = _visibility_cache.get(key)
+        if hit is not None and hit[0] > now:
+            return hit[1], hit[2]
+
+    visible = visible_layers_for(user, all_layers())
+    names = {l["name"] for l in visible} | hand_authored_layers()
+    tables = {
+        (l["schema"], l["table"]) for l in visible if l.get("schema") and l.get("table")
+    }
+    with _visibility_lock:
+        _visibility_cache[key] = (now + VISIBILITY_TTL_SECONDS, names, tables)
+    return names, tables
 
 
-@app.post("/subscription/cancel")
-def cancel_subscription(user: dict = Depends(require_login)):
-    with engine().begin() as conn:
-        row = conn.execute(
-            text(
-                "SELECT paypal_subscription_id FROM userdb.subscriptions "
-                "WHERE user_id = :u AND status = 'active' ORDER BY created_at DESC LIMIT 1"
-            ),
-            {"u": int(user["sub"])},
-        ).first()
-    if not row:
-        raise HTTPException(404, "Kein aktives Abonnement gefunden")
-    try:
-        paypal.cancel_subscription(row.paypal_subscription_id)
-    except RuntimeError as e:
-        raise HTTPException(502, f"PayPal: {e}")
-    # The webhook (BILLING.SUBSCRIPTION.CANCELLED) is what actually flips
-    # subscription_tier back to 'free' — this just asks PayPal to cancel and
-    # reports the request went through, same "webhook is the only path that
-    # changes tier" rule /paypal/webhook documents.
-    return {"ok": True}
+def _query_layer_names(query_string: str) -> set[str]:
+    """Layer names named by a WMS/WFS query string — LAYERS/LAYER/QUERY_LAYERS
+    for WMS and WMTS, TYPENAME(S) for WFS, each comma-separated. Parameter
+    names are case-insensitive in OGC services, so match them lowercased."""
+    out: set[str] = set()
+    for key, values in urllib.parse.parse_qs(query_string, keep_blank_values=True).items():
+        if key.lower() not in _LAYER_QUERY_KEYS:
+            continue
+        for value in values:
+            for part in value.split(","):
+                part = part.strip()
+                if part:
+                    out.add(part)
+    return out
 
 
-@app.post("/paypal/webhook")
-async def paypal_webhook(request: Request):
-    """The only path that ever changes subscription_tier for a paid tier —
-    never the /register return-redirect, which only shows a "processing"
-    state (webhooks can arrive before or after the browser's own redirect
-    lands). Signature-verified via PayPal's own endpoint (paypal.py) before
-    anything in the body is trusted."""
-    raw_body = await request.body()
-    if not paypal.verify_webhook_signature(dict(request.headers), raw_body):
-        raise HTTPException(400, "Invalid webhook signature")
-    event = json.loads(raw_body)
-    event_type = event.get("event_type", "")
-    resource = event.get("resource", {})
-    paypal_subscription_id = resource.get("id")
-    if not paypal_subscription_id:
-        return {"ok": True}
+def authorize_gateway_request(original_uri: str, user: dict) -> None:
+    """403 unless every layer the original request names is one this user may
+    see. Silent (returns None) when the request names no layer at all.
 
-    with engine().begin() as conn:
-        sub_row = conn.execute(
-            text("SELECT user_id, tier FROM userdb.subscriptions WHERE paypal_subscription_id = :p"),
-            {"p": paypal_subscription_id},
-        ).first()
-        if not sub_row:
-            log.warning("paypal webhook for unknown subscription", extra={"paypal_subscription_id": paypal_subscription_id})
-            return {"ok": True}
+    Deliberately allowed through without naming a layer:
+      * GetCapabilities — the frontend builds its layer list from it. It still
+        lists every layer's *name*; the frontend intersects that with /layers,
+        and the data itself is now gated, so what leaks is a name, not content.
+        Filtering the capabilities XML per user would mean rewriting the
+        response body in this process on every call.
+      * /terrain/ and /3dtiles/ — single installation-wide assets with no
+        per-layer identity to check.
+      * /features/collections (the listing) and /features/functions/... (the
+        search function) — neither addresses a layer's data.
+    """
+    if not original_uri:
+        return
+    path, _, query_string = original_uri.partition("?")
 
-        if event_type == "BILLING.SUBSCRIPTION.ACTIVATED":
-            conn.execute(
-                text("UPDATE userdb.subscriptions SET status = 'active', updated_at = now() WHERE paypal_subscription_id = :p"),
-                {"p": paypal_subscription_id},
-            )
-            conn.execute(
-                text("UPDATE userdb.users SET subscription_tier = :t WHERE id = :u"),
-                {"t": sub_row.tier, "u": sub_row.user_id},
-            )
-        elif event_type in (
-            "BILLING.SUBSCRIPTION.CANCELLED", "BILLING.SUBSCRIPTION.EXPIRED", "BILLING.SUBSCRIPTION.SUSPENDED",
-        ):
-            status = "suspended" if event_type.endswith("SUSPENDED") else "cancelled"
-            conn.execute(
-                text("UPDATE userdb.subscriptions SET status = :s, updated_at = now() WHERE paypal_subscription_id = :p"),
-                {"s": status, "p": paypal_subscription_id},
-            )
-            conn.execute(
-                text("UPDATE userdb.users SET subscription_tier = 'free' WHERE id = :u"),
-                {"u": sub_row.user_id},
-            )
+    if path.startswith("/features"):
+        # /features/collections/<schema.table>/items -> the table behind it.
+        parts = [p for p in path.split("/") if p]
+        if len(parts) >= 3 and parts[1] == "collections":
+            collection = urllib.parse.unquote(parts[2])
+            schema, _, table = collection.partition(".")
+            if schema and table:
+                _, tables = visible_layer_index(user)
+                if (schema, table) not in tables:
+                    raise HTTPException(403, f"Kein Zugriff auf {collection}")
+        return
 
-    return {"ok": True}
+    if path.startswith("/pointclouds/"):
+        parts = [p for p in path.split("/") if p]
+        if len(parts) >= 2:
+            layer = urllib.parse.unquote(parts[1])
+            names, _ = visible_layer_index(user)
+            if layer not in names:
+                raise HTTPException(403, f"Kein Zugriff auf {layer}")
+        return
+
+    requested = _query_layer_names(query_string)
+    if not requested:
+        return
+    names, _ = visible_layer_index(user)
+    denied = sorted(requested - names)
+    if denied:
+        # A MapServer GROUP name lands here too: it is not a layer in
+        # all_layers(), so asking for LAYERS=uploads — which would render every
+        # uploaded layer at once — is denied rather than quietly honoured.
+        raise HTTPException(403, f"Kein Zugriff auf {', '.join(denied)}")
+
+
+# Any successful write to the ACL, the user table or the layer list can change
+# who may see what, so it drops the memoized visibility (see
+# visible_layer_index) rather than leaving the gateway to serve a revoked layer
+# until the TTL runs out. One middleware rather than a call at the end of seven
+# handlers: a route added later is covered without anyone remembering to.
+_ACL_MUTATING_PREFIXES = ("/groups", "/layer-grants", "/layers", "/users", "/layer-config")
+
+
+@app.middleware("http")
+async def drop_visibility_cache_on_acl_write(request: Request, call_next):
+    response = await call_next(request)
+    if request.method in ("POST", "PATCH", "PUT", "DELETE") and response.status_code < 400:
+        if request.url.path.startswith(_ACL_MUTATING_PREFIXES):
+            invalidate_visibility_cache()
+    return response
 
 
 @app.get("/auth/verify")
-def auth_verify(user: dict = Depends(require_login)):
-    # nginx's auth_request only cares about the status code — 200 here means
-    # "gateway may proxy the original request". Still purely "is there a
-    # valid session" — see CLAUDE.md's "Part 3" note on the WMS/tile
-    # enforcement gap: this does not (and structurally can't, from here)
-    # check per-layer grants.
+def auth_verify(request: Request, user: dict = Depends(require_login)):
+    """nginx's auth_request target. 200 means "gateway may proxy the original
+    request"; 401 means no session; 403 means the session is fine but this
+    user may not have the layer it asked for.
+
+    The layer check reads X-Original-URI, which nginx sets on the subrequest
+    from $request_uri — the client cannot supply it, since proxy_set_header
+    overwrites anything that arrived, and this location is `internal`."""
+    authorize_gateway_request(request.headers.get("X-Original-URI", ""), user)
     return Response(status_code=200)
 
 
@@ -1374,14 +1401,14 @@ def record_layer_owner(layer_name: str, user: dict) -> None:
             "INSERT INTO configdb.layer_owners (layer_name, owner_user_id) VALUES (:n, :u) "
             "ON CONFLICT (layer_name) DO UPDATE SET owner_user_id = EXCLUDED.owner_user_id"
         ), {"n": layer_name, "u": int(user_id)})
+    invalidate_visibility_cache()
 
 
 def visible_layers_for(user: dict, all_layers: list[dict]) -> list[dict]:
     """Admin/editor see everything — can't analyze or edit what you can't
-    see. A guest session (no userdb.users row at all) sees only what's
-    granted to the implicit 'guests' group. Everyone else sees what's
-    granted directly to their user id, unioned with whatever's granted to
-    any group they belong to, unioned with whatever they own
+    see. Everyone else sees what's granted directly to their user id,
+    unioned with whatever's granted to any group they belong to, unioned
+    with whatever they own
     (configdb.layer_owners — a Pro user obviously needs to see a layer the
     moment they publish it, not only once an admin grants it back to them).
     Reused by GET /layers and by the grants-admin screen's own listing."""
@@ -1389,36 +1416,74 @@ def visible_layers_for(user: dict, all_layers: list[dict]) -> list[dict]:
         return all_layers
     names = {l["name"] for l in all_layers}
     with engine().begin() as conn:
-        if is_guest(user):
-            granted = conn.execute(text(
+        granted = conn.execute(
+            text(
+                "SELECT layer_name FROM configdb.layer_grants "
+                "WHERE principal_type = 'user' AND principal_id = :uid "
+                "UNION "
                 "SELECT g.layer_name FROM configdb.layer_grants g "
-                "JOIN configdb.groups gr ON gr.id = g.principal_id AND g.principal_type = 'group' "
-                "WHERE gr.name = 'guests'"
-            )).scalars().all()
-        else:
-            granted = conn.execute(
-                text(
-                    "SELECT layer_name FROM configdb.layer_grants "
-                    "WHERE principal_type = 'user' AND principal_id = :uid "
-                    "UNION "
-                    "SELECT g.layer_name FROM configdb.layer_grants g "
-                    "JOIN configdb.group_members gm "
-                    "ON gm.group_id = g.principal_id AND g.principal_type = 'group' "
-                    "WHERE gm.user_id = :uid "
-                    "UNION "
-                    "SELECT layer_name FROM configdb.layer_owners WHERE owner_user_id = :uid"
-                ),
-                {"uid": int(user["sub"])},
-            ).scalars().all()
+                "JOIN configdb.group_members gm "
+                "ON gm.group_id = g.principal_id AND g.principal_type = 'group' "
+                "WHERE gm.user_id = :uid "
+                "UNION "
+                "SELECT layer_name FROM configdb.layer_owners WHERE owner_user_id = :uid"
+            ),
+            {"uid": int(user["sub"])},
+        ).scalars().all()
     granted_set = set(granted) & names
     return [l for l in all_layers if l["name"] in granted_set]
+
+
+# The only schema a request is ever allowed to name. Everything a user can
+# legitimately query lives in dwh; configdb (the ACL itself, layer config, CMS)
+# and userdb (accounts, password hashes, AI key ciphertext) are reachable only
+# through their own routes, which do their own checks. Without this, an
+# endpoint taking a schema/table pair is a read primitive over the whole
+# database — which is exactly what /distinct-values and /column-stats were.
+QUERYABLE_SCHEMAS = {"dwh"}
+
+
+def authorize_table(schema: str, table: str, user: dict) -> tuple[str, str]:
+    """Validate a client-supplied schema/table pair *and* check the caller may
+    actually read it. Returns the pair so call sites can use the result
+    directly and cannot accidentally keep using the unchecked input.
+
+    check_identifier() alone only proves a name is well-formed — it says
+    nothing about whose data it is. Every endpoint that takes a raw
+    schema/table pair must come through here instead, or it is a way to read
+    any table in the database with nothing but a session.
+
+    Authorization is "does this pair back a layer this user can see", resolved
+    through the same visible_layers_for() that governs the layer panel, so
+    there is one ACL rather than two that can drift. Admin/editor keep the
+    wider access they have everywhere else (is_privileged_role) — including
+    tables in dwh that back no layer yet, e.g. fresh ETL output.
+
+    resolve_layer_source() is the same check from the other direction, for
+    routes whose client already sends a layer *name* (the QGIS routes). Both
+    exist on purpose: this one keeps the schema/table wire contract the
+    filter/classify/dashboard endpoints have always had, so closing the hole
+    needed no frontend change and no new failure mode in those paths.
+    """
+    schema = check_identifier(schema, "schema name")
+    table = check_identifier(table, "table name")
+    if schema not in QUERYABLE_SCHEMAS:
+        raise HTTPException(403, f"Schema nicht abfragbar: {schema}")
+    if is_privileged_role(user):
+        return schema, table
+    if not any(
+        l.get("schema") == schema and l.get("table") == table
+        for l in visible_layers_for(user, all_layers())
+    ):
+        raise HTTPException(403, f"Kein Zugriff auf {schema}.{table}")
+    return schema, table
 
 
 def require_owner_or_admin(layer_name: str, user: dict) -> None:
     """Admin/editor always pass. Otherwise the caller must be pro+ (checked
     by the route's own require_tier dependency already) *and* own this
-    specific layer — a guest/free user never reaches here at all since they
-    can't pass require_tier("pro") in the first place."""
+    specific layer — a free user never reaches here at all since they can't
+    pass require_tier("pro") in the first place."""
     if is_privileged_role(user):
         return
     with engine().begin() as conn:
@@ -1517,10 +1582,15 @@ def build_layer_block(
         "  STATUS      ON\n"
         f"{scale}"
         "  CONNECTIONTYPE POSTGIS\n"
-        # No password= here on purpose: the mapfile is committed to git, and
-        # libpq fills the password in from PGPASSWORD, which compose already
-        # sets on the mapserver container.
-        f'  CONNECTION  "host={e["host"]} dbname={e["dbname"]} user={e["user"]} port=5432"\n'
+        # Neither password= nor user= here, on purpose. The mapfile is
+        # committed to git, so the password has always come from PGPASSWORD on
+        # whichever container reads it; the *user* is omitted for a second
+        # reason — this file is written by upload-api, which connects as the
+        # owner, but it is read by mapserver, which connects as the read-only
+        # vibegis_render role. Naming a user here would pin every layer to
+        # whoever generated the block and undo that split. libpq takes both
+        # from the reading container's PGUSER/PGPASSWORD.
+        f'  CONNECTION  "host={e["host"]} dbname={e["dbname"]} port=5432"\n'
         f'  DATA        "{geom_col} FROM {schema}.{table} USING UNIQUE {unique_col} USING SRID={srid}"\n'
         '  PROCESSING  "CLOSE_CONNECTION=DEFER"\n'
         "  PROJECTION\n"
@@ -2796,8 +2866,7 @@ def distinct_values(schema: str, table: str, column: str, user: dict = Depends(r
     and fast regardless of table size. Capped at DISTINCT_VALUES_LIMIT —
     `truncated` tells the frontend there may be more.
     """
-    schema = check_identifier(schema, "schema name")
-    table = check_identifier(table, "table name")
+    schema, table = authorize_table(schema, table, user)
     column = check_identifier(column, "column name")
 
     with engine().begin() as conn:
@@ -2828,8 +2897,7 @@ def column_stats(
     all of this to that layer's active attribute filter instead of the whole
     table — see build_filter_where().
     """
-    schema = check_identifier(schema, "schema name")
-    table = check_identifier(table, "table name")
+    schema, table = authorize_table(schema, table, user)
     column = check_identifier(column, "column name")
 
     params: dict = {}
@@ -2905,8 +2973,7 @@ def column_groupby(
     here rather than trusting the frontend, since a raw SUM() on a text
     column is a Postgres error, not a 0.
     """
-    schema = check_identifier(schema, "schema name")
-    table = check_identifier(table, "table name")
+    schema, table = authorize_table(schema, table, user)
     columns = [check_identifier(c.strip(), "column name") for c in column.split(",") if c.strip()]
     if not columns:
         raise HTTPException(400, "column is required")
@@ -2982,8 +3049,7 @@ def table_count(schema: str, table: str, filter: str | None = None, user: dict =
     when given, scopes the count to that layer's active attribute filter —
     see build_filter_where().
     """
-    schema = check_identifier(schema, "schema name")
-    table = check_identifier(table, "table name")
+    schema, table = authorize_table(schema, table, user)
 
     params: dict = {}
     where = build_filter_where(parse_layer_filter(filter), params)
@@ -2996,7 +3062,11 @@ def table_count(schema: str, table: str, filter: str | None = None, user: dict =
 
 
 @app.get("/tables")
-def list_tables(user: dict = Depends(require_login)):
+def list_tables(user: dict = Depends(require_privileged)):
+    """Every registerable table in the database — admin/editor only, for the
+    same reason POST /register-table is: this enumerates the whole instance,
+    including tables behind someone else's grants, and it is the picker for
+    a route only they can call."""
     with engine().begin() as conn:
         rows = conn.execute(
             text(
@@ -3023,9 +3093,21 @@ def list_tables(user: dict = Depends(require_login)):
 
 
 @app.post("/register-table")
-def register_table(body: RegisterTableBody, user: dict = Depends(require_tier("pro"))):
+def register_table(body: RegisterTableBody, user: dict = Depends(require_privileged)):
+    """Publish a table that is already in the database.
+
+    require_privileged (admin/editor), not require_tier("pro"): the table
+    named here is by definition not yet a layer, so there is no grant to
+    check it against — authorize_table() has nothing to resolve. Anyone who
+    could call this could publish any table in dwh as a layer visible to
+    themselves, which is the same ACL bypass /geoprocess had. Publishing
+    *your own* upload is unaffected: /upload owns that path end to end and
+    still only needs pro.
+    """
     schema = check_identifier(body.schema_name, "schema name")
     table = check_identifier(body.table, "table name")
+    if schema not in QUERYABLE_SCHEMAS:
+        raise HTTPException(403, f"Schema nicht abfragbar: {schema}")
     return publish_derived_table(schema, table, body.title, user)
 
 
@@ -3061,8 +3143,11 @@ def _execute_geoprocess(body: GeoprocessBody, user: dict) -> dict:
     function, so there is exactly one implementation of "run a geoprocess
     operation" regardless of which entry point triggered it.
     """
-    schema_a = check_identifier(body.schema_a, "schema name")
-    table_a = check_identifier(body.table_a, "table name")
+    # Both inputs go through authorize_table(), not bare check_identifier():
+    # this route used to accept any well-formed schema/table pair, which let
+    # anyone past its tier gate read a table behind someone else's
+    # layer_grants ACL — or a table in configdb entirely.
+    schema_a, table_a = authorize_table(body.schema_a, body.table_a, user)
     geom_a, _ = find_geometry_column(schema_a, table_a)
     family_a = geometry_family_for_table(schema_a, table_a, geom_a)
 
@@ -3070,8 +3155,7 @@ def _execute_geoprocess(body: GeoprocessBody, user: dict) -> dict:
     if body.operation in ("intersect", "join"):
         if not body.schema_b or not body.table_b:
             raise HTTPException(400, "schema_b/table_b required for this operation")
-        schema_b = check_identifier(body.schema_b, "schema name")
-        table_b = check_identifier(body.table_b, "table name")
+        schema_b, table_b = authorize_table(body.schema_b, body.table_b, user)
         geom_b, _ = find_geometry_column(schema_b, table_b)
         family_b = geometry_family_for_table(schema_b, table_b, geom_b)
         if body.operation == "intersect" and family_a != family_b:
@@ -3322,12 +3406,22 @@ def write_layer_config(config: dict) -> None:
 
 @app.get("/layer-config")
 def get_all_layer_configs(user: dict = Depends(require_login)):
-    """Every layer's config in one call, so the frontend doesn't fetch per-layer on every load()."""
-    return read_layer_config()
+    """Every *visible* layer's config in one call, so the frontend doesn't
+    fetch per-layer on every load().
+
+    Filtered through visible_layers_for() like /layers is. Unfiltered, this
+    handed any logged-in user the classification state of every layer in the
+    instance — the styling column names, break values and titles that
+    /layers deliberately withholds for a layer they were never granted."""
+    config = read_layer_config()
+    visible = {l["name"] for l in visible_layers_for(user, all_layers())}
+    return {name: entry for name, entry in config.items() if name in visible}
 
 
 @app.get("/layer-config/{name}")
 def get_layer_config(name: str, user: dict = Depends(require_login)):
+    if not any(l["name"] == name for l in visible_layers_for(user, all_layers())):
+        raise HTTPException(404, f"Layer nicht gefunden oder nicht freigegeben: {name}")
     return read_layer_config().get(name, {})
 
 
@@ -3394,9 +3488,6 @@ def delete_layer_config_key(name: str, key: str, user: dict = Depends(require_ti
 # The per-user/group ACL backing visible_layers_for(). Admin-only, plain CRUD
 # over configdb.groups/group_members/layer_grants — same check_identifier-
 # style validation and engine()/text() idiom as everywhere else in this file.
-# 'guests' (seeded by ensure_users_table()) is what a guest session's
-# visibility resolves against; it can be granted layers like any other group
-# but should not be deleted (nothing stops it structurally — see GroupsAdmin.tsx).
 
 class GroupBody(BaseModel):
     name: str
@@ -3514,6 +3605,16 @@ def delete_layer_grant(grant_id: int, user: dict = Depends(require_role("admin")
 # page ("handbook") every fresh install is seeded with — see
 # postgis/initdb/01-extensions.sql / bin/migrate-schemas.sql — not special
 # beyond that; an admin can create/delete any number of others.
+#
+# `admin_only` hides a page from anyone but role == "admin" — deliberately
+# the strict admin check, not is_privileged_role()/require_privileged(), the
+# same way /users and /groups are: this is for internal/operational content
+# (the "architecture" page), not general content editing, so editor does not
+# get a pass here the way it does elsewhere. Enforced in every read AND
+# write route, not just filtered out of the list — otherwise an editor who
+# already knows or guesses a hidden slug could still PATCH/DELETE/fetch it
+# directly. A non-admin request for a hidden page 404s exactly like an
+# unknown slug would, rather than 403ing, so its existence isn't disclosed.
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -3533,6 +3634,7 @@ class CmsPageCreate(BaseModel):
     title_en: str = ""
     body_de: str = ""
     body_en: str = ""
+    admin_only: bool = False
 
 
 class CmsContentPatch(BaseModel):
@@ -3540,17 +3642,21 @@ class CmsContentPatch(BaseModel):
     title_en: str | None = None
     body_de: str | None = None
     body_en: str | None = None
+    admin_only: bool | None = None
 
 
 @app.get("/cms")
 def list_cms_pages(user: dict = Depends(require_login)):
-    """Every page's metadata (no body — kept light for a picker list), newest-edited first."""
+    """Every page's metadata (no body — kept light for a picker list), newest-edited
+    first. A page flagged admin_only is omitted entirely for anyone but an admin."""
     with engine().begin() as conn:
         rows = conn.execute(
             text(
-                "SELECT slug, title_de, title_en, updated_at "
-                "FROM configdb.pages ORDER BY updated_at DESC"
-            )
+                "SELECT slug, title_de, title_en, updated_at, admin_only "
+                "FROM configdb.pages WHERE admin_only = false OR :is_admin "
+                "ORDER BY updated_at DESC"
+            ),
+            {"is_admin": user.get("role") == "admin"},
         ).mappings().all()
     return [dict(r) for r in rows]
 
@@ -3566,62 +3672,79 @@ def create_cms_page(body: CmsPageCreate, user: dict = Depends(require_privileged
             raise HTTPException(status_code=409, detail="Seite existiert bereits")
         row = conn.execute(
             text(
-                "INSERT INTO configdb.pages (slug, title_de, title_en, body_de, body_en, updated_by) "
-                "VALUES (:s, :td, :te, :bd, :be, :by) "
-                "RETURNING slug, title_de, title_en, body_de, body_en, updated_at"
+                "INSERT INTO configdb.pages (slug, title_de, title_en, body_de, body_en, admin_only, updated_by) "
+                "VALUES (:s, :td, :te, :bd, :be, :ao, :by) "
+                "RETURNING slug, title_de, title_en, body_de, body_en, admin_only, updated_at"
             ),
             {
                 "s": slug, "td": body.title_de, "te": body.title_en,
-                "bd": body.body_de, "be": body.body_en, "by": user["username"],
+                "bd": body.body_de, "be": body.body_en, "ao": body.admin_only, "by": user["username"],
             },
         ).mappings().first()
     return dict(row)
 
 
+def _cms_row_or_404(conn, slug: str, user: dict):
+    row = conn.execute(
+        text(
+            "SELECT slug, title_de, title_en, body_de, body_en, admin_only, updated_at "
+            "FROM configdb.pages WHERE slug = :s"
+        ),
+        {"s": slug},
+    ).mappings().first()
+    if not row or (row["admin_only"] and user.get("role") != "admin"):
+        raise HTTPException(status_code=404, detail="Unbekannte Seite")
+    return row
+
+
 @app.get("/cms/{slug}")
 def get_cms_content(slug: str, user: dict = Depends(require_login)):
     with engine().begin() as conn:
-        row = conn.execute(
-            text(
-                "SELECT slug, title_de, title_en, body_de, body_en, updated_at "
-                "FROM configdb.pages WHERE slug = :s"
-            ),
-            {"s": slug},
-        ).mappings().first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Unbekannte Seite")
+        row = _cms_row_or_404(conn, slug, user)
     return dict(row)
 
 
 @app.patch("/cms/{slug}")
 def patch_cms_content(slug: str, patch: CmsContentPatch, user: dict = Depends(require_privileged)):
     updates = patch.model_dump(exclude_unset=True)
-    if not updates:
-        return get_cms_content(slug, user)
-    set_clause = ", ".join(f"{k} = :{k}" for k in updates)
     with engine().begin() as conn:
+        existing = _cms_row_or_404(conn, slug, user)
+        if not updates:
+            return dict(existing)
+        set_clause = ", ".join(f"{k} = :{k}" for k in updates)
         row = conn.execute(
             text(
                 f"UPDATE configdb.pages SET {set_clause}, updated_at = now(), updated_by = :by "
                 "WHERE slug = :s "
-                "RETURNING slug, title_de, title_en, body_de, body_en, updated_at"
+                "RETURNING slug, title_de, title_en, body_de, body_en, admin_only, updated_at"
             ),
             {**updates, "by": user["username"], "s": slug},
         ).mappings().first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Unbekannte Seite")
     return dict(row)
 
 
 @app.delete("/cms/{slug}")
 def delete_cms_page(slug: str, user: dict = Depends(require_privileged)):
     with engine().begin() as conn:
+        _cms_row_or_404(conn, slug, user)
         row = conn.execute(
             text("DELETE FROM configdb.pages WHERE slug = :s RETURNING slug"), {"s": slug}
         ).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Unbekannte Seite")
-    return {"deleted": slug}
+    return {"deleted": row[0]}
+
+
+@app.get("/healthz")
+def healthz():
+    """Liveness only, for the container healthcheck — deliberately
+    unauthenticated and deliberately empty of detail.
+
+    /health below reports the mapfile mount and other internals and needs a
+    session for it; a Docker healthcheck has no cookie, so it needs its own
+    endpoint. There is no nginx `location` for this one, so it is reachable
+    only from inside the container (a healthcheck runs there), and even if it
+    were exposed it says nothing an attacker does not already know from the
+    fact that the site answered."""
+    return {"ok": True}
 
 
 @app.get("/health")
@@ -3760,10 +3883,19 @@ def delete_ai_key(user: dict = Depends(require_etl_access)):
 def ai_chat(body: AiChatBody, user: dict = Depends(require_etl_access)):
     provider, ciphertext = _load_user_ai_key(user)
     api_key = ai_agent.decrypt_key(ciphertext)
-    # The only app.py internals a tool call needs — kept to this one
-    # identifier-sanitizer rather than handing ai_agent.py the full-access
-    # engine(), since every DB read tool uses its own ai_readonly_engine().
-    tool_context = {"check_identifier": check_identifier}
+    # The only app.py internals a tool call needs — the identifier sanitizer
+    # and this caller's layer ACL. Deliberately not the full-access engine():
+    # every DB read tool uses its own ai_readonly_engine().
+    #
+    # None means "no restriction" for admin/editor, matching what
+    # is_privileged_role() means everywhere else. For everyone else the agent's
+    # reads are narrowed to the tables behind the layers they were granted —
+    # the ai_readonly role holds SELECT on all of dwh, which is coarser than
+    # the ACL every other read path enforces.
+    tool_context = {
+        "check_identifier": check_identifier,
+        "allowed_tables": None if is_privileged_role(user) else visible_layer_index(user)[1],
+    }
     return ai_agent.run_agent_turn(
         provider=provider,
         api_key=api_key,
@@ -3886,8 +4018,8 @@ def ensure_qgis_jobs_table() -> None:
         conn.execute(text(
             "CREATE TABLE IF NOT EXISTS configdb.qgis_jobs ("
             "  job_id text PRIMARY KEY,"
-            # text, not an int FK: a guest session has a synthetic identity and
-            # no userdb.users row at all (see issue_guest_token()).
+            # text rather than an int FK to userdb.users: this predates the
+            # removal of guest sessions and there is no reason to migrate it.
             "  user_id text NOT NULL,"
             "  algorithm text NOT NULL,"
             "  status text NOT NULL,"
@@ -4041,30 +4173,85 @@ def qgis_algorithm_detail(alg_id: str, user: dict = Depends(require_tier("premiu
     }
 
 
+# A scalar parameter is appended verbatim to the qgis_process argv on the
+# worker, and qgis_process hands anything that looks like a datasource to
+# GDAL/OGR. So a bare string in a parameter slot could be a `PG:` DSN (read any
+# table the worker's own credential can reach, straight past layer_grants), a
+# local path, or a /vsicurl/ URL (local file read and SSRF from inside the
+# network). Layer-typed parameters are resolved from a layer *name* instead and
+# never reach the argv, so this only has to catch a scalar pretending to be one.
+_DATASOURCE_PREFIXES = (
+    "pg:", "/vsi", "http://", "https://", "ftp://", "file://", "gdal:", "ogr:",
+    "wfs:", "wms:", "mysql:", "oci:", "odbc:", "mongodb", "postgresql:",
+)
+
+
+def reject_datasource_scalar(key: str, value) -> None:
+    """A scalar parameter must not be a datasource string. Applied to strings
+    inside lists too, since the worker joins a list with commas into one
+    argv element."""
+    values = value if isinstance(value, list) else [value]
+    for v in values:
+        if not isinstance(v, str):
+            continue
+        probe = v.strip().lower()
+        if probe.startswith(_DATASOURCE_PREFIXES) or probe.startswith("/"):
+            raise HTTPException(400, f"Parameter {key}: Datenquellen-Angaben sind nicht erlaubt")
+
+
+def qgis_algorithm_params(alg_id: str) -> dict[str, qgis_catalog.Param]:
+    """Every parameter this algorithm actually accepts, keyed by name — the
+    same list the frontend renders its form from, so the two cannot disagree.
+
+    Curated algorithms answer from the in-process catalog; anything else is
+    introspected from the worker. Introspection already drops destination
+    parameters (param_from_introspection() returns None for them), which is
+    what keeps OUTPUT server-owned in both branches.
+
+    This is the allowlist. Previously only *curated* algorithms had their
+    parameter keys checked, so for the ~300 advanced ones every key a client
+    sent was passed through untouched.
+    """
+    curated = qgis_catalog.CURATED_BY_ID.get(alg_id)
+    if curated is not None:
+        return {p.key: p for p in qgis_catalog.curated_params(curated)}
+    detail = qgis_worker("GET", f"/algorithms/{alg_id}", timeout=60)
+    if not qgis_catalog.supports_algorithm(detail):
+        raise HTTPException(400, f"Algorithmus wird nicht unterstützt: {alg_id}")
+    return {p.key: p for p in qgis_catalog.advanced_params(detail)}
+
+
 @app.post("/qgis-process/run")
 def qgis_run(body: QgisRunBody, user: dict = Depends(require_tier("premium"))):
     check_qgis_work_volume()
     check_algorithm_id(body.algorithm)
 
-    curated = qgis_catalog.CURATED_BY_ID.get(body.algorithm)
-    if curated is not None:
-        known = {p.key for p in qgis_catalog.curated_params(curated)}
-        unknown = set(body.params) - known
-        if unknown:
-            raise HTTPException(400, f"Unbekannte Parameter: {sorted(unknown)}")
+    known = qgis_algorithm_params(body.algorithm)
+    unknown = set(body.params) - set(known)
+    if unknown:
+        raise HTTPException(400, f"Unbekannte Parameter: {sorted(unknown)}")
 
     schema_a, table_a = resolve_layer_source(body.layer, user)
 
-    # Every layer-valued parameter is resolved the same way, so a second input
-    # can no more reach an ungranted table than the first can.
+    # A parameter's kind comes from the catalog, never from the shape the
+    # client happened to send. That distinction is the whole fix: this loop
+    # used to treat anything that was not a {"layer": name} dict as a scalar,
+    # so sending a plain string in a layer slot skipped resolve_layer_source()
+    # entirely and handed the worker a datasource string to open with its own
+    # credential — every layer_grants ACL bypassed in one request.
     worker_params: dict[str, dict] = {
         "INPUT": {"type": "pgtable", "schema_name": schema_a, "table": table_a}
     }
     for key, value in body.params.items():
-        if isinstance(value, dict) and "layer" in value:
+        if known[key].kind == "layer":
+            if not isinstance(value, dict) or "layer" not in value:
+                raise HTTPException(400, f"Parameter {key} erwartet einen Layer-Namen")
             schema_b, table_b = resolve_layer_source(value["layer"], user)
             worker_params[key] = {"type": "pgtable", "schema_name": schema_b, "table": table_b}
         else:
+            if isinstance(value, dict):
+                raise HTTPException(400, f"Parameter {key} erwartet keinen Layer")
+            reject_datasource_scalar(key, value)
             worker_params[key] = {"type": "scalar", "value": value}
 
     job_id = uuid.uuid4().hex

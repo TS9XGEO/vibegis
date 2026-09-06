@@ -32,3 +32,10 @@ npm-debug.log*
 # Python
 __pycache__/
 *.pyc
+
+# TLS certificates for the production gateway (see nginx/nginx-tls.conf).
+nginx/tls/*
+!nginx/tls/.gitkeep
+
+# Local backups taken by bin/backup.sh — never in git.
+backups/

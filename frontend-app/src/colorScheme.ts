@@ -52,12 +52,6 @@ export function authGradient(scheme: Scheme): string {
     : 'linear-gradient(135deg, #eefdfa, #fff8e6, #eefdfa)'
 }
 
-/** Faint animated tech grid, layered under the content as a separate element. */
-export function authGrid(scheme: Scheme): string {
-  const line = scheme === 'dark' ? 'rgba(45,212,191,0.08)' : 'rgba(15,118,110,0.09)'
-  return `linear-gradient(${line} 1px, transparent 1px), linear-gradient(90deg, ${line} 1px, transparent 1px)`
-}
-
 /** Two-tone glow — a teal halo plus a faint amber one layered behind it,
  * echoing accentEdge()'s gradient rather than a single flat color. */
 export function authGlow(scheme: Scheme): string {

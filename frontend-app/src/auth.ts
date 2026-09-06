@@ -1,27 +1,24 @@
 /**
  * Login/session state. The session itself is an httpOnly cookie set by
- * upload-api's /login, /guest-session or /register (paid tiers land here
- * only after PayPal confirms — see App.tsx's return-redirect handling) —
- * this store just tracks who (if anyone) it belongs to. No token is ever
- * held here; a plain fetch() already carries the cookie since everything is
- * same-origin (see nginx.conf).
+ * upload-api's /login — the only way into this app; accounts are created by
+ * an admin (UserAdmin.tsx or bin/add-user.sh), there is no self-service
+ * signup and no anonymous guest session. This store just tracks who (if
+ * anyone) the cookie belongs to. No token is ever held here; a plain fetch()
+ * already carries the cookie since everything is same-origin (see
+ * nginx.conf).
  */
 import { create } from 'zustand'
 
 export const USERS_URL = '/users'
 export const ETL_URL = '/etl/run'
 export const ETL_JOBS_URL = '/etl/jobs'
-export const GUEST_SESSION_URL = '/guest-session'
-export const REGISTER_URL = '/register'
-export const SUBSCRIPTION_CANCEL_URL = '/subscription/cancel'
-
-export type Tier = 'guest' | 'free' | 'pro' | 'premium'
+export type Tier = 'free' | 'pro' | 'premium'
 /** Numeric rank so "does this user meet tier X" is one comparison —
  * mirrors upload-api/app.py's TIER_RANK exactly, keep the two in sync. */
-export const TIER_RANK: Record<Tier, number> = { guest: 0, free: 1, pro: 2, premium: 3 }
+export const TIER_RANK: Record<Tier, number> = { free: 1, pro: 2, premium: 3 }
 
 export function meetsTier(userTier: Tier | undefined, min: Tier): boolean {
-  return TIER_RANK[userTier ?? 'guest'] >= TIER_RANK[min]
+  return TIER_RANK[userTier ?? 'free'] >= TIER_RANK[min]
 }
 
 export type Role = 'admin' | 'editor' | 'viewer'
@@ -60,7 +57,6 @@ interface AuthState {
   farewell: string | null
   fetchMe: () => Promise<void>
   login: (username: string, password: string) => Promise<void>
-  continueAsGuest: () => Promise<void>
   logout: () => Promise<void>
   clearFarewell: () => void
 }
@@ -91,21 +87,6 @@ export const useAuth = create<AuthState>((set, get) => ({
       const body = await res.json().catch(() => null)
       if (!res.ok) {
         set({ error: body?.detail ?? `Anmeldung fehlgeschlagen: HTTP ${res.status}` })
-        return
-      }
-      set({ user: body, error: null })
-    } catch (e) {
-      set({ error: e instanceof Error ? e.message : String(e) })
-    }
-  },
-
-  continueAsGuest: async () => {
-    set({ error: null })
-    try {
-      const res = await fetch(GUEST_SESSION_URL, { method: 'POST' })
-      const body = await res.json().catch(() => null)
-      if (!res.ok) {
-        set({ error: body?.detail ?? `HTTP ${res.status}` })
         return
       }
       set({ user: body, error: null })

@@ -31,47 +31,133 @@ uvicorn handles requests concurrently.
 
 ## Endpoints
 
-| Route | Line | Does |
+The gate column is the actual `Depends(...)` on the route, not a line number —
+line numbers go stale on every edit and the gate is what you need to know.
+`require_privileged` is admin *or* editor; `require_tier(x)` is bypassed
+entirely by `is_privileged_role()`.
+
+| Route | Gate | Does |
 |---|---|---|
-| `POST /upload` | 1254 | file → table in schema `dwh` → `LAYER` block appended. Accepts either a `file`, or `upload_token` + `layer` to finish a pending multi-layer choice (see below) |
-| `POST /upload-raster` | admin-only | GeoTIFF → reprojected/tiled/overviewed via GDAL CLI → `TYPE RASTER` `LAYER` block, no PostGIS table involved |
-| `POST /upload-raster-zip` | admin-only | zip of single-band rasters (e.g. a Sentinel-2 product) → every readable band published as its own layer immediately, no picker; `title` names the whole batch (falls back to the zip's filename), not any one band. Each band's own title/layer-name comes from `band_label()` — GDAL's band description or a handful of common band-identifying metadata keys (e.g. `BANDNAME`) — falling back to that band file's own name when GDAL reports neither; `/upload-raster` uses the same `band_label()` fallback ahead of the filename when no `title` is given |
-| `POST /raster-composite` | admin-only | combine three already-published single-band raster layers into one RGB layer — a VRT, not a new reprojection pass |
-| `POST /upload-pointcloud` | pro+ | LAS/LAZ → Cesium 3D Tiles via py3dtiles → a row in `configdb.point_clouds`. No PostGIS table *and* no MapServer layer — see the point-cloud contract below |
-| `POST /register-table` | 2052 | publish a table that already exists |
-| `POST /geoprocess` | admin-only | buffer/dissolve/intersect/join against published layers, publishes the result as a new layer via `publish_derived_table()` |
-| `GET /tables` | 2025 | tables available to register |
-| `GET /layers`, `DELETE /layers/{name}?drop_table=` | 2201 | list / unpublish — for a raster layer, `drop_table=true` deletes the underlying `.tif` instead of dropping a table |
-| `GET /distinct-values` | 1885 | value list for the filter and categorized editor (caps at 500) |
-| `GET /column-stats` | 1912 | min/max/sum/avg/count of a numeric column — min/max seed the graduated editor, the rest back the dashboard's "everything selected" overview |
-| `GET /column-groupby` | 1954 | value+count per distinct value, capped like `/distinct-values` plus an exact `totalCount` — the dashboard overview's server-side group-by, no in-memory features to aggregate over client-side there |
-| `GET /table-count` | 2002 | plain row count for a schema.table — the overview's headline number per layer |
-| `GET|PATCH|DELETE /layer-config[/{name}]` | 2331 | per-layer classification state — now backed by `configdb.layer_config` (see below), not a JSON file, but the external contract is unchanged |
-| `GET /cms` | 2434 | any logged-in user; every page's `{slug, title_de, title_en, updated_at}` (no body — kept light for the picker list in `Pages.tsx`) |
-| `POST /cms` | 2447 | admin-only; create a new page — `slug` validated by `check_slug()` (lowercase/digits/`_`/`-`, ≤64 chars), 409 if it already exists |
-| `GET /cms/{slug}` | 2470 | any logged-in user; one page's full content from `configdb.pages` |
-| `PATCH /cms/{slug}` | 2485 | admin-only; `Pages.tsx`'s editor writes here |
-| `DELETE /cms/{slug}` | 2505 | admin-only |
-| `GET /qgis-process/algorithms` | end of file | premium; curated catalog, `?advanced=true` appends the full introspected one |
-| `GET /qgis-process/algorithms/{id}` | end of file | premium; one algorithm's parameters, curated or translated from `qgis_process help --json` into the same shape |
-| `POST /qgis-process/run` | end of file | premium; validates, inserts a `configdb.qgis_jobs` row, starts a watcher thread, returns `{jobId, status}` |
-| `GET /qgis-process/run/{job_id}` | end of file | premium; poll one job — 404s someone else's unless `is_privileged_role()` |
-| `GET /qgis-process/health` | end of file | premium; the worker's `/healthz` (providers, algorithm count, plugin state) plus the shared-volume check |
-| `GET /qgis-print/templates` | end of file | premium; the server-owned page templates |
-| `POST /qgis-print` | end of file | premium; builds a project via the worker, proxies QGIS Server's GetPrint, streams back `application/pdf` |
-| `GET /health` | 2446 | |
-| `POST /login`, `POST /logout` | 447 | issue/clear the `vibegis_session` cookie |
-| `GET /auth/verify` | 469 | 200/401 only — nginx's `auth_request` target, not for direct use |
-| `GET /auth/me` | 476 | current user's `{username, role, premium}` |
-| `GET/POST /users`, `DELETE /users/{username}` | 486 | admin-only account management; `POST` body/response includes `premium` alongside `role` |
-| `GET /etl/jobs` | 562 | admin-or-`premium`-gated: the selectable ETL tasks (`ETL_JOBS`), `{name, label}` each — must stay in sync with the jobs defined in `dagster/defs/__init__.py` |
-| `POST /etl/run` | 571 | admin-or-`premium`-gated (`require_etl_access`): launches a named Dagster job (body `{job_name}`, defaults to `refresh_all`, validated against `ETL_JOBS`), returns `{runId, status}` |
-| `GET /etl/run/{run_id}` | 642 | poll a launched run's `{status, progress}` (progress = resolved steps / planned steps) |
-| `GET/POST/DELETE /ai/settings/key` | end of file | `require_etl_access`; bring-your-own Anthropic/OpenAI API key, encrypted at rest (see ai_agent.py). Write-only: never returns the plaintext, only `{configured, provider, last4}` |
-| `POST /ai/chat` | end of file | `require_etl_access`; runs one full tool-calling turn (read-only DB tools + map-control actions + geoprocess/ETL proposals) server-side, returns `{reply, actions[], pendingAction}` |
-| `POST /ai/execute-action` | end of file | `require_etl_access`; the only path that actually runs a geoprocess/ETL action the agent proposed — takes a single-use, short-lived, user-scoped confirmation token from `/ai/chat`'s `pendingAction`, never reachable by the model's own tool loop |
+| `POST /upload` | `require_tier("pro")` | file → table in schema `dwh` → `LAYER` block appended. Accepts either a `file`, or `upload_token` + `layer` to finish a pending multi-layer choice (see below) |
+| `POST /upload-raster` | `require_tier("pro")` | GeoTIFF → reprojected/tiled/overviewed via GDAL CLI → `TYPE RASTER` `LAYER` block, no PostGIS table involved |
+| `POST /upload-raster-zip` | `require_tier("pro")` | zip of single-band rasters (e.g. a Sentinel-2 product) → every readable band published as its own layer immediately, no picker; `title` names the whole batch (falls back to the zip's filename), not any one band. Each band's own title/layer-name comes from `band_label()` — GDAL's band description or a handful of common band-identifying metadata keys (e.g. `BANDNAME`) — falling back to that band file's own name when GDAL reports neither; `/upload-raster` uses the same `band_label()` fallback ahead of the filename when no `title` is given |
+| `POST /raster-composite` | `require_tier("pro")` | combine three already-published single-band raster layers into one RGB layer — a VRT, not a new reprojection pass |
+| `POST /upload-pointcloud` | `require_tier("pro")` | LAS/LAZ → Cesium 3D Tiles via py3dtiles → a row in `configdb.point_clouds`. No PostGIS table *and* no MapServer layer — see the point-cloud contract below |
+| `POST /register-table` | `require_privileged` | publish a table that already exists |
+| `POST /geoprocess` | `require_tier("pro")` | buffer/dissolve/intersect/join against published layers, publishes the result as a new layer via `publish_derived_table()` |
+| `GET /tables` | `require_privileged` | tables available to register |
+| `GET /layers`, `DELETE /layers/{name}?drop_table=` | GET `require_login`, DELETE `require_tier("pro")` + `require_owner_or_admin()` | list / unpublish — for a raster layer, `drop_table=true` deletes the underlying `.tif` instead of dropping a table |
+| `GET /distinct-values` | `require_login` | value list for the filter and categorized editor (caps at 500) |
+| `GET /column-stats` | `require_login` | min/max/sum/avg/count of a numeric column — min/max seed the graduated editor, the rest back the dashboard's "everything selected" overview |
+| `GET /column-groupby` | `require_tier("pro")` | value+count per distinct value, capped like `/distinct-values` plus an exact `totalCount` — the dashboard overview's server-side group-by, no in-memory features to aggregate over client-side there |
+| `GET /table-count` | `require_tier("pro")` | plain row count for a schema.table — the overview's headline number per layer |
+| `GET|PATCH|DELETE /layer-config[/{name}]` | GET `require_login`, writes `require_tier("pro")` + `require_owner_or_admin()` | per-layer classification state — now backed by `configdb.layer_config` (see below), not a JSON file, but the external contract is unchanged |
+| `GET /cms` | `require_login` | every page's `{slug, title_de, title_en, updated_at, admin_only}` (no body — kept light for the picker list in `Pages.tsx`); a row flagged `admin_only` is omitted unless `role == "admin"` |
+| `POST /cms` | `require_privileged` | create a new page — `slug` validated by `check_slug()` (lowercase/digits/`_`/`-`, ≤64 chars), 409 if it already exists; body may set `admin_only` |
+| `GET /cms/{slug}` | `require_login` + `_cms_row_or_404` | one page's full content from `configdb.pages` — a `admin_only` page 404s for anyone but `role == "admin"`, same as an unknown slug |
+| `PATCH /cms/{slug}` | `require_privileged` + `_cms_row_or_404` | `Pages.tsx`'s editor writes here; also 404s on a hidden page for a non-admin, so knowing the slug isn't enough to bypass the list filter |
+| `DELETE /cms/{slug}` | `require_privileged` + `_cms_row_or_404` | remove a page — same hidden-page 404 |
+| `GET /qgis-process/algorithms` | `require_tier("premium")` | curated catalog, `?advanced=true` appends the full introspected one |
+| `GET /qgis-process/algorithms/{id}` | `require_tier("premium")` | one algorithm's parameters, curated or translated from `qgis_process help --json` into the same shape |
+| `POST /qgis-process/run` | `require_tier("premium")` | validates, inserts a `configdb.qgis_jobs` row, starts a watcher thread, returns `{jobId, status}` |
+| `GET /qgis-process/run/{job_id}` | `require_tier("premium")` | poll one job — 404s someone else's unless `is_privileged_role()` |
+| `GET /qgis-process/health` | `require_tier("premium")` | the worker's `/healthz` (providers, algorithm count, plugin state) plus the shared-volume check |
+| `GET /qgis-print/templates` | `require_tier("premium")` | the server-owned page templates |
+| `POST /qgis-print` | `require_tier("premium")` | builds a project via the worker, proxies QGIS Server's GetPrint, streams back `application/pdf` |
+| `GET /health` | `require_login` | session-gated liveness; has an nginx location |
+| `GET /healthz` | none | unauthenticated liveness for the Docker healthcheck. Deliberately has **no** nginx location — it is container-internal only, so it is not a probe anyone off-host can hit |
+| `POST /login`, `POST /logout` | `none` | issue/clear the `vibegis_session` cookie |
+| `GET /auth/verify` | `require_login` | 200/401/403 only — nginx's `auth_request` target, not for direct use. Also authorizes the **specific layers** the original request names, via the `X-Original-URI` header nginx forwards — see the gateway-authorization contract below |
+| `GET /auth/me` | `require_login` | current user's `{username, role, tier}` |
+| `GET/POST/DELETE /groups`, `/groups/{id}/members/{user_id}` | `require_role("admin")` | the group side of the per-layer ACL; `AccessAdmin.tsx` drives it |
+| `GET/POST/DELETE /layer-grants` | `require_role("admin")` | the grants themselves — a layer becomes visible to a user or a group |
+| `GET/POST /users`, `DELETE /users/{username}` | `require_role("admin")` | admin-only account management; `POST` body/response includes `subscription_tier` alongside `role` |
+| `GET /etl/jobs` | `require_etl_access` | the selectable ETL tasks (`ETL_JOBS`), `{name, label}` each — must stay in sync with the jobs defined in `dagster/defs/__init__.py` |
+| `POST /etl/run` | `require_etl_access` | launches a named Dagster job (body `{job_name}`, defaults to `refresh_all`, validated against `ETL_JOBS`), returns `{runId, status}` |
+| `GET /etl/run/{run_id}` | `require_etl_access` | poll a launched run's `{status, progress}` (progress = resolved steps / planned steps) |
+| `GET/POST/DELETE /ai/settings/key` | `require_etl_access` | `require_etl_access`; bring-your-own Anthropic/OpenAI API key, encrypted at rest (see ai_agent.py). Write-only: never returns the plaintext, only `{configured, provider, last4}` |
+| `POST /ai/chat` | `require_etl_access` | `require_etl_access`; runs one full tool-calling turn (read-only DB tools + map-control actions + geoprocess/ETL proposals) server-side, returns `{reply, actions[], pendingAction}` |
+| `POST /ai/execute-action` | `require_etl_access` | `require_etl_access`; the only path that actually runs a geoprocess/ETL action the agent proposed — takes a single-use, short-lived, user-scoped confirmation token from `/ai/chat`'s `pendingAction`, never reachable by the model's own tool loop |
 
 ## Contracts
+
+- **A client never names a schema and table. It names a *layer*.**
+  `authorize_table(schema, table, user)` (defined just above
+  `require_owner_or_admin`) is the one place that turns a client-supplied pair
+  into something safe to query: both identifiers through `check_identifier()`,
+  the schema rejected unless it is in `QUERYABLE_SCHEMAS` (`{"dwh"}`), and then —
+  unless `is_privileged_role(user)` — a match required in
+  `visible_layers_for(user, all_layers())`. `/distinct-values`, `/column-stats`,
+  `/column-groupby`, `/table-count`, `/register-table` and *both* `/geoprocess`
+  input pairs go through it.
+
+  It exists because they used to take the pair straight from the query string
+  with nothing but an identifier regex behind it:
+  `?schema=userdb&table=users&column=password_hash` returned up to 500 bcrypt
+  hashes to any logged-in viewer, and `column=ai_key_ciphertext` returned the
+  encrypted AI keys, defeating the Fernet-at-rest design in `ai_agent.py`. It was
+  never SQL injection — identifiers were regex-checked and values were bound. It
+  was a missing authorization check, which is a different bug and much easier to
+  read past.
+
+- **`/auth/verify` authorizes the request nginx was asked for, not the
+  subrequest.** Each gated location sends `proxy_set_header X-Original-URI
+  $request_uri;`, and `authorize_gateway_request(original_uri, user)` does all the
+  parsing in Python rather than in nginx `map` blocks, because layer names arrive
+  in four different shapes: `?LAYERS=a,b` (WMS/WFS, also `LAYER`, `TYPENAME`,
+  `QUERY_LAYERS` — `_LAYER_QUERY_KEYS`), `/tiles/<layer>/<grid>/…`,
+  `/features/collections/<schema>.<table>/items`, and `/pointclouds/<layer>/…`.
+  Every layer a request names must be authorized; anything unparseable fails
+  closed. GetCapabilities, `/terrain` and `/3dtiles` are allowed through — they
+  carry no layer identity, and capabilities is already filtered elsewhere. Layers
+  from the hand-authored mapfiles (`HAND_AUTHORED_MAPFILES` — `vibegis.map`,
+  `osm-layers.map`, parsed by `_layer_names_in()`) count as public base map.
+
+  **The cache is load-bearing, not an optimization.** `auth_request` fires once
+  per tile and this service runs a single uvicorn worker (no `--workers` in the
+  Dockerfile), so an uncached query per tile would serialize the whole map behind
+  it. `visible_layer_index(user)` memoizes `(names, tables)` for
+  `VISIBILITY_TTL_SECONDS` (30) under `_visibility_lock`, and the
+  `drop_visibility_cache_on_acl_write` middleware calls
+  `invalidate_visibility_cache()` after any POST/PATCH/PUT/DELETE under
+  `_ACL_MUTATING_PREFIXES`, so a revoked grant takes effect immediately instead
+  of up to 30s later.
+
+- **A QGIS parameter's kind comes from the catalog, never from its wire shape.**
+  `qgis_algorithm_params(alg_id)` returns the algorithm's descriptor — the
+  curated entry from `qgis_catalog.py` if there is one, otherwise the worker's
+  introspection of `qgis_process help --json` — and `/qgis-process/run` decides
+  per key from `known[key].kind == "layer"`. A `layer` parameter must arrive as
+  `{"layer": "<name>"}` and is resolved through `resolve_layer_source()`;
+  anything else in that slot is a 400.
+
+  The old code resolved *only* when the value happened to be a dict, so a plain
+  string fell through to a scalar and was appended verbatim to the
+  `qgis_process` argv. `{"OVERLAY": "PG:host=postgis … tables=layer_grants|…"}`
+  therefore got the worker to connect with its own database credential and read
+  any table, and the same slot accepted `/vsicurl/http://…` (SSRF and local file
+  read). No shell was involved — it was arbitrary GDAL datasource control.
+  `reject_datasource_scalar()` rejects `PG:`, `/vsi`, `http://`, `https://` and a
+  leading `/` as a belt-and-braces second check, and it lives in **both**
+  `app.py` and `qgis-processing/worker.py` on purpose: the worker must not trust
+  its caller either. `OUTPUT` stays server-owned for every algorithm, curated or
+  not.
+
+- **`check_secrets()` runs at import time and can refuse to start the process.**
+  It is called immediately after `_configure_logging()`, before anything else, and
+  raises `RuntimeError` naming the `.env` key if `AUTH_JWT_SECRET`,
+  `AI_KEY_ENCRYPTION_SECRET`, `AI_READONLY_PG_PASSWORD` or `PGPASSWORD` is empty,
+  contains a `change_me`-style placeholder marker, or is under its minimum length.
+  Failing at import rather than on first request is the point — an install that
+  missed a line in `.env` should not come up looking healthy while every session
+  is forgeable.
+
+- **Removed: self-service.** `/register`, `/guest-session`,
+  `/subscription/upgrade`, `/subscription/cancel`, `/paypal/webhook` and
+  `upload-api/paypal.py` no longer exist, and there is no `guest` tier — every
+  tier check starts at `free`. `subscription_tier` and the whole
+  `TIER_RANK`/`require_tier` machinery stayed: it is how a customer's own admin
+  grants capability internally. Database side: `bin/migrate-remove-self-service.sql`.
 
 - **Every read and write of `/mapfiles` goes through `check_mapfile_volume()` first.**
   It tests for `vibegis.map`, which ships with the repo and is never written here, so

@@ -6,19 +6,22 @@
 import { useEffect } from 'react'
 import { Box, Text, Title, useComputedColorScheme } from '@mantine/core'
 
-import { AUTH_FONT, authAccent, authGradient, authGrid, authTextGlow } from './colorScheme'
+import { AUTH_FONT, authAccent, authGradient, authTextGlow } from './colorScheme'
+import LoginTip from './LoginTip'
 
 export default function AuthSplash({
   icon,
   title,
   subtitle,
   duration = 1400,
+  showTip = false,
   onDone,
 }: {
   icon: React.ReactNode
   title: string
   subtitle: string
   duration?: number
+  showTip?: boolean
   onDone: () => void
 }) {
   const scheme = useComputedColorScheme('dark')
@@ -40,17 +43,6 @@ export default function AuthSplash({
         animation: 'authGradientShift 8s ease infinite',
       }}
     >
-      <Box
-        style={{
-          position: 'absolute',
-          inset: 0,
-          backgroundImage: authGrid(scheme),
-          backgroundSize: '42px 42px',
-          animation: 'authGridDrift 6s linear infinite',
-          pointerEvents: 'none',
-        }}
-      />
-
       <Box
         style={{
           position: 'relative',
@@ -82,6 +74,7 @@ export default function AuthSplash({
           </Title>
           <Text c="dimmed" size="sm" mt={4}>{subtitle}</Text>
         </div>
+        {showTip && <LoginTip />}
       </Box>
     </Box>
   )

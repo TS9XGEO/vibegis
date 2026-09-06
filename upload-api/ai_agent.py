@@ -48,7 +48,16 @@ AI_READONLY_PG_PASSWORD = os.environ["AI_READONLY_PG_PASSWORD"]
 # table back out (the previous approach, when accounts lived in "gis"
 # alongside real geodata). Any future non-geodata schema needs the same
 # omission, not an entry in an unreadable-tables list.
-AI_READABLE_SCHEMAS = ["dwh", "configdb", "public"]
+AI_READABLE_SCHEMAS = ["dwh", "public"]
+
+# Schemas a previous version of this file *did* grant and no longer should.
+# ensure_ai_schema() revokes these on every startup, because a grant made once
+# on a live database stays until something takes it away. "configdb" holds the
+# per-layer ACL itself (layer_grants, groups, group_members), layer styling and
+# the CMS pages — none of which the agent has any business reading, and the
+# first of which it could otherwise use to enumerate exactly what it is not
+# allowed to see.
+AI_REVOKED_SCHEMAS = ["configdb"]
 
 Provider = Literal["anthropic", "openai"]
 DEFAULT_MODEL: dict[Provider, str] = {"anthropic": "claude-sonnet-5", "openai": "gpt-5.1"}
@@ -131,6 +140,13 @@ def ensure_ai_schema(engine_factory: Callable[[], Engine]) -> None:
                 f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}" GRANT SELECT ON TABLES TO ai_readonly'
             ))
 
+        for schema in AI_REVOKED_SCHEMAS:
+            conn.execute(text(
+                f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema}" REVOKE SELECT ON TABLES FROM ai_readonly'
+            ))
+            conn.execute(text(f'REVOKE ALL ON ALL TABLES IN SCHEMA "{schema}" FROM ai_readonly'))
+            conn.execute(text(f'REVOKE ALL ON SCHEMA "{schema}" FROM ai_readonly'))
+
 
 # -------------------------------------------------------------- SQL guardrail
 
@@ -164,11 +180,86 @@ def validate_select_sql(sql: str) -> str:
     return f"SELECT * FROM ({stripped}) AS agent_query LIMIT {MAX_ROWS}"
 
 
-def run_select_query(sql: str) -> dict:
+# Relations the agent may touch regardless of the caller's layer grants: the
+# PostGIS metadata every sensible query joins against. They contain no user
+# data — just CRS definitions and the geometry-column catalog.
+_ALWAYS_READABLE = {
+    ("public", "geometry_columns"),
+    ("public", "geography_columns"),
+    ("public", "spatial_ref_sys"),
+}
+
+
+def _plan_relations(conn, wrapped_sql: str) -> set[tuple[str, str]]:
+    """Every relation the planner says this query reads, as (schema, table).
+
+    EXPLAIN rather than parsing the SQL: the model writes the query, so any
+    parser here would be guessing, and a CTE, a view or a subquery alias would
+    each be a way to slip a table past it. The planner already knows exactly
+    what will be read, and reports it — including through views.
+    """
+    # VERBOSE is required, not cosmetic: without it EXPLAIN's JSON carries
+    # "Relation Name" but no "Schema", so two tables of the same name in
+    # different schemas are indistinguishable and the check would compare
+    # against the wrong one.
+    plan = conn.execute(text(f"EXPLAIN (FORMAT JSON, VERBOSE true) {wrapped_sql}")).scalar()
+    if isinstance(plan, str):
+        plan = json.loads(plan)
+    found: set[tuple[str, str]] = set()
+
+    def walk(node):
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+        relation = node.get("Relation Name")
+        if relation:
+            schema = node.get("Schema")
+            if not schema:
+                # Should not happen with VERBOSE, but if a future Postgres ever
+                # omits it, fail closed rather than guessing "public" and
+                # accidentally matching an allowed table of the same name.
+                raise HTTPException(400, "Abfrage konnte nicht geprüft werden (kein Schema im Plan)")
+            found.add((schema, relation))
+        for value in node.values():
+            if isinstance(value, (dict, list)):
+                walk(value)
+
+    walk(plan)
+    return found
+
+
+def _check_relations_allowed(found: set[tuple[str, str]], allowed_tables: set[tuple[str, str]] | None) -> None:
+    """allowed_tables None means an unrestricted caller (admin/editor)."""
+    if allowed_tables is None:
+        return
+    denied = sorted(f"{s}.{t}" for s, t in found - _ALWAYS_READABLE - allowed_tables)
+    if denied:
+        raise HTTPException(403, f"Kein Zugriff auf: {', '.join(denied)}")
+
+
+def run_select_query(sql: str, allowed_tables: set[tuple[str, str]] | None = None) -> dict:
+    """
+    The ai_readonly role holds SELECT on all of dwh, which is coarser than the
+    per-layer ACL every other read path in this app enforces — without the
+    plan check below, a premium user could ask the agent for the contents of a
+    layer an admin granted to somebody else. The role stays coarse on purpose
+    (it is the backstop that makes writes impossible); this narrows what any
+    single caller may reach through it.
+    """
     wrapped = validate_select_sql(sql)
     with ai_readonly_engine().begin() as conn:
         conn.execute(text("SET TRANSACTION READ ONLY"))
         conn.execute(text(f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}"))
+        try:
+            found = _plan_relations(conn, wrapped)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, f"Abfrage konnte nicht geprüft werden: {e}")
+        _check_relations_allowed(found, allowed_tables)
         try:
             rows = conn.execute(text(wrapped)).mappings().all()
         except Exception as e:
@@ -176,7 +267,7 @@ def run_select_query(sql: str) -> dict:
     return {"rows": [dict(r) for r in rows], "row_count": len(rows)}
 
 
-def list_tables_readonly() -> dict:
+def list_tables_readonly(allowed_tables: set[tuple[str, str]] | None = None) -> dict:
     with ai_readonly_engine().begin() as conn:
         rows = conn.execute(text(
             "SELECT f_table_schema, f_table_name, f_geometry_column, type, srid "
@@ -184,13 +275,17 @@ def list_tables_readonly() -> dict:
             "WHERE f_table_schema NOT IN ('tiger', 'tiger_data', 'topology') "
             "ORDER BY f_table_schema, f_table_name"
         )).all()
+    if allowed_tables is not None:
+        rows = [r for r in rows if (r[0], r[1]) in allowed_tables]
     return {"tables": [
         {"schema": r[0], "table": r[1], "geometry_column": r[2], "type": r[3], "srid": r[4]}
         for r in rows
     ]}
 
 
-def describe_table_readonly(schema: str, table: str) -> dict:
+def describe_table_readonly(schema: str, table: str, allowed_tables: set[tuple[str, str]] | None = None) -> dict:
+    if allowed_tables is not None and (schema, table) not in allowed_tables:
+        raise HTTPException(403, f"Kein Zugriff auf {schema}.{table}")
     with ai_readonly_engine().begin() as conn:
         rows = conn.execute(text(
             "SELECT column_name, data_type FROM information_schema.columns "
@@ -410,17 +505,20 @@ def _execute_tool_call(name: str, args: dict, *, user: dict, tool_context: dict)
     both out before serializing the rest back to the model.
     """
     check_identifier = tool_context["check_identifier"]
+    # None for admin/editor, who already see everything; otherwise the
+    # (schema, table) pairs behind the layers this user was actually granted.
+    allowed_tables = tool_context.get("allowed_tables")
 
     if name == "list_tables":
-        return list_tables_readonly()
+        return list_tables_readonly(allowed_tables)
 
     if name == "describe_table":
         schema = check_identifier(args["schema"], "schema name")
         table = check_identifier(args["table"], "table name")
-        return describe_table_readonly(schema, table)
+        return describe_table_readonly(schema, table, allowed_tables)
 
     if name == "run_select_query":
-        return run_select_query(args["sql"])
+        return run_select_query(args["sql"], allowed_tables)
 
     if name == "zoom_to_layer":
         return {"__action__": {"type": "zoomToLayer", "layerName": args["layer_name"]}, "ok": True}

@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ActionIcon, Box, Text, Transition, useComputedColorScheme } from '@mantine/core'
-import { notifications } from '@mantine/notifications'
-import { IconAlertCircle, IconGripHorizontal, IconMoonStars, IconUpload, IconX } from '@tabler/icons-react'
+import { IconGripHorizontal, IconMoonStars, IconUpload, IconX } from '@tabler/icons-react'
 import { useTranslation } from 'react-i18next'
 
 import AuthSplash from './AuthSplash'
@@ -12,14 +11,12 @@ import LayerPanel from './LayerPanel'
 import LoginScreen from './LoginScreen'
 import MapTools from './MapTools'
 import { usePanels } from './panels'
-import RegisterScreen from './RegisterScreen'
 import Scene from './Scene'
 import Sideband from './Sideband'
 import StatusHud from './StatusHud'
 import Tips from './tips/Tips'
 import Tour from './tour/Tour'
 import { ACCEPT } from './UploadLayer'
-import Upsell from './upsell/Upsell'
 import { useDraggable } from './useDraggable'
 import { useUpload } from './uploadState'
 import ZoomBar from './ZoomBar'
@@ -53,7 +50,6 @@ export default function App() {
   const [welcoming, setWelcoming] = useState(false)
   const welcomed = useRef(false)
   const [dragOver, setDragOver] = useState(false)
-  const [showRegister, setShowRegister] = useState(false)
 
   // Dropping a geodata file onto the map opens the same "Layer hinzufügen"
   // form the header button does, pre-filled — see UploadLayer.tsx's
@@ -79,37 +75,6 @@ export default function App() {
   useEffect(() => {
     fetchMe()
   }, [fetchMe])
-
-  // PayPal redirects the browser back here after approval/cancellation —
-  // see upload-api's /register return_url/cancel_url. The account's tier
-  // only actually flips once the webhook lands (upload-api/paypal.py's
-  // /paypal/webhook — never this redirect, which can arrive before or
-  // after it), so this is purely a "here's what's happening" notice, not a
-  // confirmation. Runs once on mount; the URL is cleaned up either way so a
-  // reload doesn't show the notice again.
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    if (params.has('paypal_return')) {
-      notifications.show({
-        title: t('register.paypalReturnTitle'),
-        message: t('register.paypalReturnBody'),
-        color: 'teal',
-        autoClose: false,
-      })
-    } else if (params.has('paypal_cancel')) {
-      notifications.show({
-        title: t('register.paypalCancelTitle'),
-        message: t('register.paypalCancelBody'),
-        color: 'gray',
-        icon: <IconAlertCircle size={16} />,
-      })
-    } else {
-      return
-    }
-    window.history.replaceState({}, '', window.location.pathname)
-    // Deliberately empty: runs once on mount only. Re-running on every `t`
-    // change would re-show the notice every time the language switch is used.
-  }, [])
 
   useEffect(() => {
     // Would 401 before login anyway — wait for a session before asking.
@@ -139,11 +104,7 @@ export default function App() {
     )
   }
 
-  if (!user) {
-    return showRegister
-      ? <RegisterScreen onBackToLogin={() => setShowRegister(false)} />
-      : <LoginScreen onShowRegister={() => setShowRegister(true)} />
-  }
+  if (!user) return <LoginScreen />
 
   if (welcoming) {
     return (
@@ -151,6 +112,8 @@ export default function App() {
         icon={<ConnectedGlobe size={64} />}
         title={t('authSplash.welcomeTitle', { name: user.username })}
         subtitle={t('authSplash.welcomeSubtitle')}
+        duration={3200}
+        showTip
         onDone={() => setWelcoming(false)}
       />
     )
@@ -160,7 +123,6 @@ export default function App() {
     <Box style={{ display: 'flex', width: '100%', height: '100%' }}>
       <Tour />
       <Tips />
-      <Upsell />
       {/* Column, not just a single relative Box: the data view band below
           is a real flex sibling of the map now (see DataViewBand.tsx), so
           opening it shrinks the map's own share of this column instead of

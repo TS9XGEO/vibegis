@@ -7,18 +7,17 @@ import { useTranslation } from 'react-i18next'
 
 import { useAuth } from './auth'
 import ConnectedGlobe from './ConnectedGlobe'
-import { AUTH_FONT, authAccent, authBorder, authGlow, authGradient, authGradientColors, authGrid, authTextGlow } from './colorScheme'
+import LoginTip from './LoginTip'
+import { AUTH_FONT, authAccent, authBorder, authGlow, authGradient, authGradientColors, authTextGlow } from './colorScheme'
 
-export default function LoginScreen({ onShowRegister }: { onShowRegister: () => void }) {
+export default function LoginScreen() {
   const { t } = useTranslation()
   const login = useAuth((s) => s.login)
-  const continueAsGuest = useAuth((s) => s.continueAsGuest)
   const error = useAuth((s) => s.error)
   const scheme = useComputedColorScheme('dark')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
-  const [guestLoading, setGuestLoading] = useState(false)
 
   async function submit() {
     if (!username || !password) return
@@ -27,15 +26,6 @@ export default function LoginScreen({ onShowRegister }: { onShowRegister: () => 
       await login(username, password)
     } finally {
       setLoading(false)
-    }
-  }
-
-  async function submitGuest() {
-    setGuestLoading(true)
-    try {
-      await continueAsGuest()
-    } finally {
-      setGuestLoading(false)
     }
   }
 
@@ -53,24 +43,15 @@ export default function LoginScreen({ onShowRegister }: { onShowRegister: () => 
     >
       <Box
         style={{
-          position: 'absolute',
-          inset: 0,
-          backgroundImage: authGrid(scheme),
-          backgroundSize: '42px 42px',
-          animation: 'authGridDrift 6s linear infinite',
-          pointerEvents: 'none',
-        }}
-      />
-
-      <Box
-        style={{
           position: 'relative',
           zIndex: 1,
           width: '100%',
           height: '100%',
           display: 'flex',
+          flexDirection: 'column',
           alignItems: 'center',
           justifyContent: 'center',
+          gap: 16,
         }}
       >
         <Paper
@@ -124,22 +105,10 @@ export default function LoginScreen({ onShowRegister }: { onShowRegister: () => 
             >
               {t('login.submit')}
             </Button>
-            <Button variant="subtle" color="gray" loading={guestLoading} onClick={submitGuest} fullWidth>
-              {t('login.guestButton')}
-            </Button>
-            <Group gap={4} justify="center">
-              <Text size="xs" c="dimmed">{t('login.registerPrompt')}</Text>
-              <Text
-                size="xs"
-                c={authAccent(scheme)}
-                style={{ cursor: 'pointer' }}
-                onClick={onShowRegister}
-              >
-                {t('login.registerLink')}
-              </Text>
-            </Group>
           </Stack>
         </Paper>
+
+        <LoginTip />
       </Box>
     </Box>
   )

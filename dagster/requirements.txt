@@ -1,12 +1,21 @@
-dagster
-dagster-webserver
-dagster-postgres
-geopandas
-shapely
-pyproj
-rasterio
-psycopg[binary]
-sqlalchemy
-geoalchemy2
-requests
-pandas
+# Pinned to exactly what the working stack runs. This file used to be a bare
+# list of names, and an unpinned `dagster` has already broken this workspace
+# once on a routine rebuild: ScheduleDefinition's `default_status_is_running`
+# was removed upstream, and the failure surfaced as the whole workspace
+# refusing to load — every asset and job gone, not just the schedule. See the
+# root CLAUDE.md.
+#
+# Bumping is a deliberate act: change a version here, rebuild, and click
+# "Reload definitions" in Dagit to confirm the workspace still loads.
+dagster==1.13.18
+dagster-webserver==1.13.18
+dagster-postgres==0.29.18
+geopandas==1.1.4
+shapely==2.1.2
+pyproj==3.7.2
+rasterio==1.5.1
+psycopg[binary]==3.3.4
+sqlalchemy==2.0.52
+geoalchemy2==0.20.0
+requests==2.34.2
+pandas==3.0.5

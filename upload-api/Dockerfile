@@ -1,7 +1,11 @@
 # Same base as dagster/Dockerfile: GDAL/OGR + geopandas, so uploaded vector
 # files (shapefile zips, GeoPackage, GeoJSON, KML, GML) read the same way
 # the nightly ETL asset (dagster/defs/__init__.py: raw_vectors) reads them.
-ARG GDAL_IMAGE=ghcr.io/osgeo/gdal:ubuntu-small-latest
+# Pinned fallback, matching .env.example. `ubuntu-small-latest` used to be
+# the default here and it tracks a nightly build — two rebuilds a day apart
+# could ship different GDAL versions into production with nothing recording
+# which one. Bump deliberately.
+ARG GDAL_IMAGE=ghcr.io/osgeo/gdal:ubuntu-small-3.13.0
 FROM ${GDAL_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -31,7 +35,23 @@ RUN python3 -m venv /opt/py3dtiles \
     && /opt/py3dtiles/bin/pip install "py3dtiles[las]==12.1.1" "laspy[lazrs]"
 
 WORKDIR /app
-COPY app.py ai_agent.py paypal.py qgis_catalog.py /app/
+COPY app.py ai_agent.py qgis_catalog.py /app/
+
+# ---------------------------------------------------------------- non-root
+# Nothing here needs root, and this container
+# handles uploaded files from the network.
+# UID/GID default to 1001 because that is what this repo's bind mounts are
+# owned by on the development host; an install whose host user differs sets
+# APP_UID/APP_GID in .env, which docker-compose.yml passes both as build args
+# and as the runtime `user:` (so an existing image does not need rebuilding).
+# -o on both: some base images already ship a user at this id, and a clash
+# should not fail the build.
+ARG APP_UID=1001
+ARG APP_GID=1001
+RUN groupadd -o -g ${APP_GID} app \
+ && useradd -o -u ${APP_UID} -g ${APP_GID} -m -d /home/app -s /usr/sbin/nologin app
+ENV HOME=/home/app
+USER app
 
 EXPOSE 8000
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
