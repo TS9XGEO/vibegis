@@ -20,6 +20,7 @@ import {
 import {
   IconAlertCircle, IconCheck, IconDatabase, IconPhoto, IconUpload, IconChartDots3,
 } from '@tabler/icons-react'
+import { useTranslation } from 'react-i18next'
 
 import { TourTarget } from './tour/TourTarget'
 import { useUpload } from './uploadState'
@@ -44,6 +45,7 @@ interface DbTable {
 }
 
 function FilePanel({ onDone, pendingFile }: { onDone: (msg: string) => void; pendingFile: File | null }) {
+  const { t } = useTranslation()
   const load = useApp((s) => s.load)
   const setLayerColumns = useApp((s) => s.setLayerColumns)
   const [file, setFile] = useState<File | null>(null)
@@ -104,8 +106,8 @@ function FilePanel({ onDone, pendingFile }: { onDone: (msg: string) => void; pen
         // A body-less/non-JSON error (e.g. nginx's own 413 page for a file
         // over its size limit, rather than our JSON one) still deserves a
         // readable message instead of a bare status code.
-        if (!body?.detail && res.status === 413) throw new Error('Datei zu gross (Limit: 2 GB)')
-        throw new Error(body?.detail ?? `Upload fehlgeschlagen: HTTP ${res.status}`)
+        if (!body?.detail && res.status === 413) throw new Error(t('uploadLayer.tooLarge'))
+        throw new Error(body?.detail ?? t('uploadLayer.uploadFailed', { status: res.status }))
       }
 
       if (body.needs_layer_choice) {
@@ -115,7 +117,9 @@ function FilePanel({ onDone, pendingFile }: { onDone: (msg: string) => void; pen
         return
       }
 
-      onDone(`"${body.title}" geladen (${body.feature_count} Objekte, ${body.geometry_type.toLowerCase()})`)
+      onDone(t('uploadLayer.fileSuccess', {
+        title: body.title, count: body.feature_count, geometryType: body.geometry_type.toLowerCase(),
+      }))
       if (body.columns) setLayerColumns(body.layer, body.columns)
       reset()
       await load()
@@ -129,17 +133,16 @@ function FilePanel({ onDone, pendingFile }: { onDone: (msg: string) => void; pen
   return (
     <Stack gap="sm">
       <Text size="xs" c="dimmed">
-        Shapefile (als .zip), GeoPackage, GeoJSON, KML oder GML. Die Datei wird
-        nach EPSG:4326 umprojiziert und als neuer Layer verfügbar.
+        {t('uploadLayer.fileIntro')}
       </Text>
 
       {layerChoice ? (
         <>
           <Text size="xs">
-            <strong>{file?.name}</strong> enthält mehrere Layer. Welcher soll importiert werden?
+            <strong>{file?.name}</strong> {t('uploadLayer.multiLayerFile')}
           </Text>
           <Select
-            label="Layer"
+            label={t('uploadLayer.layerLabel')}
             data={layerChoice}
             value={chosenLayer}
             onChange={setChosenLayer}
@@ -149,13 +152,13 @@ function FilePanel({ onDone, pendingFile }: { onDone: (msg: string) => void; pen
         </>
       ) : (
         <TourTarget id="upload-file-input">
-          <FileInput label="Datei" placeholder="Datei auswählen" accept={ACCEPT} value={file} onChange={setFile} clearable />
+          <FileInput label={t('uploadLayer.fileLabel')} placeholder={t('uploadLayer.filePlaceholder')} accept={ACCEPT} value={file} onChange={setFile} clearable />
         </TourTarget>
       )}
 
       <TextInput
-        label="Titel (optional)"
-        placeholder={file?.name.replace(/\.[^.]+$/, '') ?? 'wird aus dem Dateinamen abgeleitet'}
+        label={t('uploadLayer.titleLabel')}
+        placeholder={file?.name.replace(/\.[^.]+$/, '') ?? t('uploadLayer.titleFromFilename')}
         value={title}
         onChange={(e) => setTitle(e.currentTarget.value)}
       />
@@ -166,7 +169,7 @@ function FilePanel({ onDone, pendingFile }: { onDone: (msg: string) => void; pen
 
       <Group justify="flex-end">
         {layerChoice && (
-          <Button variant="subtle" color="gray" onClick={backOut}>Zurück</Button>
+          <Button variant="subtle" color="gray" onClick={backOut}>{t('uploadLayer.back')}</Button>
         )}
         <TourTarget id="upload-submit-btn">
           <Button
@@ -175,7 +178,7 @@ function FilePanel({ onDone, pendingFile }: { onDone: (msg: string) => void; pen
             disabled={layerChoice ? !chosenLayer : !file}
             onClick={submit}
           >
-            {layerChoice ? 'Layer importieren' : 'Hochladen'}
+            {layerChoice ? t('uploadLayer.importLayer') : t('uploadLayer.upload')}
           </Button>
         </TourTarget>
       </Group>
@@ -184,6 +187,7 @@ function FilePanel({ onDone, pendingFile }: { onDone: (msg: string) => void; pen
 }
 
 function RasterPanel({ onDone, pendingFile }: { onDone: (msg: string) => void; pendingFile: File | null }) {
+  const { t } = useTranslation()
   const load = useApp((s) => s.load)
   const [file, setFile] = useState<File | null>(null)
   const [title, setTitle] = useState('')
@@ -217,8 +221,8 @@ function RasterPanel({ onDone, pendingFile }: { onDone: (msg: string) => void; p
       const res = await fetch(isZip ? UPLOAD_RASTER_ZIP_URL : UPLOAD_RASTER_URL, { method: 'POST', body: form })
       const body = await res.json().catch(() => null)
       if (!res.ok) {
-        if (!body?.detail && res.status === 413) throw new Error('Datei zu gross (Limit: 2 GB)')
-        throw new Error(body?.detail ?? `Upload fehlgeschlagen: HTTP ${res.status}`)
+        if (!body?.detail && res.status === 413) throw new Error(t('uploadLayer.tooLarge'))
+        throw new Error(body?.detail ?? t('uploadLayer.uploadFailed', { status: res.status }))
       }
 
       if (isZip) {
@@ -226,11 +230,13 @@ function RasterPanel({ onDone, pendingFile }: { onDone: (msg: string) => void; p
         const failedList = (body.failed ?? []) as { input: string; error: string }[]
         onDone(
           failedList.length
-            ? `${n} Bänder veröffentlicht, ${failedList.length} fehlgeschlagen: ${failedList.map((f) => f.error).join('; ')}`
-            : `${n} Bänder veröffentlicht`,
+            ? t('uploadLayer.rasterBandsPublishedWithFailures', {
+              count: n, failedCount: failedList.length, errors: failedList.map((f) => f.error).join('; '),
+            })
+            : t('uploadLayer.rasterBandsPublished', { count: n }),
         )
       } else {
-        onDone(`"${body.title}" geladen (${body.bands} Band(er), ${body.width}×${body.height})`)
+        onDone(t('uploadLayer.rasterSuccess', { title: body.title, bands: body.bands, width: body.width, height: body.height }))
       }
       reset()
       await load()
@@ -244,17 +250,14 @@ function RasterPanel({ onDone, pendingFile }: { onDone: (msg: string) => void; p
   return (
     <Stack gap="sm">
       <Text size="xs" c="dimmed">
-        GeoTIFF, oder ein Zip mit mehreren Bändern (z.B. ein Sentinel-Produkt — jedes
-        Band wird als eigener Layer veröffentlicht). Wird nach EPSG:4326 umprojiziert,
-        gekachelt und mit Übersichtsstufen versehen. Ein RGB-Komposit aus veröffentlichten
-        Bändern lässt sich anschliessend im Layerbaum zusammenstellen.
+        {t('uploadLayer.rasterIntro')}
       </Text>
 
-      <FileInput label="Datei" placeholder="Datei auswählen" accept={RASTER_ACCEPT} value={file} onChange={setFile} clearable />
+      <FileInput label={t('uploadLayer.fileLabel')} placeholder={t('uploadLayer.filePlaceholder')} accept={RASTER_ACCEPT} value={file} onChange={setFile} clearable />
 
       <TextInput
-        label={file?.name.toLowerCase().endsWith('.zip') ? 'Titel der Gruppe (optional)' : 'Titel (optional)'}
-        placeholder={file?.name.replace(/\.[^.]+$/, '') ?? 'wird aus dem Dateinamen abgeleitet'}
+        label={file?.name.toLowerCase().endsWith('.zip') ? t('uploadLayer.titleOfGroup') : t('uploadLayer.titleLabel')}
+        placeholder={file?.name.replace(/\.[^.]+$/, '') ?? t('uploadLayer.titleFromFilename')}
         value={title}
         onChange={(e) => setTitle(e.currentTarget.value)}
       />
@@ -265,7 +268,7 @@ function RasterPanel({ onDone, pendingFile }: { onDone: (msg: string) => void; p
 
       <Group justify="flex-end">
         <Button leftSection={<IconPhoto size={16} />} loading={loading} disabled={!file} onClick={submit}>
-          Hochladen
+          {t('uploadLayer.upload')}
         </Button>
       </Group>
     </Stack>
@@ -273,6 +276,7 @@ function RasterPanel({ onDone, pendingFile }: { onDone: (msg: string) => void; p
 }
 
 function PointCloudPanel({ onDone, pendingFile }: { onDone: (msg: string) => void; pendingFile: File | null }) {
+  const { t } = useTranslation()
   const load = useApp((s) => s.load)
   const [file, setFile] = useState<File | null>(null)
   const [title, setTitle] = useState('')
@@ -308,10 +312,10 @@ function PointCloudPanel({ onDone, pendingFile }: { onDone: (msg: string) => voi
       const res = await fetch(UPLOAD_POINTCLOUD_URL, { method: 'POST', body: form })
       const body = await res.json().catch(() => null)
       if (!res.ok) {
-        if (!body?.detail && res.status === 413) throw new Error('Datei zu gross (Limit: 2 GB)')
-        throw new Error(body?.detail ?? `Upload fehlgeschlagen: HTTP ${res.status}`)
+        if (!body?.detail && res.status === 413) throw new Error(t('uploadLayer.tooLarge'))
+        throw new Error(body?.detail ?? t('uploadLayer.uploadFailed', { status: res.status }))
       }
-      onDone(`"${body.title}" geladen (${body.point_count.toLocaleString('de-DE')} Punkte)`)
+      onDone(t('uploadLayer.pointcloudSuccess', { title: body.title, count: body.point_count.toLocaleString('de-DE') }))
       reset()
       await load()
     } catch (e) {
@@ -324,25 +328,22 @@ function PointCloudPanel({ onDone, pendingFile }: { onDone: (msg: string) => voi
   return (
     <Stack gap="sm">
       <Text size="xs" c="dimmed">
-        LAS- oder LAZ-Punktwolke (z.B. ein LiDAR-Scan). Wird serverseitig nach Cesium
-        3D Tiles konvertiert und direkt im Globus dargestellt — kein WMS-Layer, keine
-        PostGIS-Tabelle. Die Konvertierung läuft während des Uploads und kann bei
-        grossen Dateien einige Minuten dauern.
+        {t('uploadLayer.pointcloudIntro')}
       </Text>
 
-      <FileInput label="Datei" placeholder="Datei auswählen" accept={POINTCLOUD_ACCEPT} value={file} onChange={setFile} clearable />
+      <FileInput label={t('uploadLayer.fileLabel')} placeholder={t('uploadLayer.filePlaceholder')} accept={POINTCLOUD_ACCEPT} value={file} onChange={setFile} clearable />
 
       <TextInput
-        label="Titel (optional)"
-        placeholder={file?.name.replace(/\.[^.]+$/, '') ?? 'wird aus dem Dateinamen abgeleitet'}
+        label={t('uploadLayer.titleLabel')}
+        placeholder={file?.name.replace(/\.[^.]+$/, '') ?? t('uploadLayer.titleFromFilename')}
         value={title}
         onChange={(e) => setTitle(e.currentTarget.value)}
       />
 
       <TextInput
-        label="EPSG-Code (optional)"
-        description="Nur nötig, wenn die Datei kein Koordinatensystem enthält — z.B. 25832"
-        placeholder="aus der Datei gelesen"
+        label={t('uploadLayer.epsgCode')}
+        description={t('uploadLayer.epsgHint')}
+        placeholder={t('uploadLayer.epsgPlaceholder')}
         value={srs}
         onChange={(e) => setSrs(e.currentTarget.value)}
       />
@@ -353,7 +354,7 @@ function PointCloudPanel({ onDone, pendingFile }: { onDone: (msg: string) => voi
 
       <Group justify="flex-end">
         <Button leftSection={<IconChartDots3 size={16} />} loading={loading} disabled={!file} onClick={submit}>
-          Hochladen
+          {t('uploadLayer.upload')}
         </Button>
       </Group>
     </Stack>
@@ -361,6 +362,7 @@ function PointCloudPanel({ onDone, pendingFile }: { onDone: (msg: string) => voi
 }
 
 function TablePanel({ opened, onDone }: { opened: boolean; onDone: (msg: string) => void }) {
+  const { t } = useTranslation()
   const load = useApp((s) => s.load)
   const setLayerColumns = useApp((s) => s.setLayerColumns)
   const [tables, setTables] = useState<DbTable[]>([])
@@ -377,7 +379,7 @@ function TablePanel({ opened, onDone }: { opened: boolean; onDone: (msg: string)
     setTablesError(null)
     fetch(TABLES_URL)
       .then((res) => {
-        if (!res.ok) throw new Error(`Tabellenliste: HTTP ${res.status}`)
+        if (!res.ok) throw new Error(t('uploadLayer.tableListFailed', { status: res.status }))
         return res.json()
       })
       .then((body) => setTables(body.tables ?? []))
@@ -385,9 +387,9 @@ function TablePanel({ opened, onDone }: { opened: boolean; onDone: (msg: string)
       .finally(() => setTablesLoading(false))
   }, [opened])
 
-  const options = tables.map((t) => ({
-    value: `${t.schema}.${t.table}`,
-    label: `${t.schema}.${t.table}  ·  ${t.type}${t.registered ? '  ·  bereits als Layer registriert' : ''}`,
+  const options = tables.map((tbl) => ({
+    value: `${tbl.schema}.${tbl.table}`,
+    label: `${tbl.schema}.${tbl.table}  ·  ${tbl.type}${tbl.registered ? `  ·  ${t('uploadLayer.alreadyRegistered')}` : ''}`,
   }))
 
   async function submit() {
@@ -403,9 +405,9 @@ function TablePanel({ opened, onDone }: { opened: boolean; onDone: (msg: string)
         body: JSON.stringify({ schema_name, table, title: title.trim() || undefined }),
       })
       const body = await res.json().catch(() => null)
-      if (!res.ok) throw new Error(body?.detail ?? `Registrieren fehlgeschlagen: HTTP ${res.status}`)
+      if (!res.ok) throw new Error(body?.detail ?? t('uploadLayer.registerFailed', { status: res.status }))
 
-      onDone(`"${body.title}" als Layer registriert (${body.geometry_type.toLowerCase()})`)
+      onDone(t('uploadLayer.tableSuccess', { title: body.title, geometryType: body.geometry_type.toLowerCase() }))
       if (body.columns) setLayerColumns(body.layer, body.columns)
       setSelected(null)
       setTitle('')
@@ -420,13 +422,12 @@ function TablePanel({ opened, onDone }: { opened: boolean; onDone: (msg: string)
   return (
     <Stack gap="sm">
       <Text size="xs" c="dimmed">
-        Zeigt einen bereits vorhandenen PostGIS-Tabelle direkt als Layer an — es wird
-        nichts kopiert. Tabellen ohne passende Geometriespalte erscheinen nicht.
+        {t('uploadLayer.tableIntro')}
       </Text>
 
       <Select
-        label="Tabelle"
-        placeholder={tablesLoading ? 'lade…' : 'Tabelle auswählen'}
+        label={t('uploadLayer.tableLabel')}
+        placeholder={tablesLoading ? t('common.loading') : t('uploadLayer.tablePlaceholder')}
         data={options}
         value={selected}
         onChange={setSelected}
@@ -439,8 +440,8 @@ function TablePanel({ opened, onDone }: { opened: boolean; onDone: (msg: string)
       )}
 
       <TextInput
-        label="Titel (optional)"
-        placeholder={selected ?? 'wird aus dem Tabellennamen abgeleitet'}
+        label={t('uploadLayer.titleLabel')}
+        placeholder={selected ?? t('uploadLayer.titleFromTableName')}
         value={title}
         onChange={(e) => setTitle(e.currentTarget.value)}
       />
@@ -451,7 +452,7 @@ function TablePanel({ opened, onDone }: { opened: boolean; onDone: (msg: string)
 
       <Group justify="flex-end">
         <Button leftSection={<IconDatabase size={16} />} loading={loading} disabled={!selected} onClick={submit}>
-          Registrieren
+          {t('uploadLayer.register')}
         </Button>
       </Group>
     </Stack>
@@ -461,6 +462,7 @@ function TablePanel({ opened, onDone }: { opened: boolean; onDone: (msg: string)
 type UploadMode = 'file' | 'raster' | 'pointcloud' | 'table'
 
 export default function UploadLayer() {
+  const { t } = useTranslation()
   const opened = useUpload((s) => s.opened)
   const pendingFile = useUpload((s) => s.pendingFile)
   const closeUpload = useUpload((s) => s.close)
@@ -484,7 +486,7 @@ export default function UploadLayer() {
   }
 
   return (
-    <Modal opened={opened} onClose={close} title="Layer hinzufügen" centered>
+    <Modal opened={opened} onClose={close} title={t('uploadLayer.modalTitle')} centered>
       <Stack gap="sm">
         <SegmentedControl
           fullWidth
@@ -495,10 +497,10 @@ export default function UploadLayer() {
           // for the longer labels, and the panel below each one already
           // explains itself.
           data={[
-            { label: 'Datei', value: 'file' },
-            { label: 'Raster', value: 'raster' },
-            { label: 'Punktwolke', value: 'pointcloud' },
-            { label: 'Tabelle', value: 'table' },
+            { label: t('uploadLayer.modeFile'), value: 'file' },
+            { label: t('uploadLayer.modeRaster'), value: 'raster' },
+            { label: t('uploadLayer.modePointcloud'), value: 'pointcloud' },
+            { label: t('uploadLayer.modeTable'), value: 'table' },
           ]}
         />
 
@@ -512,7 +514,7 @@ export default function UploadLayer() {
         )}
 
         <Group justify="flex-end">
-          <Button variant="subtle" color="gray" onClick={close}>Schliessen</Button>
+          <Button variant="subtle" color="gray" onClick={close}>{t('common.close')}</Button>
         </Group>
       </Stack>
     </Modal>

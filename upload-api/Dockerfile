@@ -35,7 +35,7 @@ RUN python3 -m venv /opt/py3dtiles \
     && /opt/py3dtiles/bin/pip install "py3dtiles[las]==12.1.1" "laspy[lazrs]"
 
 WORKDIR /app
-COPY app.py ai_agent.py qgis_catalog.py /app/
+COPY app.py ai_agent.py qgis_catalog.py superset_client.py /app/
 
 # ---------------------------------------------------------------- non-root
 # Nothing here needs root, and this container

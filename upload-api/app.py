@@ -35,6 +35,7 @@ vibegis.map/osm-layers.map are never touched.
 """
 import contextvars
 import fcntl
+import hmac
 import json
 import logging
 import math
@@ -69,6 +70,7 @@ from sqlalchemy import create_engine, text
 
 import ai_agent
 import qgis_catalog
+import superset_client
 
 # ---------------------------------------------------------------- logging
 # JSON to stdout (picked up by Promtail -> Loki, see docker-compose.yml's
@@ -949,6 +951,96 @@ def auth_me(user: dict = Depends(require_login)):
     return {"username": user["username"], "role": user["role"], "tier": user.get("tier", "free")}
 
 
+# --------------------------------------------------------------- superset ---
+# Superset has no login of its own: the gateway authenticates every /analytics
+# request here first and passes the username on (nginx/locations.conf's
+# /auth/superset + /analytics/ blocks), and Superset's security manager
+# (superset/vibegis_security.py) turns that into an account.
+
+SUPERSET_INTERNAL_TOKEN = os.environ.get("SUPERSET_INTERNAL_TOKEN", "")
+
+
+@app.get("/auth/superset")
+def auth_superset(user: dict = Depends(require_login)):
+    """nginx's auth_request target for /analytics. 200 plus the identity the
+    gateway forwards as X-Remote-User; 401 with no session.
+
+    Separate from /auth/verify because that one runs
+    authorize_gateway_request(), which fails closed on a URI that names no
+    layer — which every Superset URI does. Per-layer authorization still
+    happens, just inside Superset: the security manager maps this user's
+    grants onto Superset roles (see /internal/superset/acl below)."""
+    return Response(status_code=200, headers={
+        "X-Vibegis-User": user["username"],
+        "X-Vibegis-Role": user.get("role", "viewer"),
+    })
+
+
+def require_internal_token(request: Request) -> None:
+    """Service-to-service guard for the /internal/* routes.
+
+    These are already unreachable from outside — nginx proxies only the routes
+    it lists, and an unlisted one falls through to the SPA — so this is the
+    second lock, for anything that lands on the compose network. 404 rather
+    than 403 so it does not confirm the route exists."""
+    supplied = request.headers.get("X-Internal-Token", "")
+    if not SUPERSET_INTERNAL_TOKEN or not hmac.compare_digest(supplied, SUPERSET_INTERNAL_TOKEN):
+        raise HTTPException(404, "Nicht gefunden")
+
+
+@app.get("/internal/superset/acl")
+def internal_superset_acl(username: str, request: Request):
+    """What Superset needs to know about a user: their role, and the tables
+    behind the layers they may see.
+
+    This exists so that visible_layers_for() stays the only implementation of
+    the ACL. Superset could query configdb.layer_grants itself, but a second
+    implementation of an access rule is a second implementation that can drift
+    from the first, and drift in an ACL is a security bug — so it asks."""
+    require_internal_token(request)
+    with engine().begin() as conn:
+        row = conn.execute(
+            text(
+                "SELECT id, username, role, subscription_tier "
+                "FROM userdb.users WHERE username = :u"
+            ),
+            {"u": username},
+        ).first()
+    if not row:
+        raise HTTPException(404, "Unbekannter Benutzer")
+
+    user = {
+        "sub": str(row.id), "username": row.username,
+        "role": row.role, "tier": row.subscription_tier,
+    }
+    # Same 30s-memoized index the tile gateway uses, so a Superset login costs
+    # no more than a map tile does.
+    _, tables = visible_layer_index(user)
+    return {
+        "username": row.username,
+        "role": row.role,
+        "tier": row.subscription_tier,
+        "tables": sorted([schema, table] for schema, table in tables),
+    }
+
+
+@app.post("/internal/superset/reconcile")
+def internal_superset_reconcile(request: Request):
+    """Bring Superset's dataset list back in line with what is published.
+
+    Registration happens inline on publish and is deliberately best-effort, so
+    that a Superset outage can never fail an upload — which only works if
+    something notices afterwards. This is that something; Dagster runs it
+    nightly."""
+    require_internal_token(request)
+    tables = sorted({
+        (l["schema"], l["table"])
+        for l in all_layers()
+        if l.get("schema") and l.get("table")
+    })
+    return superset_client.reconcile_datasets(tables)
+
+
 # -------------------------------------------------------------- /users
 # Admin-only account management, backing the in-app admin screen. POST is an
 # upsert (same semantics as bin/add-user.sh) so resubmitting the form for an
@@ -1016,6 +1108,7 @@ ETL_JOBS = [
     {"name": "reload_data", "label": "Vektordaten neu laden"},
     {"name": "publish_layers", "label": "Layer neu indizieren"},
     {"name": "add_test_column", "label": "Test-Spalte hinzufügen"},
+    {"name": "superset_sync", "label": "Superset-Datensätze abgleichen"},
 ]
 ETL_JOB_NAMES = {j["name"] for j in ETL_JOBS}
 
@@ -1402,6 +1495,86 @@ def record_layer_owner(layer_name: str, user: dict) -> None:
             "ON CONFLICT (layer_name) DO UPDATE SET owner_user_id = EXCLUDED.owner_user_id"
         ), {"n": layer_name, "u": int(user_id)})
     invalidate_visibility_cache()
+
+
+# ------------------------------------------------------ search box indexing
+#
+# dwh.search_index (postgis/initdb/05-3d-and-search.sql) is a materialized
+# view over a fixed set of seeded tables — its query is fixed at creation
+# time, so it can never grow to include a layer published later. This is the
+# dynamic counterpart: a plain table this service maintains directly, one
+# row per feature, for any vector layer whose table has a name-like column.
+# postgisftw.search() (what the frontend's search box calls) unions both
+# sources, so a hit from either reaches the UI the same way.
+
+SEARCH_NAME_COLUMNS = ("name", "title", "bezeichnung", "label", "shapename")
+
+
+def pick_search_name_column(schema: str, table: str) -> str | None:
+    """An exact match against SEARCH_NAME_COLUMNS first; failing that, the
+    shortest text column whose name merely contains "name" (LAU_NAME,
+    ADM2_NAME, shapeName — real-world admin/boundary data almost never uses
+    a bare "name" column). Never a wider guess than that: picking an
+    arbitrary text column would as easily surface a description or a note
+    as an actual name."""
+    with engine().begin() as conn:
+        cols = {
+            r[0].lower(): r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = :s AND table_name = :t "
+                    "AND data_type IN ('text', 'character varying', 'character')"
+                ),
+                {"s": schema, "t": table},
+            ).all()
+        }
+    for candidate in SEARCH_NAME_COLUMNS:
+        if candidate in cols:
+            return cols[candidate]
+    contains_name = sorted((real for lower, real in cols.items() if "name" in lower), key=len)
+    return contains_name[0] if contains_name else None
+
+
+def index_layer_for_search(schema: str, table: str, layer_name: str, title: str) -> None:
+    """Best-effort, called right after record_layer_owner() from every
+    vector publish path: a layer with no obvious name column, or any DB
+    error here, must never fail the publish itself — search is a
+    convenience layered on top, not part of the publish contract."""
+    try:
+        name_col = pick_search_name_column(schema, table)
+        if not name_col:
+            return
+        geom_col, _ = find_geometry_column(schema, table)
+        with engine().begin() as conn:
+            conn.execute(
+                text("DELETE FROM dwh.search_index_uploads WHERE layer_name = :l"),
+                {"l": layer_name},
+            )
+            conn.execute(
+                text(
+                    f'INSERT INTO dwh.search_index_uploads (layer_name, name, category, geom) '
+                    f'SELECT :l, "{name_col}"::text, :cat, ST_PointOnSurface(ST_Force2D("{geom_col}")) '
+                    f'FROM "{schema}"."{table}" WHERE "{name_col}" IS NOT NULL'
+                ),
+                {"l": layer_name, "cat": title},
+            )
+    except Exception as e:
+        log.warning("search index refresh failed", extra={"layer": layer_name, "error": str(e)})
+
+
+def remove_search_index_for_layer(layer_name: str) -> None:
+    """Called from DELETE /layers — a no-op if the layer was never indexed
+    (raster/point-cloud layers, or a vector layer with no name-like column),
+    same best-effort contract as index_layer_for_search()."""
+    try:
+        with engine().begin() as conn:
+            conn.execute(
+                text("DELETE FROM dwh.search_index_uploads WHERE layer_name = :l"),
+                {"l": layer_name},
+            )
+    except Exception as e:
+        log.warning("search index cleanup failed", extra={"layer": layer_name, "error": str(e)})
 
 
 def visible_layers_for(user: dict, all_layers: list[dict]) -> list[dict]:
@@ -2033,6 +2206,8 @@ def ingest_geodataframe(gdf, base_name: str, user: dict | None, *, require_crs: 
     generate_mapproxy_config()
     if user is not None:
         record_layer_owner(table, user)
+    index_layer_for_search("dwh", table, table, base_name)
+    superset_client.register_dataset("dwh", table)
 
     return {
         "layer": table,
@@ -2804,6 +2979,8 @@ def publish_derived_table(schema: str, table: str, title: str | None, user: dict
     generate_mapproxy_config()
     if user is not None:
         record_layer_owner(name, user)
+    index_layer_for_search(schema, table, name, resolved_title)
+    superset_client.register_dataset(schema, table)
 
     return {
         "layer": name,
@@ -3073,6 +3250,10 @@ def list_tables(user: dict = Depends(require_privileged)):
                 "SELECT f_table_schema, f_table_name, f_geometry_column, type, srid "
                 "FROM geometry_columns "
                 "WHERE f_table_schema NOT IN ('tiger', 'tiger_data', 'topology') "
+                # This service's own search-index support tables, not real data —
+                # see index_layer_for_search() — would otherwise clutter this
+                # picker as if they were registerable layers.
+                "AND NOT (f_table_schema = 'dwh' AND f_table_name IN ('search_index', 'search_index_uploads')) "
                 "ORDER BY f_table_schema, f_table_name"
             )
         ).all()
@@ -3282,6 +3463,7 @@ def delete_layer(name: str, drop_table: bool = False, user: dict = Depends(requi
     # the deleted one's tiles.
     purge_layer_cache(name)
     generate_mapproxy_config()
+    remove_search_index_for_layer(name)
     if removed["geometry_type"] == "RASTER":
         if drop_table:
             # `name` has just been proven, by remove_layer_block()'s own
@@ -3294,6 +3476,10 @@ def delete_layer(name: str, drop_table: bool = False, user: dict = Depends(requi
             for f in RASTERS_DIR.glob(f"{name}.*"):
                 f.unlink(missing_ok=True)
         return {"deleted": name, "table_dropped": False, "file_deleted": drop_table, "schema": None, "table": None}
+    # Unconditional, not gated on drop_table: the layer is unpublished either
+    # way, and a Superset dataset for a layer nobody can see any more is a
+    # chart waiting to break. The nightly reconcile converges to the same set.
+    superset_client.remove_dataset(removed["schema"], removed["table"])
     if drop_table:
         with engine().begin() as conn:
             conn.execute(text(f'DROP TABLE IF EXISTS "{removed["schema"]}"."{removed["table"]}"'))

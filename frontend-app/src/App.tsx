@@ -7,6 +7,7 @@ import AuthSplash from './AuthSplash'
 import { accentEdge } from './colorScheme'
 import ConnectedGlobe from './ConnectedGlobe'
 import DataViewBand from './DataViewBand'
+import AiAgentPanel from './AiAgentPanel'
 import LayerPanel from './LayerPanel'
 import LoginScreen from './LoginScreen'
 import MapTools from './MapTools'
@@ -226,6 +227,12 @@ export default function App() {
       {/* Docked sidebar, outside the Viewer tree — it reaches the camera via
           the store (Scene stashes it there) rather than useCesium(). */}
       <LayerPanel />
+
+      {/* Last in the row on purpose: map, sideband, layer panel, agent. The
+          chat is a docked column like the layer panel rather than an overlay
+          floating over the right edge, so talking to the agent about a layer
+          no longer hides the layer panel you are talking about. */}
+      <AiAgentPanel />
     </Box>
   )
 }

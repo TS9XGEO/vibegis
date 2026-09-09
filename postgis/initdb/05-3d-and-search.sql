@@ -114,6 +114,26 @@ CREATE INDEX search_geom_idx  ON dwh.search_index USING GIST (geom);
 CREATE UNIQUE INDEX search_sid_idx ON dwh.search_index (sid);
 ANALYZE dwh.search_index;
 
+-- Dynamic counterpart to the materialized view above: a materialized
+-- view's query is fixed at creation time, so it can never grow to include a
+-- layer published after this file ran. upload-api maintains this table
+-- directly instead — one row per feature, for any vector layer publish
+-- (upload, table registration, geoprocess result) whose table has a
+-- name-like column (see app.py's pick_search_name_column()) — refreshed on
+-- every publish and swept on layer delete. postgisftw.search() below unions
+-- both sources so the frontend's search box never has to know which one a
+-- hit came from.
+CREATE TABLE IF NOT EXISTS dwh.search_index_uploads (
+    sid        bigserial PRIMARY KEY,
+    layer_name text NOT NULL,
+    name       text NOT NULL,
+    category   text NOT NULL,
+    geom       geometry(Point, 4326) NOT NULL
+);
+CREATE INDEX search_uploads_name_trgm ON dwh.search_index_uploads USING GIN (name gin_trgm_ops);
+CREATE INDEX search_uploads_geom_idx  ON dwh.search_index_uploads USING GIST (geom);
+CREATE INDEX search_uploads_layer_idx ON dwh.search_index_uploads (layer_name);
+
 -- pg_featureserv publishes functions in the "postgisftw" schema.
 CREATE SCHEMA IF NOT EXISTS postgisftw;
 
@@ -122,22 +142,33 @@ DROP FUNCTION IF EXISTS postgisftw.search(text, integer);
 CREATE FUNCTION postgisftw.search(q text DEFAULT '', maxrows integer DEFAULT 15)
 RETURNS TABLE (name text, category text, score real, geom geometry)
 AS $$
-    SELECT s.name,
-           s.category,
-           similarity(unaccent(s.name), unaccent(q)) AS score,
-           s.geom
-    FROM dwh.search_index s
-    WHERE q <> ''
-      AND (unaccent(s.name) ILIKE '%' || unaccent(q) || '%'
-           OR unaccent(s.name) % unaccent(q))
-    ORDER BY (unaccent(s.name) ILIKE unaccent(q) || '%') DESC,
-             similarity(unaccent(s.name), unaccent(q)) DESC,
-             length(s.name) ASC
+    SELECT name, category, score, geom FROM (
+        SELECT s.name,
+               s.category,
+               similarity(unaccent(s.name), unaccent(q)) AS score,
+               s.geom
+        FROM dwh.search_index s
+        WHERE q <> ''
+          AND (unaccent(s.name) ILIKE '%' || unaccent(q) || '%'
+               OR unaccent(s.name) % unaccent(q))
+        UNION ALL
+        SELECT u.name,
+               u.category,
+               similarity(unaccent(u.name), unaccent(q)) AS score,
+               u.geom
+        FROM dwh.search_index_uploads u
+        WHERE q <> ''
+          AND (unaccent(u.name) ILIKE '%' || unaccent(q) || '%'
+               OR unaccent(u.name) % unaccent(q))
+    ) combined
+    ORDER BY (unaccent(name) ILIKE unaccent(q) || '%') DESC,
+             score DESC,
+             length(name) ASC
     LIMIT LEAST(GREATEST(maxrows, 1), 50);
 $$ LANGUAGE sql STABLE PARALLEL SAFE;
 
 COMMENT ON FUNCTION postgisftw.search IS
-    'Namenssuche ueber Verwaltungseinheiten, Gebaeude, Strassen und Landbedeckung.';
+    'Namenssuche ueber Verwaltungseinheiten, Gebaeude, Strassen, Landbedeckung sowie hochgeladene/registrierte Ebenen mit einer namensartigen Spalte.';
 
 -- =============================================================== report ====
 SELECT 'buildings3d' AS what, count(*)::text AS n FROM dwh.buildings3d

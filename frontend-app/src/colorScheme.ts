@@ -18,11 +18,18 @@ export function panelBorder(scheme: Scheme): string {
 /** The one deliberate accent flourish: a thin teal-to-amber gradient, reused
  * as the background of the floating panels' drag-handle strips (MapTools'
  * tools panel, the bottom-left HUD stack in App.tsx) — doubles as the drag
- * affordance and the app's small splash of color, no extra DOM needed. */
-export function accentEdge(scheme: Scheme): string {
+ * affordance and the app's small splash of color, no extra DOM needed.
+ *
+ * `reversed` runs the same two stops amber-to-teal. It exists for the docked
+ * columns that sit side by side in App.tsx's row: the layer panel's strip
+ * ends on amber, so the agent panel to its right starts on amber and the
+ * band reads as one continuous sweep across the seam instead of snapping
+ * back to teal halfway. */
+export function accentEdge(scheme: Scheme, reversed = false): string {
+  const deg = reversed ? 270 : 90
   return scheme === 'dark'
-    ? 'linear-gradient(90deg, #0d9488, #f59f00)'
-    : 'linear-gradient(90deg, #0f766e, #f08c00)'
+    ? `linear-gradient(${deg}deg, #0d9488, #f59f00)`
+    : `linear-gradient(${deg}deg, #0f766e, #f08c00)`
 }
 
 /**

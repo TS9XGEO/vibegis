@@ -28,6 +28,9 @@ Everything reaches the browser through nginx on `:8080`, one origin, no CORS.
                                   streams a GetPrint PDF back. NOTE these are
                                   upload-api routes despite the /qgis prefix —
                                   see "Things that will bite you"
+     /analytics   → superset      Apache Superset: saved BI dashboards, ad-hoc
+                                  charts, SQL Lab (admin/editor only). No login
+                                  of its own — see "Superset" below
      /terrain/    → static        baked quantized-mesh from terrain/tiles/
      /3dtiles/    → static        frontend-app/public/3dtiles/
      /pointclouds/→ static        published point-cloud tilesets from pointclouds/
@@ -177,6 +180,38 @@ anyone else must both meet the route's tier gate *and* own the specific layer
 (`configdb.layer_owners`). Used by `PATCH`/`DELETE /layer-config` and
 `DELETE /layers`.
 
+## Superset (reporting & BI)
+
+Added **alongside** `SelectionDashboard.tsx`, never in place of it: that panel's
+numbers come from the live Cesium selection and camera extent, and clicking a
+chart segment highlights features back on the globe. Superset can see neither,
+so it covers the other half — saved dashboards, ad-hoc charts and (later)
+scheduled report email over the `dwh` tables.
+
+**No second login.** `/analytics` is gated by `auth_request /auth/superset`
+(a separate target from `/auth/verify`, which parses layer names out of the URI
+and would fail closed on every Superset URL). upload-api answers with
+`X-Vibegis-User`, nginx forwards it as `X-Remote-User`, and
+`superset/vibegis_security.py` turns that into a Superset account.
+
+**The ACL is not reimplemented.** At login the security manager calls
+`GET /internal/superset/acl`, which runs the same `visible_layers_for()` every
+tile and feature request already obeys, and rebuilds a per-user Superset role
+(`vg_user_<name>`) holding exactly those datasets. Role mapping: admin →
+`Admin`, editor → `Alpha` + `sql_lab`, everyone else → `Gamma` + that per-user
+role. **SQL Lab is admin/editor only on purpose** — no dataset permission can
+restrict arbitrary SQL, and those two already see every layer by design.
+The outer wall is Postgres: Superset connects as `superset_reader`, which has
+SELECT on `dwh`/`public`/`reporting` and no grant at all on `configdb` or
+`userdb` (`postgis/initdb/08-superset.sql`, `bin/migrate-superset.sql`).
+
+**Datasets follow layers.** Every publish path registers one via
+`upload-api/superset_client.py`, deliberately best-effort so a Superset outage
+can never fail an upload — with Dagster's nightly `superset_sync` job
+(`POST /internal/superset/reconcile`) as the backstop that makes that safe.
+Superset's own metadata lives in a separate `superset` database in the same
+cluster; `bin/backup.sh` dumps it separately, since the main dump misses it.
+
 ## Localization (DE/EN)
 
 `react-i18next`, one file: `frontend-app/src/i18n/translations.ts` holds every UI
@@ -250,7 +285,8 @@ share the one label name across Prometheus and Loki.
 | `grafana/provisioning/dashboards/*.json` | nothing — Grafana's file provider polls every 10s (`dashboards.yaml`'s `updateIntervalSeconds`) |
 | `docker-stats-exporter/exporter.py` | `up -d --build docker-stats-exporter` — `build:`-based like upload-api, not bind-mounted |
 | `qgis-processing/worker.py`, `qgis-processing/Dockerfile` | `up -d --build qgis-processing` — `build:`-based like upload-api, so a plain `restart` silently runs the old image |
-| `upload-api/qgis_catalog.py` | `up -d --build upload-api` (it is COPYed into that image) |
+| `upload-api/qgis_catalog.py`, `upload-api/superset_client.py` | `up -d --build upload-api` (both are COPYed into that image) |
+| `superset/superset_config.py`, `superset/vibegis_security.py` | `up -d --build superset` — COPYed into the image, so a plain `restart` silently runs the old copy |
 
 A layer created through upload-api (`uploads.map`) is cached automatically — its
 `generate_mapproxy_config()` gives every such layer its own entry in
@@ -356,6 +392,43 @@ docker compose -f docker-compose.yml -f docker-compose.tls.yml \
   streamed, with an hourly sweep as the backstop. `QgsProject.write()` also emits a
   `<name>_attachments.zip` sidecar whether or not the project has attachments, so
   deleting only the `.qgs` slowly fills the volume with orphaned zips.
+- **Superset 4.1 has no app-root setting, so serving it at `/analytics` takes
+  four separate things and each covers URLs the others miss.** There is no
+  `SUPERSET_APP_ROOT` or `APPLICATION_ROOT` in its `config.py` — checked in the
+  running image, not assumed. ProxyFix (`ENABLE_PROXY_FIX` + `x_prefix`, fed by
+  nginx's `X-Forwarded-Prefix`) covers everything built with `url_for()`;
+  `STATIC_ASSETS_PREFIX` covers the asset URLs its Jinja templates build as
+  `{{ assets_prefix }}/static/...`, which never see `SCRIPT_NAME`; nginx's
+  `proxy_redirect ~^/(?!analytics/)(.*)$` fixes the hardcoded redirect strings
+  (the index view answers `Location: /superset/welcome/`); and a root
+  `location /static/` catches the webpack bundle URLs, which come from
+  Superset's asset manifest and no prefix setting reaches. Miss any one and
+  Superset renders blank or half-styled with **no error anywhere** — the
+  missing pieces are answered by the SPA catch-all with `index.html` at HTTP
+  200. `LOGO_TARGET_PATH` is hardcoded the same way and is set for the same
+  reason.
+- **`absolute_redirect off` in the `/analytics/` block is load-bearing, and the
+  failure looks nothing like the cause.** Superset's own redirects are all
+  relative — verified by asking it directly, bypassing nginx. But nginx expands
+  a path-only `proxy_redirect` replacement into an *absolute* URL built from
+  `$host` and the port it is **listening** on, which is 80 inside the container
+  while the browser came in on the published 8080. The browser was sent to
+  `http://localhost/` and got `ERR_CONNECTION_REFUSED` — nothing in any log
+  looks wrong, because from nginx's side the redirect was served fine. The same
+  applies to the `= /analytics` no-slash redirect. `Host $http_host` (not
+  `$host`) is set alongside it so the port also survives into anything Superset
+  builds itself, and so its CSRF Referer check matches the browser's origin.
+- **`apache/superset` ships no Postgres driver.** 4.1.3 has `redis`, `celery`
+  and `gunicorn` but not `psycopg2`, so the container dies on its first
+  `superset db upgrade` — with both its metadata store and the geodata it
+  charts being Postgres. `superset/Dockerfile` installs it explicitly.
+- **`http.cookiejar` silently drops cookies from a dotless host.** Every
+  service here is addressed by its Compose name (`superset`, `upload-api`), and
+  cookiejar's default policy refuses to store a cookie whose domain contains no
+  dot. Superset's REST API binds its CSRF token to a session cookie, so every
+  write failed with "The CSRF session token is missing" while login and the
+  token fetch both looked fine. `upload-api/superset_client.py` tracks cookies
+  by hand for exactly this reason — don't "simplify" it back to a cookie jar.
 - **Every upload-api route needs its own nginx `location`.** The gateway proxies them
   one by one; anything unlisted falls through to `/` and returns the React
   `index.html`, so a missing route looks like a *successful* HTML response rather than
@@ -602,14 +675,20 @@ field; don't quietly merge the two.
 The geoprocessing panel (buffer/dissolve/intersect/join — `POST /geoprocess`,
 see `upload-api/CLAUDE.md`, frontend in `Geoprocessing.tsx`), raster
 ingestion (`POST /upload-raster`, see `upload-api/CLAUDE.md`, frontend in
-`UploadLayer.tsx`'s raster mode), and point clustering (a per-layer toggle in
-`LayerPanel.tsx`, see `frontend-app/CLAUDE.md`'s `PointCluster.tsx` entry)
-have all since shipped; these were discussed at the same time and are still
-deliberately deferred:
+`UploadLayer.tsx`'s raster mode), point clustering (a per-layer toggle in
+`LayerPanel.tsx`, see `frontend-app/CLAUDE.md`'s `PointCluster.tsx` entry), and
+the selection-driven dashboard (counts/sums/charts over whatever
+`useSelection` holds — see `SelectionDashboard.tsx`) have all since shipped.
+Not yet built:
 
-- **A selection-driven dashboard.** Counts, sums and simple charts computed
-  over whatever `useSelection`'s current selection holds, reusing the
-  multi-layer, layer-tagged selection system already built.
+- **A shareable map-state permalink.** Encode camera position, visible
+  layers and active filters into the URL so a link reproduces the exact view
+  someone is looking at, instead of walking someone through the same clicks.
+  Worth resolving first: whether a permalink can name a layer the recipient
+  isn't authorized to see (it would need to fail the same way a direct tile
+  request already does under the per-layer ACL, not silently succeed) and
+  whether an active filter's column/value belongs in a URL at all for a
+  sensitive layer.
 
 Deeper notes load with the directory: `frontend-app/CLAUDE.md`, `upload-api/CLAUDE.md`,
 `mapserver/CLAUDE.md`. Onboarding and first-run live in `README.md`;

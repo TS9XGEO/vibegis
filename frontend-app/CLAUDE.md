@@ -7,7 +7,9 @@ linter — `npm run typecheck` is the whole safety net.
 
 ```
 main.tsx        25   Mantine provider, teal/amber theme, mounts <Notifications/>
-App.tsx        223   composes Scene + Sideband + LayerPanel + DataViewBand; gates on auth
+App.tsx        229   composes Scene + Sideband + LayerPanel + AiAgentPanel + DataViewBand;
+                     gates on auth. The top-level flex row runs map, sideband, layer
+                     panel, agent — the last two are docked columns, not overlays
 Scene.tsx      385   the globe: imagery layers, terrain, 3D tiles; a clustered point layer
                      renders through PointCluster.tsx and a point cloud through
                      PointCloudLayer.tsx, both instead of an ImageryLayer
@@ -168,7 +170,44 @@ Sideband.tsx   436  the docked icon band: panel toggles, reset-to-north, ETL tri
                      Geoprocessing/Pages (modal opens), and the Auswahl-Dashboard
                      toggle (selection.ts's `dashboardTabOpen`/`toggleDashboardTab()`,
                      since it's a tab-strip slot now, not a `panels.ts` boolean) — kept in
-                     the RAIL's old visual position even though it's no longer a RAIL entry
+                     the RAIL's old visual position even though it's no longer a RAIL entry.
+                     The RAIL loop itself now holds only `layerPanel` — map tools, the
+                     status HUD toggle, the tour menu, language, display size, color
+                     scheme and the tips toggle (tips/tipsSettings.ts) all moved into
+                     ExtraMenu.tsx's grid, popped out of the "extra-menu-btn" Popover
+                     at the end of the band
+ExtraMenu.tsx  ~    7x5 grid (extraMenu.ts's `useExtraMenu` — GRID_COLS/GRID_ROWS) of the
+                     six relocated controls above, freely draggable into any cell
+                     (@dnd-kit/core's plain useDraggable/useDroppable per cell, not the
+                     sortable-list preset LayerPanel.tsx uses for its linear layer order —
+                     this needs free 2D placement with gaps). Content only, no position of
+                     its own: Sideband.tsx wraps it in a Mantine `Popover` anchored to its
+                     own button, so it always pops out from there rather than floating
+                     free. Each tile's drag handle is a small corner grip, never the tile's
+                     own clickable area — several tiles open a Menu on click (tour/display
+                     size/color scheme), and dnd-kit's pointer listeners on the whole tile
+                     would fight that click, same reason LayerPanel.tsx's row drag handle
+                     is its own element. `open` and each icon's grid cell persist to
+                     localStorage, the same standing-preference treatment as the language
+                     toggle and UI size — unlike MapTools/StatusHud's own panels.ts state,
+                     deliberately never persisted
+Analytics.tsx  ~150  Superset dashboards inside the app — master-detail modal
+                     (list left, embedded dashboard right), same shape as
+                     Pages.tsx, opened from Sideband. Both requests go straight
+                     to Superset through the gateway on the same origin with the
+                     user's own Superset session: the list from its REST API (so
+                     it already shows exactly what that user's roles allow — no
+                     permission logic here that could disagree with Superset's),
+                     the dashboard as an iframe at `?standalone=3`, Superset's
+                     chrome-less view. Building a chart opens the full Superset
+                     UI in a tab instead; it does not fit usefully in a modal.
+                     The gateway's auth_request proves the VibeGIS session but
+                     does NOT create a Superset one — only Superset's own login
+                     redirect does, and an XHR never follows it — so the first
+                     API call from a fresh browser 401s. warmUpSession() walks
+                     that chain once on a 401 and retries; don't remove it.
+                     Not a replacement for SelectionDashboard.tsx — see the root
+                     CLAUDE.md's Superset section for why it cannot be one
 Geoprocessing.tsx 232  buffer/dissolve/intersect/join modal, admin-only, publishes
                      the result as a new layer via /geoprocess (mirrors UploadLayer.tsx)
 QgisProcessing.tsx 213  QGIS algorithm modal (Premium). Holds no algorithm knowledge
@@ -201,10 +240,13 @@ aiAgent.ts     124  zustand store `useAiAgent` — the AI agent chat panel's ses
                      convention as everything else here. `confirmPendingAction()` posts
                      to `/ai/execute-action` and reloads layers afterwards, same pattern
                      Geoprocessing.tsx uses post-mutation
-AiAgentPanel.tsx 158  the chat window itself — a fixed-position Paper (not a Modal/Drawer)
-                     so the map stays visible and reacts live while chatting, styled with
-                     colorScheme.ts's panelBg/panelBorder like MapTools.tsx's floating
-                     panel. Renders the message list, an inline proposal card
+AiAgentPanel.tsx 165  the chat window itself — a docked flex column mounted by App.tsx as
+                     the last sibling in the row (map, sideband, layer panel, agent), not
+                     a Modal/Drawer and no longer a fixed overlay against the right edge,
+                     which used to cover both the sideband and the layer panel. Opening it
+                     shrinks the map, and it borrows LayerPanel.tsx's width/opacity
+                     transition so the two docked columns behave alike. Styled with
+                     colorScheme.ts's panelBg/panelBorder. Renders the message list, an inline proposal card
                      (Ausführen/Abbrechen) when aiAgent.ts's `pendingAction` is set, and a
                      settings gear opening AiSettings.tsx
 AiSettings.tsx 142  bring-your-own-key form (provider + API key) for `/ai/settings/key`.
@@ -223,11 +265,19 @@ i18n/          ~     react-i18next. translations.ts is the single source of
                      i18next's resources at startup and exposes setLocale()
                      (persisted to localStorage — a deliberate, called-out
                      exception to the "ephemeral session state" rule below).
-                     Most of the app is converted (login flow, Sideband,
-                     LayerPanel's docked chrome, UserAdmin, Pages); the deep
+                     Most of the app is converted, including the deep
                      per-feature panels (SelectionDashboard, ClassifyLayer,
                      AttributeTable/Filter, Geoprocessing, the AI agent panel,
-                     UploadLayer's form copy) mostly aren't yet
+                     AiSettings, UploadLayer, QgisProcessing), login flow,
+                     Sideband, LayerPanel's docked chrome, UserAdmin and
+                     Pages. Still hardcoded German: LayerPanel's per-row
+                     buttons/tooltips (delete, rename, legend, cluster
+                     toggle, RGB-composite dialog — the docked chrome around
+                     the layer list is converted, the row-level controls
+                     inside it aren't), DataViewBand, MapTools/
+                     ToolboxControls, Legend.tsx, PointCluster.tsx,
+                     SqlFilterModal and a handful of stray strings in App.tsx
+                     and UserAdmin
 tour/          ~     Guided product tour (react-joyride), two tours: "upload"
                      (admin-only — walks through publishing a first layer,
                      using the real UploadLayer modal, not a mock) and
@@ -270,7 +320,12 @@ tips/          ~     Opportunistic "did you know" notifications — distinct
                      `tips.*` plus a showTip() call there, guarded by
                      whatever makes it relevant. Suppressed entirely while a
                      tour is running (tour/useTour.ts's `activeTourId`), so a
-                     tip notification never pops up over a tour tooltip
+                     tip notification never pops up over a tour tooltip.
+                     tipsSettings.ts's `useTipsSettings` is a separate on/off
+                     gate (Sideband.tsx's `TipsToggle`, localStorage-persisted
+                     like the language toggle) checked first in showTip() —
+                     it doesn't touch the per-tip "seen" flags, so re-enabling
+                     resumes rather than replays
 uiScale.ts      88  zustand store `useUiScale` — the global UI size (Klein 1 / Standard 1.25
                      / Groß 1.5), picked from Sideband.tsx's `UiScaleMenu`. Feeds
                      main.tsx's Mantine theme `scale` and a `--ui-scale` custom property

@@ -171,15 +171,17 @@ import {
   IconLock, IconTrash, IconX,
 } from '@tabler/icons-react'
 import { Math as CesiumMath } from 'cesium'
+import { useTranslation } from 'react-i18next'
 
 import {
   columnLabel, fetchColumnGroupBy, fetchColumns, fetchColumnStats, fetchTableCount, type Column, type ColumnStats,
 } from './columns'
 import { DASHBOARD_HIGHLIGHT_COLOR, panelBorder, SELECTION_COLOR } from './colorScheme'
+import { downloadCsv } from './csv'
 import { useDashboardHighlight } from './dashboardHighlight'
 import { buildCql } from './filter'
 import {
-  fetchAllFeatures, fetchFeaturesInBbox, fetchFeaturesWithFilter, SELECTION_FETCH_CAP, type Feature,
+  fetchAllFeatures, fetchFeaturesInBbox, fetchFeaturesWithFilter, SELECTION_FETCH_CAP,
 } from './features'
 import { useTools } from './tools'
 import { useSelectCandidates } from './ToolboxControls'
@@ -233,26 +235,6 @@ const NUMBER_FORMAT = new Intl.NumberFormat('de-DE', { maximumFractionDigits: 2 
 
 function fmt(n: number): string {
   return NUMBER_FORMAT.format(n)
-}
-
-function csvEscape(v: unknown): string {
-  const s = String(v ?? '')
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
-}
-
-function downloadCsv(filenameBase: string, features: Feature[]) {
-  const keys = Array.from(new Set(features.flatMap((f) => Object.keys(f.properties))))
-  const lines = [
-    keys.join(','),
-    ...features.map((f) => keys.map((k) => csvEscape(f.properties[k])).join(',')),
-  ]
-  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `${filenameBase.replace(/[^a-z0-9]+/gi, '_').toLowerCase() || 'auswahl'}.csv`
-  a.click()
-  URL.revokeObjectURL(url)
 }
 
 /** Top-N by count + an exact "Andere" remainder — same bucketing math
@@ -313,6 +295,7 @@ function AggregatesTable({
   rows: { key: string; label: string; stats: { sum: number; avg: number; min: number; max: number } | null }[]
   color: string
 }) {
+  const { t } = useTranslation()
   if (rows.length === 0) return null
   return (
     <Box
@@ -341,7 +324,7 @@ function AggregatesTable({
               <StatBox value={fmt(r.stats.max)} color={color} />
             </>
           ) : (
-            <Text size="xs" c="dimmed" style={{ gridColumn: 'span 4' }}>lädt…</Text>
+            <Text size="xs" c="dimmed" style={{ gridColumn: 'span 4' }}>{t('selectionDashboard.loading')}</Text>
           )}
         </Fragment>
       ))}
@@ -376,6 +359,16 @@ function BreakdownColumns({
    * it. */
   canUnfoldOther: boolean
 }) {
+  const { t } = useTranslation()
+  // 'Andere'/'(leer)' are internal sentinel values (bucketTopN/
+  // computeEntryBreakdown/entryGroupLabel), matched by equality all through
+  // this file's click/highlight wiring — translating them for display only,
+  // never the underlying label identity, keeps that wiring untouched.
+  function displayLabel(label: string): string {
+    if (label === 'Andere') return t('selectionDashboard.other')
+    if (label === '(leer)') return t('selectionDashboard.empty')
+    return label
+  }
   const [andereOpen, setAndereOpen] = useState(false)
   const maxCount = buckets.length > 0 ? Math.max(...buckets.map((b) => b.count)) : 0
   // Every bucket here already sums to the layer's real total (Andere's own
@@ -385,8 +378,11 @@ function BreakdownColumns({
   const total = buckets.reduce((n, b) => n + b.count, 0)
   const pct = (count: number) => (total > 0 ? Math.round((count / total) * 100) : 0)
   const pieData = useMemo(
-    () => buckets.map((b, i) => ({ name: b.label, value: b.count, color: LAYER_PALETTE[i % LAYER_PALETTE.length] })),
-    [buckets],
+    () => buckets.map((b, i) => ({
+      name: displayLabel(b.label),
+      value: b.count, color: LAYER_PALETTE[i % LAYER_PALETTE.length],
+    })),
+    [buckets, t],
   )
 
   if (buckets.length === 0) return null
@@ -396,7 +392,7 @@ function BreakdownColumns({
     const isLoading = loadingLabel === b.label
     const isAndere = b.label === 'Andere' && !!b.hidden?.length
     return (
-      <Tooltip key={b.label} label="Auf der Karte hervorheben" withArrow position="left" openDelay={400}>
+      <Tooltip key={b.label} label={t('selectionDashboard.highlightOnMap')} withArrow position="left" openDelay={400}>
         <Group
           justify="space-between"
           gap={6}
@@ -423,13 +419,13 @@ function BreakdownColumns({
           <Group gap={2} wrap="nowrap" style={{ position: 'relative', minWidth: 0 }}>
             {isAndere && (
               <Tooltip
-                label={canUnfoldOther ? (andereOpen ? 'Andere einklappen' : 'Andere aufklappen') : 'Andere aufklappen (Premium)'}
+                label={canUnfoldOther ? (andereOpen ? t('selectionDashboard.collapseOther') : t('selectionDashboard.expandOther')) : t('selectionDashboard.expandOtherPremium')}
                 withArrow
                 position="top"
               >
                 <ActionIcon
                   variant="transparent" size="xs"
-                  aria-label={canUnfoldOther ? (andereOpen ? 'Andere einklappen' : 'Andere aufklappen') : 'Andere aufklappen (Premium)'}
+                  aria-label={canUnfoldOther ? (andereOpen ? t('selectionDashboard.collapseOther') : t('selectionDashboard.expandOther')) : t('selectionDashboard.expandOtherPremium')}
                   onClick={(e) => { e.stopPropagation(); if (canUnfoldOther) setAndereOpen((o) => !o) }}
                   style={{ flexShrink: 0, opacity: canUnfoldOther ? 1 : 0.45, cursor: canUnfoldOther ? 'pointer' : 'default' }}
                 >
@@ -439,16 +435,16 @@ function BreakdownColumns({
                 </ActionIcon>
               </Tooltip>
             )}
-            <Text size="xs" c="dimmed" truncate>{b.label}</Text>
+            <Text size="xs" c="dimmed" truncate>{displayLabel(b.label)}</Text>
           </Group>
           <Group gap={2} wrap="nowrap" style={{ position: 'relative' }}>
             <Text size="xs" fw={600}>{b.count}</Text>
             <Text size="9px" c="dimmed">{pct(b.count)}%</Text>
             {isLoading && <Loader size={10} />}
             {!isLoading && onDrillThrough && (
-              <Tooltip label={drillThroughTooltip ?? 'In Tabelle öffnen'} withArrow>
+              <Tooltip label={drillThroughTooltip ?? t('selectionDashboard.openInTable')} withArrow>
                 <ActionIcon
-                  variant="subtle" size="xs" aria-label="In Tabelle öffnen"
+                  variant="subtle" size="xs" aria-label={t('selectionDashboard.openInTable')}
                   onClick={(e) => { e.stopPropagation(); onDrillThrough(b.label) }}
                 >
                   <IconExternalLink size={11} />
@@ -483,16 +479,16 @@ function BreakdownColumns({
           size="xs"
           fullWidth
           data={[
-            { label: 'Balken', value: 'bar' },
-            { label: 'Kreis', value: 'pie' },
-            { label: 'Ring', value: 'donut' },
+            { label: t('selectionDashboard.chartBar'), value: 'bar' },
+            { label: t('selectionDashboard.chartPie'), value: 'pie' },
+            { label: t('selectionDashboard.chartDonut'), value: 'donut' },
           ]}
           value={chartType}
           onChange={(v) => setChartType(v as ChartType)}
         />
         <Switch
           size="xs"
-          label="Beschriftungen"
+          label={t('selectionDashboard.labels')}
           checked={showLabels}
           onChange={(e) => setShowLabels(e.currentTarget.checked)}
         />
@@ -504,7 +500,10 @@ function BreakdownColumns({
             // row's own `color` field — Mantine's BarChart prefers that over
             // the flat `series` color below (which stays only as a fallback)
             // whenever it's present, one <Cell> per bar under the hood.
-            data={buckets.map((b, i) => ({ label: b.label, count: b.count, color: LAYER_PALETTE[i % LAYER_PALETTE.length] }))}
+            data={buckets.map((b, i) => ({
+              label: displayLabel(b.label),
+              count: b.count, color: LAYER_PALETTE[i % LAYER_PALETTE.length],
+            }))}
             dataKey="label"
             series={[{ name: 'count', color }]}
             withLegend={false}
@@ -600,6 +599,7 @@ function LayerNavRow({
   hasFilter?: boolean
   onClick: () => void
 }) {
+  const { t } = useTranslation()
   return (
     <Group
       gap={6}
@@ -618,7 +618,7 @@ function LayerNavRow({
         {title}
       </Text>
       {hasFilter && (
-        <Tooltip label="Filter aktiv" withArrow>
+        <Tooltip label={t('selectionDashboard.filterActive')} withArrow>
           <IconFilter size={11} style={{ flexShrink: 0, opacity: 0.7 }} />
         </Tooltip>
       )}
@@ -700,6 +700,7 @@ function LayerSummary({
   totalSelected: number
   isActive: boolean
 }) {
+  const { t } = useTranslation()
   const dynamicCollections = useApp((s) => s.dynamicCollections)
   const layerConfigs = useApp((s) => s.layerConfigs)
   const replaceSelectionForLayers = useSelection((s) => s.replaceSelectionForLayers)
@@ -773,9 +774,9 @@ function LayerSummary({
         <RingProgress size={22} thickness={3} roundCaps sections={[{ value: share, color }]} />
         <Text size="xs" c="dimmed" truncate style={{ flex: 1, minWidth: 0 }}>{title}</Text>
         <Text size="xs" fw={700}>{entries.length}</Text>
-        <Tooltip label="Als CSV exportieren" withArrow>
+        <Tooltip label={t('selectionDashboard.exportCsv')} withArrow>
           <ActionIcon
-            variant="subtle" size="xs" aria-label="Als CSV exportieren"
+            variant="subtle" size="xs" aria-label={t('selectionDashboard.exportCsv')}
             onClick={() => downloadCsv(title, entries.map((en) => en.feature))}
           >
             <IconDownload size={12} />
@@ -783,7 +784,7 @@ function LayerSummary({
         </Tooltip>
       </Group>
       <Box pt={8}>
-        {!collection && <Text size="xs" c="dimmed">Keine Attribute verfügbar</Text>}
+        {!collection && <Text size="xs" c="dimmed">{t('selectionDashboard.noAttributes')}</Text>}
         {colError && <Text size="xs" c="red">{colError}</Text>}
         <AggregatesTable
           rows={aggregates.map((a) => ({ key: a.key, label: columnLabel(aliases, a.key), stats: a }))}
@@ -794,7 +795,7 @@ function LayerSummary({
             <MultiSelect
               size="xs"
               mt={4}
-              placeholder={groupBy.length === 0 ? 'Gruppieren nach…' : undefined}
+              placeholder={groupBy.length === 0 ? t('selectionDashboard.groupByPlaceholder') : undefined}
               clearable
               maxValues={canGroupByMultiple ? undefined : 1}
               data={categoricalCols.map((c) => ({ value: c.key, label: columnLabel(aliases, c.key) }))}
@@ -803,7 +804,7 @@ function LayerSummary({
               comboboxProps={{ withinPortal: false }}
             />
             {!canGroupByMultiple && (
-              <Text size="9px" c="dimmed" mt={2}>Mehrere Spalten gleichzeitig: Premium</Text>
+              <Text size="9px" c="dimmed" mt={2}>{t('selectionDashboard.multiColumnPremium')}</Text>
             )}
             {breakdown && (
               <BreakdownColumns
@@ -823,7 +824,7 @@ function LayerSummary({
                   const b = bucketByLabel.get(label)
                   if (b) drillThrough(b)
                 } : undefined}
-                drillThroughTooltip="In Tabelle öffnen (ersetzt die Auswahl)"
+                drillThroughTooltip={t('selectionDashboard.openInTableReplacesSelection')}
                 donutCenterLabel={String(entries.length)}
               />
             )}
@@ -853,6 +854,7 @@ function LayerOverviewCard({
   totalVisibleCount: number
   isActive: boolean
 }) {
+  const { t } = useTranslation()
   const layerConfigs = useApp((s) => s.layerConfigs)
   const replaceSelectionForLayers = useSelection((s) => s.replaceSelectionForLayers)
   const openLayerTab = useSelection((s) => s.openLayerTab)
@@ -1067,10 +1069,10 @@ function LayerOverviewCard({
   }
 
   const csvTooltip = viewMode === 'viewport'
-    ? (viewportTruncated ? `Als CSV exportieren (erste ${SELECTION_FETCH_CAP} im Kartenausschnitt)` : 'Als CSV exportieren')
+    ? (viewportTruncated ? t('selectionDashboard.exportCsvLimitedViewport', { count: SELECTION_FETCH_CAP }) : t('selectionDashboard.exportCsv'))
     : (count !== null && count > SELECTION_FETCH_CAP
-      ? `Als CSV exportieren (erste ${SELECTION_FETCH_CAP} von ${count})`
-      : 'Als CSV exportieren')
+      ? t('selectionDashboard.exportCsvLimitedTotal', { count: SELECTION_FETCH_CAP, total: count })
+      : t('selectionDashboard.exportCsv'))
 
   return (
     <Box style={{ display: isActive ? 'block' : 'none' }}>
@@ -1079,7 +1081,7 @@ function LayerOverviewCard({
         <RingProgress size={22} thickness={3} roundCaps sections={[{ value: share, color }]} />
         <Text size="xs" c="dimmed" truncate style={{ flex: 1, minWidth: 0 }}>{title}</Text>
         {activeFilter && (
-          <Tooltip label="Filter aktiv — zeigt nur passende Zeilen" withArrow>
+          <Tooltip label={t('selectionDashboard.filterActiveMatchingOnly')} withArrow>
             <IconFilter size={12} style={{ flexShrink: 0, opacity: 0.75 }} />
           </Tooltip>
         )}
@@ -1088,7 +1090,7 @@ function LayerOverviewCard({
         </Text>
         <Tooltip label={csvTooltip} withArrow>
           <ActionIcon
-            variant="subtle" size="xs" aria-label="Als CSV exportieren" disabled={exporting}
+            variant="subtle" size="xs" aria-label={t('selectionDashboard.exportCsv')} disabled={exporting}
             onClick={() => void exportCsv()}
           >
             {exporting ? <Loader size={12} /> : <IconDownload size={12} />}
@@ -1102,12 +1104,12 @@ function LayerOverviewCard({
         value={viewMode}
         onChange={(v) => setViewMode(v as 'viewport' | 'all')}
         data={[
-          { label: 'Kartenansicht', value: 'viewport' },
-          { label: 'Alle Zeilen', value: 'all' },
+          { label: t('attributeTable.viewport'), value: 'viewport' },
+          { label: t('attributeTable.allRows'), value: 'all' },
         ]}
       />
       {viewMode === 'viewport' && viewportTruncated && (
-        <Text size="9px" c="dimmed" mt={2}>Zeigt nur einen Ausschnitt — weiter einzoomen für Vollständigkeit.</Text>
+        <Text size="9px" c="dimmed" mt={2}>{t('selectionDashboard.viewportTruncated')}</Text>
       )}
       {viewMode === 'viewport' && viewportError && <Text size="xs" c="red" mt={4}>{viewportError}</Text>}
       <Box pt={8}>
@@ -1128,7 +1130,7 @@ function LayerOverviewCard({
             <MultiSelect
               size="xs"
               mt={4}
-              placeholder={groupBy.length === 0 ? 'Gruppieren nach…' : undefined}
+              placeholder={groupBy.length === 0 ? t('selectionDashboard.groupByPlaceholder') : undefined}
               clearable
               maxValues={canGroupByMultiple ? undefined : 1}
               data={categoricalCols.map((c) => ({ value: c.key, label: columnLabel(aliases, c.key) }))}
@@ -1137,7 +1139,7 @@ function LayerOverviewCard({
               comboboxProps={{ withinPortal: false }}
             />
             {!canGroupByMultiple && (
-              <Text size="9px" c="dimmed" mt={2}>Mehrere Spalten gleichzeitig: Premium</Text>
+              <Text size="9px" c="dimmed" mt={2}>{t('selectionDashboard.multiColumnPremium')}</Text>
             )}
             {viewMode === 'all' && groupError && <Text size="xs" c="red" mt={4}>{groupError}</Text>}
             {viewMode === 'viewport' && viewportBuckets && (
@@ -1160,7 +1162,7 @@ function LayerOverviewCard({
                   replaceSelectionForLayers([layerName], b.entries)
                   openLayerTab({ name: layerName, collection })
                 }}
-                drillThroughTooltip="In Tabelle öffnen (ersetzt die Auswahl)"
+                drillThroughTooltip={t('selectionDashboard.openInTableReplacesSelection')}
                 donutCenterLabel={String(viewportEntries.length)}
               />
             )}
@@ -1177,7 +1179,7 @@ function LayerOverviewCard({
                 canUnfoldOther={canGroupByMultiple}
                 onRowClick={onRowClick}
                 onDrillThrough={onDrillThrough}
-                drillThroughTooltip="In Tabelle öffnen (ersetzt die Auswahl)"
+                drillThroughTooltip={t('selectionDashboard.openInTableReplacesSelection')}
                 donutCenterLabel={count === null ? '' : String(count)}
               />
             )}
@@ -1197,6 +1199,7 @@ function LayerOverviewCard({
 // and shares its state, so this copy and the floating toolbox's copy can
 // never disagree.
 export function SelectToolsRow() {
+  const { t } = useTranslation()
   const { setIdentify, setMeasure } = useTools()
   const selectMode = useSelection((s) => s.mode)
   const setSelectMode = useSelection((s) => s.setMode)
@@ -1209,12 +1212,12 @@ export function SelectToolsRow() {
     <Group gap={6} wrap="nowrap">
       {(['point', 'circle', 'polygon'] as const).map((m) => {
         const icon = m === 'point' ? <IconClick size={15} /> : m === 'circle' ? <IconCircle size={15} /> : <IconLasso size={15} />
-        const label = m === 'point' ? 'Punkt' : m === 'circle' ? 'Kreis' : 'Polygon'
+        const label = m === 'point' ? t('selectionDashboard.selectPoint') : m === 'circle' ? t('selectionDashboard.selectCircle') : t('selectionDashboard.selectPolygon')
         const disabledReason = selectScope === 'active'
-          ? 'Zuerst eine Sachdatentabelle öffnen'
-          : 'Mindestens einen Layer sichtbar schalten'
+          ? t('selectionDashboard.selectFirstOpenTable')
+          : t('selectionDashboard.selectFirstVisibleLayer')
         return (
-          <Tooltip key={m} label={selectCandidates.length > 0 ? `${label} auswählen` : disabledReason} withArrow>
+          <Tooltip key={m} label={selectCandidates.length > 0 ? t('selectionDashboard.selectThis', { label }) : disabledReason} withArrow>
             <ActionIcon
               variant={selectMode === m ? 'filled' : 'subtle'}
               color={selectMode === m ? 'yellow' : 'gray'}
@@ -1235,9 +1238,9 @@ export function SelectToolsRow() {
       {selected.size > 0 && (
         <>
           <Badge size="sm" variant="light" color="yellow">
-            {selected.size} ausgewählt
+            {t('selectionDashboard.selectedCount', { count: selected.size })}
           </Badge>
-          <Tooltip label="Auswahl aufheben" withArrow>
+          <Tooltip label={t('selectionDashboard.clearSelection')} withArrow>
             <ActionIcon variant="subtle" size="sm" color="gray" onClick={clearSelection}>
               <IconX size={13} />
             </ActionIcon>
@@ -1249,6 +1252,7 @@ export function SelectToolsRow() {
 }
 
 function BookmarkBar({ hasSelection, scheme }: { hasSelection: boolean; scheme: 'light' | 'dark' }) {
+  const { t } = useTranslation()
   const bookmarks = useSelection((s) => s.bookmarks)
   const saveBookmark = useSelection((s) => s.saveBookmark)
   const restoreBookmark = useSelection((s) => s.restoreBookmark)
@@ -1271,7 +1275,7 @@ function BookmarkBar({ hasSelection, scheme }: { hasSelection: boolean; scheme: 
         <TextInput
           size="xs"
           autoFocus
-          placeholder="Name der Auswahl"
+          placeholder={t('selectionDashboard.bookmarkNamePlaceholder')}
           value={name}
           onChange={(e) => setName(e.currentTarget.value)}
           onKeyDown={(e) => {
@@ -1284,7 +1288,7 @@ function BookmarkBar({ hasSelection, scheme }: { hasSelection: boolean; scheme: 
         hasSelection && (
           <Group gap={4} wrap="nowrap" onClick={() => setNaming(true)} style={{ cursor: 'pointer' }}>
             <IconBookmark size={12} color={SELECTION_COLOR} />
-            <Text size="xs" c="dimmed">Auswahl merken…</Text>
+            <Text size="xs" c="dimmed">{t('selectionDashboard.rememberSelection')}</Text>
           </Group>
         )
       )}
@@ -1295,7 +1299,7 @@ function BookmarkBar({ hasSelection, scheme }: { hasSelection: boolean; scheme: 
             <Text size="xs" c="dimmed" truncate>{b.name}</Text>
           </Group>
           <ActionIcon
-            variant="subtle" size="xs" color="gray" aria-label="Lesezeichen löschen"
+            variant="subtle" size="xs" color="gray" aria-label={t('selectionDashboard.deleteBookmark')}
             onClick={() => deleteBookmark(b.id)}
           >
             <IconTrash size={11} />
@@ -1307,6 +1311,7 @@ function BookmarkBar({ hasSelection, scheme }: { hasSelection: boolean; scheme: 
 }
 
 export default function SelectionDashboardPanel({ isActive }: { isActive: boolean }) {
+  const { t } = useTranslation()
   const scheme = useComputedColorScheme('dark')
   const selected = useSelection((s) => s.selected)
   const closeDashboardTab = useSelection((s) => s.closeDashboardTab)
@@ -1436,8 +1441,8 @@ export default function SelectionDashboardPanel({ isActive }: { isActive: boolea
           sits among others, so this is a second, more visible way to reach
           the exact same closeDashboardTab(). */}
       <Group justify="flex-end" pb={6} style={{ flexShrink: 0 }}>
-        <Tooltip label="Dashboard schliessen" withArrow>
-          <ActionIcon variant="subtle" size="sm" color="gray" aria-label="Dashboard schliessen" onClick={closeDashboardTab}>
+        <Tooltip label={t('selectionDashboard.closeDashboard')} withArrow>
+          <ActionIcon variant="subtle" size="sm" color="gray" aria-label={t('selectionDashboard.closeDashboard')} onClick={closeDashboardTab}>
             <IconX size={15} />
           </ActionIcon>
         </Tooltip>
@@ -1454,7 +1459,7 @@ export default function SelectionDashboardPanel({ isActive }: { isActive: boolea
           // Distinguishes this from a real selection, since drill-through
           // from here does turn into one (see this file's v8 doc note).
           <Text size="9px" c="dimmed" fw={700} tt="uppercase" mb={6} style={{ letterSpacing: '0.08em', flexShrink: 0 }}>
-            Keine Auswahl — Übersicht aller sichtbaren Layer
+            {t('selectionDashboard.noSelectionOverview')}
           </Text>
         )}
 

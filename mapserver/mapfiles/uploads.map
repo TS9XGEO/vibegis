@@ -253,9 +253,31 @@ LAYER
     "gml_include_items" "all"
     "ows_keywordlist"   "source:dwh.upload_voronoi_polygons_ffentliche_verkehrsmitt,geomtype:polygon"
   END
+  CLASSITEM   "rndm_int"
   CLASS
-    NAME "Voronoi polygons — Öffentliche Verkehrsmittel"
-    STYLE  COLOR 224 122 95  OUTLINECOLOR 123 67 52  WIDTH 3.5  END
+    NAME "0 – 20"
+    EXPRESSION ([rndm_int] >= 0 AND [rndm_int] < 20)
+    STYLE  COLOR 207 223 240  OUTLINECOLOR 113 122 132  WIDTH 3.5  END
+  END
+  CLASS
+    NAME "20 – 40"
+    EXPRESSION ([rndm_int] >= 20 AND [rndm_int] < 40)
+    STYLE  COLOR 162 182 202  OUTLINECOLOR 89 100 111  WIDTH 3.5  END
+  END
+  CLASS
+    NAME "40 – 60"
+    EXPRESSION ([rndm_int] >= 40 AND [rndm_int] < 60)
+    STYLE  COLOR 117 140 164  OUTLINECOLOR 64 77 90  WIDTH 3.5  END
+  END
+  CLASS
+    NAME "60 – 80"
+    EXPRESSION ([rndm_int] >= 60 AND [rndm_int] < 80)
+    STYLE  COLOR 72 99 126  OUTLINECOLOR 39 54 69  WIDTH 3.5  END
+  END
+  CLASS
+    NAME "80 – 100"
+    EXPRESSION ([rndm_int] >= 80 AND [rndm_int] < 100)
+    STYLE  COLOR 27 57 88  OUTLINECOLOR 14 31 48  WIDTH 3.5  END
   END
 END
 

@@ -3,7 +3,9 @@
 Asset-oriented, matching Dagster's model: each asset is a dataset that
 lands somewhere concrete (a PostGIS table, a GeoTIFF on disk), not a task.
 """
+import json
 import os
+import urllib.request
 
 from dagster import (
     AssetExecutionContext,
@@ -134,6 +136,42 @@ def rndm_int_column(context: AssetExecutionContext) -> MaterializeResult:
     return MaterializeResult(metadata={"tables": MetadataValue.int(len(tables))})
 
 
+@asset(
+    group_name="reporting",
+    description="Reconcile Superset's dataset list with the layers actually published.",
+)
+def superset_datasets(context: AssetExecutionContext) -> MaterializeResult:
+    """Superset's dataset registry, treated as a dataset that lands somewhere
+    concrete — same framing as every other asset here.
+
+    upload-api registers each layer with Superset inline as it publishes, but
+    that call is deliberately best-effort: a Superset outage must never fail an
+    upload. Work that is allowed to fail needs something that notices, and this
+    is it. The reconcile itself lives in upload-api (it needs read_layers() and
+    the service credentials); this asset only triggers it, so there is one
+    implementation rather than a second one in a different image's venv.
+    """
+    token = os.environ.get("SUPERSET_INTERNAL_TOKEN", "")
+    if not token:
+        # An install that does not run Superset should not have a red asset.
+        return MaterializeResult(metadata={"skipped": MetadataValue.text(
+            "SUPERSET_INTERNAL_TOKEN unset — Superset not configured"
+        )})
+
+    url = f"{os.environ.get('UPLOAD_API_URL', 'http://upload-api:8000')}/internal/superset/reconcile"
+    request = urllib.request.Request(
+        url, data=b"", method="POST", headers={"X-Internal-Token": token},
+    )
+    with urllib.request.urlopen(request, timeout=120) as response:
+        result = json.loads(response.read().decode("utf-8"))
+
+    context.log.info("superset reconcile: %s", result)
+    return MaterializeResult(metadata={
+        key: MetadataValue.int(value) if isinstance(value, int) else MetadataValue.text(str(value))
+        for key, value in result.items()
+    })
+
+
 refresh_job = define_asset_job("refresh_all", selection="*")
 
 # A handful of separately-runnable named jobs over the same asset graph, used
@@ -152,15 +190,29 @@ add_test_column_job = define_asset_job(
     "add_test_column", selection=[rndm_int_column],
     description="Add/refresh a random integer test column on every published layer.",
 )
+superset_sync_job = define_asset_job(
+    "superset_sync", selection=[superset_datasets],
+    description="Reconcile Superset's datasets with the published layers.",
+)
 
 defs = Definitions(
-    assets=[postgis_ready, raw_vectors, published_layers, rndm_int_column],
-    jobs=[refresh_job, reload_data_job, publish_layers_job, add_test_column_job],
+    assets=[postgis_ready, raw_vectors, published_layers, rndm_int_column, superset_datasets],
+    jobs=[refresh_job, reload_data_job, publish_layers_job, add_test_column_job, superset_sync_job],
     schedules=[
         ScheduleDefinition(
             job=refresh_job,
             cron_schedule="0 3 * * *",   # nightly 03:00
             default_status=DefaultScheduleStatus.STOPPED,
-        )
+        ),
+        ScheduleDefinition(
+            job=superset_sync_job,
+            cron_schedule="30 3 * * *",  # nightly 03:30, after the refresh above
+            # RUNNING, unlike the refresh schedule above, and deliberately so:
+            # this is the backstop for the best-effort dataset registration
+            # upload-api does inline, so a version of it that has to be
+            # switched on by hand would be a safety net nobody hung up. It is
+            # idempotent and does nothing at all when Superset is unconfigured.
+            default_status=DefaultScheduleStatus.RUNNING,
+        ),
     ],
 )

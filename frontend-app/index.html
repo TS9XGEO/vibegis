@@ -7,6 +7,26 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&display=swap" rel="stylesheet" />
+    <script>
+      // Sets the color-scheme attribute before first paint, from the same
+      // localStorage key Mantine's useMantineColorScheme() (Sideband.tsx's
+      // ColorSchemeMenu) reads/writes itself — otherwise a stored "light"
+      // preference would flash this page's own hardcoded-dark background
+      // for a moment before React mounts and Mantine sets the attribute
+      // itself. Falls back to the OS preference for the default "auto".
+      (function () {
+        try {
+          var stored = localStorage.getItem('mantine-color-scheme-value') || 'auto'
+          var resolved = stored === 'auto'
+            ? (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+            : stored
+          document.documentElement.setAttribute('data-mantine-color-scheme', resolved)
+        } catch (e) {
+          // localStorage unavailable (private mode etc.) — the CSS below
+          // still defaults to this app's original dark background.
+        }
+      })()
+    </script>
     <style>
       html, body, #root { height: 100%; margin: 0; padding: 0; overflow: hidden; }
 
@@ -32,6 +52,7 @@
       :root { --ui-scale: 1; }
       svg.tabler-icon, svg[data-ui-icon] { scale: var(--ui-scale); }
       body { background: #0f1115; }
+      html[data-mantine-color-scheme="light"] body { background: #ffffff; }
 
       /* Shared by LoginScreen and AuthSplash (see colorScheme.ts) */
       @keyframes authGradientShift {

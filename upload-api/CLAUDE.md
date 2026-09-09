@@ -69,6 +69,9 @@ entirely by `is_privileged_role()`.
 | `POST /login`, `POST /logout` | `none` | issue/clear the `vibegis_session` cookie |
 | `GET /auth/verify` | `require_login` | 200/401/403 only — nginx's `auth_request` target, not for direct use. Also authorizes the **specific layers** the original request names, via the `X-Original-URI` header nginx forwards — see the gateway-authorization contract below |
 | `GET /auth/me` | `require_login` | current user's `{username, role, tier}` |
+| `GET /auth/superset` | `require_login` | nginx's `auth_request` target for `/analytics`. 200 plus `X-Vibegis-User`/`X-Vibegis-Role`, which the gateway forwards to Superset as `X-Remote-User`. Separate from `/auth/verify` because that one authorizes named layers and fails closed on a URI naming none — which every Superset URL does |
+| `GET /internal/superset/acl` | `require_internal_token` | role, tier and the `(schema, table)` pairs behind this user's visible layers, from `visible_layer_index()`. Exists so `visible_layers_for()` stays the ACL's only implementation — Superset asks rather than re-deriving it |
+| `POST /internal/superset/reconcile` | `require_internal_token` | re-registers/removes Superset datasets to match `all_layers()`; Dagster's `superset_sync` runs it nightly. The backstop that makes inline registration safe to do best-effort |
 | `GET/POST/DELETE /groups`, `/groups/{id}/members/{user_id}` | `require_role("admin")` | the group side of the per-layer ACL; `AccessAdmin.tsx` drives it |
 | `GET/POST/DELETE /layer-grants` | `require_role("admin")` | the grants themselves — a layer becomes visible to a user or a group |
 | `GET/POST /users`, `DELETE /users/{username}` | `require_role("admin")` | admin-only account management; `POST` body/response includes `subscription_tier` alongside `role` |
@@ -381,6 +384,23 @@ entirely by `is_privileged_role()`.
   `qgis-processing` worker is a separate image with no in-process import path. It has
   no auth and no nginx `location` — like Dagster, it is reachable only on the
   `vibegis` network, and every tier/ACL check happens here before the call.
+- **Every vector publish path also feeds the search box.** `index_layer_for_search()`
+  runs right after `record_layer_owner()` in both `ingest_geodataframe()` (`/upload`,
+  the QGIS finalizer) and `publish_derived_table()` (`/register-table`,
+  `/geoprocess`) — `pick_search_name_column()` looks for a name-like text column
+  (an exact match first, then the shortest column whose name merely *contains*
+  "name", since real admin/boundary data is rarely a bare `name` column — e.g.
+  `LAU_NAME`, `shapeName`) and, if found, mirrors one row per feature into
+  `dwh.search_index_uploads`. This is the dynamic counterpart to
+  `postgis/initdb/05-3d-and-search.sql`'s `dwh.search_index` materialized
+  view, which is fixed at creation time and can't grow to include a layer
+  published later; `postgisftw.search()` (the function `/features/functions/
+  search` calls) unions both. A layer with no obvious name column is silently
+  not indexed — search is a convenience layered on top of publishing, never
+  part of its contract, so `index_layer_for_search()`/
+  `remove_search_index_for_layer()` (the latter called from `DELETE /layers`)
+  swallow their own errors rather than failing the publish/delete. Raster and
+  point-cloud layers are never indexed (no per-row name/geometry to index).
 - **`ingest_geodataframe()` is the shared tail of `POST /upload` and the QGIS
   finalizer.** An in-memory GeoDataFrame becomes a `dwh` table and a published layer.
   Its `require_crs` flag is the only behavioural difference between the callers: an

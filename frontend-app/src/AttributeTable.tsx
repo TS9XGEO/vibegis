@@ -12,15 +12,18 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Alert, Button, Group, Loader, ScrollArea, SegmentedControl, Select, Switch, Table, Text, TextInput,
-  useComputedColorScheme,
+  ActionIcon, Alert, Button, Group, Loader, ScrollArea, SegmentedControl, Select, Switch, Table, Text, TextInput,
+  Tooltip, useComputedColorScheme,
 } from '@mantine/core'
-import { IconArrowDown, IconArrowUp, IconCurrentLocation } from '@tabler/icons-react'
+import { notifications } from '@mantine/notifications'
+import { IconArrowDown, IconArrowUp, IconCurrentLocation, IconDownload } from '@tabler/icons-react'
 import { Math as CesiumMath, Rectangle } from 'cesium'
+import { useTranslation } from 'react-i18next'
 
 import { columnLabel } from './columns'
 import { selectionRowBg } from './colorScheme'
-import { fetchFeaturePage, fetchFeaturePageInBbox, type Feature } from './features'
+import { downloadCsv } from './csv'
+import { fetchAllFeatures, fetchFeaturePage, fetchFeaturePageInBbox, fetchFeaturesInBbox, SELECTION_FETCH_CAP, type Feature } from './features'
 import { buildCql } from './filter'
 import { FRESH_LAYER_WAIT_MESSAGE, isFreshLayerWait } from './freshLayerRetry'
 import { useSelection } from './selection'
@@ -39,6 +42,7 @@ export default function AttributeTablePanel({
   collection: string | undefined
   isActive: boolean
 }) {
+  const { t } = useTranslation()
   const scheme = useComputedColorScheme('dark')
   const layerConfigs = useApp((s) => s.layerConfigs)
   const saveColumnAliases = useApp((s) => s.saveColumnAliases)
@@ -150,6 +154,51 @@ export default function AttributeTablePanel({
     })
   }
 
+  const [exporting, setExporting] = useState(false)
+
+  // Exports exactly what the table is currently showing, mode for mode:
+  // Kartenansicht scoped to the current view (+ active filter, same as the
+  // live fetch above), Alle Zeilen unfiltered across the whole table (same
+  // "deliberately stays unfiltered" contract as its own live fetch) — never
+  // just the current page, since that would silently omit the rest of a
+  // paginated result the user has every reason to expect in the file.
+  async function exportCsv() {
+    if (!collection) return
+    setExporting(true)
+    try {
+      let result: { features: Feature[]; truncated: boolean }
+      if (viewMode === 'viewport') {
+        const rect = camera?.computeViewRectangle()
+        if (!rect) return
+        const bbox = {
+          west: CesiumMath.toDegrees(rect.west),
+          south: CesiumMath.toDegrees(rect.south),
+          east: CesiumMath.toDegrees(rect.east),
+          north: CesiumMath.toDegrees(rect.north),
+        }
+        result = await fetchFeaturesInBbox(collection, bbox, undefined, cql ?? undefined)
+      } else {
+        result = await fetchAllFeatures(collection)
+      }
+      downloadCsv(layer.name, result.features)
+      if (result.truncated) {
+        notifications.show({
+          color: 'yellow',
+          title: t('attributeTable.exportLimited'),
+          message: t('attributeTable.exportLimitedMessage', { count: SELECTION_FETCH_CAP }),
+        })
+      }
+    } catch (e) {
+      notifications.show({
+        color: 'red',
+        title: t('attributeTable.exportFailed'),
+        message: e instanceof Error ? e.message : String(e),
+      })
+    } finally {
+      setExporting(false)
+    }
+  }
+
   useEffect(() => {
     if (!isActive || !collection) return
     const controller = new AbortController()
@@ -252,7 +301,7 @@ export default function AttributeTablePanel({
     <div style={{ display: isActive ? 'flex' : 'none', flex: 1, minHeight: 0, minWidth: 0, flexDirection: 'column' }}>
       {!collection && (
         <Alert color="yellow" variant="light">
-          Für diesen Layer sind keine Sachdaten verfügbar.
+          {t('attributeTable.noData')}
         </Alert>
       )}
 
@@ -261,7 +310,7 @@ export default function AttributeTablePanel({
           {loading && !retrying && (
             <Group gap={8}>
               <Loader size="xs" />
-              <Text size="xs" c="dimmed">lade…</Text>
+              <Text size="xs" c="dimmed">{t('common.loading')}</Text>
             </Group>
           )}
 
@@ -288,8 +337,8 @@ export default function AttributeTablePanel({
                   value={viewMode}
                   onChange={(v) => { setViewMode(v as 'viewport' | 'all'); setOffset(0) }}
                   data={[
-                    { label: 'Kartenansicht', value: 'viewport' },
-                    { label: 'Alle Zeilen', value: 'all' },
+                    { label: t('attributeTable.viewport'), value: 'viewport' },
+                    { label: t('attributeTable.allRows'), value: 'all' },
                   ]}
                 />
                 <Button
@@ -299,18 +348,29 @@ export default function AttributeTablePanel({
                   disabled={selected.size === 0}
                   onClick={zoomToSelection}
                 >
-                  Auf Auswahl zoomen
+                  {t('attributeTable.zoomToSelection')}
                 </Button>
+                <Tooltip label={t('attributeTable.exportCsv')} withArrow>
+                  <ActionIcon
+                    variant="subtle"
+                    size="sm"
+                    aria-label={t('attributeTable.exportCsv')}
+                    disabled={exporting}
+                    onClick={() => void exportCsv()}
+                  >
+                    {exporting ? <Loader size={14} /> : <IconDownload size={14} />}
+                  </ActionIcon>
+                </Tooltip>
                 <Group gap="md">
                   <Switch
                     size="xs"
-                    label="Nach Auswahl sortieren"
+                    label={t('attributeTable.sortBySelection')}
                     checked={sortBySelection}
                     onChange={(e) => setSortBySelection(e.currentTarget.checked)}
                   />
                   <Switch
                     size="xs"
-                    label="Spalten umbenennen"
+                    label={t('attributeTable.renameColumns')}
                     checked={renaming}
                     onChange={(e) => toggleRenaming(e.currentTarget.checked)}
                   />
@@ -371,7 +431,7 @@ export default function AttributeTablePanel({
                     {pinnedFromElsewhere.length > 0 && (
                       <Table.Tr>
                         <Table.Td colSpan={columns.length} c="dimmed" ta="center" fz="10px">
-                          — aktuelle Seite —
+                          {t('attributeTable.currentPageDivider')}
                         </Table.Td>
                       </Table.Tr>
                     )}
@@ -393,7 +453,7 @@ export default function AttributeTablePanel({
 
               <Group justify="space-between" mt="sm">
                 <Text size="xs" c="dimmed">
-                  {rows.length === 0 ? '0 Zeilen' : `${offset + 1}–${offset + rows.length}`}
+                  {rows.length === 0 ? t('attributeTable.rowCount') : `${offset + 1}–${offset + rows.length}`}
                 </Text>
                 <Group gap={6}>
                   <Button
@@ -402,7 +462,7 @@ export default function AttributeTablePanel({
                     disabled={offset === 0}
                     onClick={() => setOffset((o) => Math.max(0, o - pageSize))}
                   >
-                    Zurück
+                    {t('attributeTable.back')}
                   </Button>
                   <Button
                     size="xs"
@@ -410,7 +470,7 @@ export default function AttributeTablePanel({
                     disabled={rows.length < pageSize}
                     onClick={() => setOffset((o) => o + pageSize)}
                   >
-                    Weiter
+                    {t('attributeTable.next')}
                   </Button>
                   <Select
                     size="xs"

@@ -8,50 +8,44 @@
  */
 import { useEffect, useState } from 'react'
 import {
-  ActionIcon, Alert, Box, Button, Group, Loader, Menu, Modal, Paper, RingProgress, ScrollArea, Stack, Text,
+  ActionIcon, Alert, Box, Button, Group, Loader, Modal, Paper, Popover, RingProgress, ScrollArea, Stack, Text,
   TextInput, Tooltip, UnstyledButton, rem, useComputedColorScheme,
 } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import {
   IconAlertTriangle,
   IconChartBar,
+  IconChartHistogram,
   IconCheck,
-  IconCompass,
   IconDatabaseCog,
   IconHelp,
-  IconLanguage,
+  IconLayoutGrid,
   IconLayoutSidebarRightExpand,
   IconLogout,
-  IconMap2,
   IconPlayerPlay,
   IconPlus,
-  IconRefresh,
   IconRobot,
   IconSearch,
   IconStack2,
-  IconTextIncrease,
-  IconTools,
-  IconUpload,
   IconWand,
   IconX,
 } from '@tabler/icons-react'
 
 import { useTranslation } from 'react-i18next'
 
-import AiAgentPanel from './AiAgentPanel'
 import { useAiAgent } from './aiAgent'
+import Analytics from './Analytics'
 import { ETL_JOBS_URL, ETL_URL, hasFullAccess, useAuth } from './auth'
-import { panelBg, panelBorder } from './colorScheme'
+import { accentEdge, panelBg, panelBorder } from './colorScheme'
 import CompassButton from './CompassButton'
+import ExtraMenu from './ExtraMenu'
+import { useExtraMenu } from './extraMenu'
 import Geoprocessing from './Geoprocessing'
 import QgisProcessing from './QgisProcessing'
 import QgisIcon from './QgisIcon'
 import Pages from './Pages'
-import { setLocale } from './i18n'
 import { TourTarget } from './tour/TourTarget'
-import { useTour } from './tour/useTour'
 import { usePanels, type PanelId } from './panels'
-import { UI_SCALES, useUiScale } from './uiScale'
 import { useSelection } from './selection'
 
 type EtlState = 'idle' | 'loading' | 'success' | 'error'
@@ -112,10 +106,12 @@ function ProgressIcon({ percent }: { percent: number }) {
   )
 }
 
-const RAIL: { id: PanelId; label: string; icon: typeof IconTools }[] = [
+// Only the layer panel stays a direct RAIL entry — map tools and the status
+// HUD toggle moved into ExtraMenu.tsx's floating grid (see the "open more
+// options" button below), along with the tour/language/display-size/
+// color-scheme/tips controls that used to follow this RAIL loop.
+const RAIL: { id: PanelId; label: string; icon: typeof IconLayoutSidebarRightExpand }[] = [
   { id: 'layerPanel', label: 'Layerliste', icon: IconLayoutSidebarRightExpand },
-  { id: 'mapTools', label: 'Werkzeuge', icon: IconTools },
-  { id: 'hud', label: 'Statusanzeige', icon: IconCompass },
 ]
 
 /**
@@ -175,54 +171,6 @@ function QgisProcessingButton() {
   )
 }
 
-
-/**
- * Global UI size — Klein (the app's original size) / Standard (1.25x) / Groß
- * (1.5x). The store does the work (uiScale.ts — Mantine's own theme `scale`
- * for everything it draws, one CSS rule for the icons); this is only the
- * picker. Menu rather than a cycling button so any size is one
- * click away, matching the tour menu just above it in the band.
- */
-function UiScaleMenu() {
-  const { t } = useTranslation()
-  const scale = useUiScale((s) => s.scale)
-  const setScale = useUiScale((s) => s.setScale)
-  return (
-    <Menu position="left-start" withArrow shadow="md">
-      <Menu.Target>
-        <Tooltip label={t('uiScale.label')} position="left" withArrow>
-          <UnstyledButton
-            aria-label={t('uiScale.label')}
-            style={{
-              width: rem(28),
-              height: rem(28),
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              borderRadius: 6,
-              color: 'var(--mantine-color-dimmed)',
-            }}
-          >
-            <IconTextIncrease size={16} />
-          </UnstyledButton>
-        </Tooltip>
-      </Menu.Target>
-      <Menu.Dropdown>
-        {UI_SCALES.map((option) => (
-          <Menu.Item
-            key={option}
-            // A fixed-width slot either way, so the labels stay aligned
-            // whichever size is active.
-            leftSection={option === scale ? <IconCheck size={14} /> : <Box w={14} />}
-            onClick={() => setScale(option)}
-          >
-            {t(`uiScale.${option}`)}
-          </Menu.Item>
-        ))}
-      </Menu.Dropdown>
-    </Menu>
-  )
-}
 
 function EtlButton() {
   const { t } = useTranslation()
@@ -545,9 +493,11 @@ function EtlButton() {
                   <Paper key={`${job.name}-${i}`} withBorder radius="sm" p="xs">
                     <Group gap="xs" justify="space-between" wrap="nowrap">
                       <Text size="sm">{i + 1}. {job.label}</Text>
-                      <ActionIcon variant="subtle" color="gray" size="sm" onClick={() => removeFromCascade(i)} aria-label={t('etl.removeFromCascade')}>
-                        <IconX size={14} />
-                      </ActionIcon>
+                      <Tooltip label={t('etl.removeFromCascade')} position="top" withArrow>
+                        <ActionIcon variant="subtle" color="gray" size="sm" onClick={() => removeFromCascade(i)} aria-label={t('etl.removeFromCascade')}>
+                          <IconX size={14} />
+                        </ActionIcon>
+                      </Tooltip>
                     </Group>
                   </Paper>
                 ))}
@@ -571,8 +521,9 @@ function EtlButton() {
 /**
  * Same visible-but-disabled + upsell-tooltip shape as EtlButton above
  * (never `disabled`, so the Tooltip still fires on hover) rather than
- * Geoprocessing's fully-hidden pattern — the AI panel toggle itself opens
- * AiAgentPanel.tsx, mounted once below in the main render.
+ * Geoprocessing's fully-hidden pattern — the AI panel toggle itself only
+ * flips aiAgent.ts's `open`; AiAgentPanel.tsx is a docked column mounted by
+ * App.tsx, to the right of the layer panel, not a child of this band.
  */
 function AiAgentButton() {
   const { t } = useTranslation()
@@ -620,15 +571,16 @@ export default function Sideband() {
   const dashboardTabOpen = useSelection((s) => s.dashboardTabOpen)
   const toggleDashboardTab = useSelection((s) => s.toggleDashboardTab)
   const [pagesOpen, setPagesOpen] = useState(false)
+  const [analyticsOpen, setAnalyticsOpen] = useState(false)
   const [geoprocessOpen, setGeoprocessOpen] = useState(false)
   const logout = useAuth((s) => s.logout)
   const user = useAuth((s) => s.user)
   const username = user?.username
   const hasProAccess = hasFullAccess(user, 'pro')
   const scheme = useComputedColorScheme('dark')
-  const { t, i18n } = useTranslation()
-  const startTour = useTour((s) => s.start)
-  const restartTour = useTour((s) => s.restart)
+  const { t } = useTranslation()
+  const extraMenuOpen = useExtraMenu((s) => s.open)
+  const toggleExtraMenu = useExtraMenu((s) => s.toggle)
 
   return (
     <Box
@@ -642,14 +594,29 @@ export default function Sideband() {
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
-        alignItems: 'center',
-        gap: rem(8),
-        paddingTop: rem(12),
         backgroundColor: panelBg(scheme),
         borderLeft: `1px solid ${panelBorder(scheme)}`,
         borderRight: `1px solid ${panelBorder(scheme)}`,
       }}
     >
+      {/* Third segment of the accent band that runs across the whole docked
+          row — reversed like AiAgentPanel.tsx's, so it ends on the teal the
+          layer panel's strip starts from and the three columns read as one
+          sweep: amber→teal, teal→amber, amber→teal. The rail itself is the
+          inner Box below; the strip has to sit outside it, or the rail's
+          `alignItems: center` and top padding would inset it. */}
+      <Box style={{ height: 2, flexShrink: 0, background: accentEdge(scheme, true) }} />
+      <Box
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: rem(8),
+          paddingTop: rem(12),
+        }}
+      >
       {RAIL.map(({ id, label, icon: Icon }) => {
         const isOpen = open[id]
         return (
@@ -738,45 +705,34 @@ export default function Sideband() {
       </Tooltip>
       <Geoprocessing opened={geoprocessOpen} onClose={() => setGeoprocessOpen(false)} />
 
+      {/* Saved BI dashboards from Superset (Analytics.tsx). Ungated: every
+          logged-in user has a Superset account, and what they can see there
+          is decided by their own layer grants, mapped onto Superset roles at
+          login — so there is nothing for a tier check to add here. */}
+      <Tooltip label={t('analytics.tooltip')} position="left" withArrow>
+        <TourTarget id="analytics-btn">
+          <UnstyledButton
+            aria-label={t('analytics.ariaLabel')}
+            onClick={() => setAnalyticsOpen(true)}
+            style={{
+              width: rem(28),
+              height: rem(28),
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRadius: 6,
+              color: 'var(--mantine-color-teal-5)',
+            }}
+          >
+            <IconChartHistogram size={16} />
+          </UnstyledButton>
+        </TourTarget>
+      </Tooltip>
+      <Analytics opened={analyticsOpen} onClose={() => setAnalyticsOpen(false)} />
+
       <QgisProcessingButton />
       <EtlButton />
       <AiAgentButton />
-      <AiAgentPanel />
-
-      <Menu position="left-start" withArrow shadow="md">
-        <Menu.Target>
-          <Tooltip label={t('tour.menuLabel')} position="left" withArrow>
-            <UnstyledButton
-              aria-label={t('tour.menuAriaLabel')}
-              style={{
-                width: rem(28),
-                height: rem(28),
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                borderRadius: 6,
-                color: 'var(--mantine-color-teal-5)',
-              }}
-            >
-              <IconMap2 size={16} />
-            </UnstyledButton>
-          </Tooltip>
-        </Menu.Target>
-        <Menu.Dropdown>
-          <Menu.Item leftSection={<IconRefresh size={14} />} onClick={restartTour}>
-            {t('tour.restart')}
-          </Menu.Item>
-          <Menu.Divider />
-          {hasProAccess && (
-            <Menu.Item leftSection={<IconUpload size={14} />} onClick={() => startTour('upload')}>
-              {t('tour.startUpload')}
-            </Menu.Item>
-          )}
-          <Menu.Item leftSection={<IconMap2 size={14} />} onClick={() => startTour('features')}>
-            {t('tour.startFeatures')}
-          </Menu.Item>
-        </Menu.Dropdown>
-      </Menu>
 
       <Tooltip label={t('sideband.pagesTooltip')} position="left" withArrow>
         <TourTarget id="pages-btn">
@@ -799,30 +755,54 @@ export default function Sideband() {
       </Tooltip>
       <Pages opened={pagesOpen} onClose={() => setPagesOpen(false)} />
 
-      <Tooltip label={t('languageSwitcher.label')} position="left" withArrow>
-        <TourTarget id="lang-btn">
-          <UnstyledButton
-            aria-label={t('languageSwitcher.label')}
-            onClick={() => setLocale(i18n.language === 'de' ? 'en' : 'de')}
-            style={{
-              width: rem(28),
-              height: rem(28),
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              borderRadius: 6,
-              gap: 2,
-              fontSize: 10,
-              fontWeight: 700,
-              color: 'var(--mantine-color-dimmed)',
-            }}
+      {/* Pops ExtraMenu.tsx's grid out of this button (a Popover anchored to
+          it, not a freely-positioned floating box) — map tools/status HUD,
+          the guided tour, language, display size, color scheme and the tips
+          toggle all live there now instead of each being its own RAIL-style
+          entry here. Same open/closed color convention as the RAIL loop
+          above (teal = closed, click to open; dimmed = already open). */}
+      <Popover
+        opened={extraMenuOpen}
+        onChange={(o) => {
+          if (o !== extraMenuOpen) toggleExtraMenu()
+        }}
+        position="left-start"
+        offset={4}
+        withArrow
+        shadow="md"
+        closeOnClickOutside
+      >
+        <Popover.Target>
+          <Tooltip
+            label={extraMenuOpen ? t('extraMenu.closeTooltip') : t('extraMenu.openTooltip')}
+            position="left"
+            withArrow
+            disabled={extraMenuOpen}
           >
-            <IconLanguage size={16} />
-          </UnstyledButton>
-        </TourTarget>
-      </Tooltip>
-
-      <UiScaleMenu />
+            <TourTarget id="extra-menu-btn">
+              <UnstyledButton
+                aria-label={t('extraMenu.ariaLabel')}
+                onClick={toggleExtraMenu}
+                style={{
+                  width: rem(28),
+                  height: rem(28),
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: 6,
+                  color: extraMenuOpen ? 'var(--mantine-color-dimmed)' : 'var(--mantine-color-teal-5)',
+                  transition: 'color 150ms ease',
+                }}
+              >
+                <IconLayoutGrid size={16} />
+              </UnstyledButton>
+            </TourTarget>
+          </Tooltip>
+        </Popover.Target>
+        <Popover.Dropdown p={6}>
+          <ExtraMenu />
+        </Popover.Dropdown>
+      </Popover>
 
       {/* Pinned to the very end of the band, separate from the panel toggles
           above — logout is a global action, not tied to any box's state. */}
@@ -847,6 +827,7 @@ export default function Sideband() {
           </UnstyledButton>
         </TourTarget>
       </Tooltip>
+      </Box>
     </Box>
   )
 }

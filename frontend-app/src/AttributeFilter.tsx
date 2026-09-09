@@ -10,6 +10,7 @@ import {
   Text, Tooltip,
 } from '@mantine/core'
 import { IconFilter, IconX } from '@tabler/icons-react'
+import { useTranslation } from 'react-i18next'
 
 import { columnLabel, fetchColumns, fetchDistinctValues, type Column } from './columns'
 import { fetchFeaturesWithFilter } from './features'
@@ -30,6 +31,7 @@ function ConditionRow({
   onChange: (c: FilterCondition) => void
   onRemove: () => void
 }) {
+  const { t } = useTranslation()
   const numeric = columns.find((c) => c.key === condition.column)?.numeric ?? false
   const ops = numeric ? NUMERIC_OPS : TEXT_OPS
 
@@ -85,7 +87,7 @@ function ConditionRow({
       ) : (
         <Autocomplete
           size="xs"
-          placeholder={valuesLoading ? 'lade…' : undefined}
+          placeholder={valuesLoading ? t('common.loading') : undefined}
           data={values}
           value={condition.value}
           onChange={(v) => onChange({ ...condition, value: v })}
@@ -93,7 +95,7 @@ function ConditionRow({
           comboboxProps={{ withinPortal: false }}
         />
       )}
-      <ActionIcon size="sm" variant="subtle" color="gray" onClick={onRemove} aria-label="Bedingung entfernen">
+      <ActionIcon size="sm" variant="subtle" color="gray" onClick={onRemove} aria-label={t('attributeFilter.removeConditionAriaLabel')}>
         <IconX size={13} />
       </ActionIcon>
     </Group>
@@ -101,6 +103,7 @@ function ConditionRow({
 }
 
 export default function AttributeFilterButton({ layerName, collection }: { layerName: string; collection: string }) {
+  const { t } = useTranslation()
   const [schema, table] = collection.split(/\.(.+)/)
   const active = useApp((s) => s.attributeFilters[layerName])
   const setAttributeFilter = useApp((s) => s.setAttributeFilter)
@@ -179,7 +182,7 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
       const { features, truncated } = await fetchFeaturesWithFilter(collection, cql)
       replaceSelectionForLayers([layerName], features.map((feature) => ({ layer: layerName, feature })))
       if (truncated) {
-        setError(`Zu viele Treffer (>${features.length}) — Filter weiter eingrenzen, um alle auszuwählen.`)
+        setError(t('attributeFilter.tooManyMatches', { count: features.length }))
       } else {
         setOpened(false)
       }
@@ -194,12 +197,12 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
     <>
       <Popover opened={opened} onChange={setOpened} position="bottom-end" withArrow shadow="md">
         <Popover.Target>
-          <Tooltip label="Filtern" withArrow>
+          <Tooltip label={t('attributeFilter.tooltip')} withArrow>
             <ActionIcon
               variant="subtle"
               color={hasActive ? 'teal' : 'gray'}
               size="sm"
-              aria-label="Layer filtern"
+              aria-label={t('attributeFilter.ariaLabel')}
               onClick={() => setOpened((o) => !o)}
             >
               <IconFilter size={13} />
@@ -214,15 +217,15 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
         <Popover.Dropdown miw={340} style={{ overflow: 'visible' }}>
           <Stack gap={6}>
             <Group justify="space-between" wrap="nowrap">
-              <Text size="xs" fw={600}>Filter</Text>
-              <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Schliessen" onClick={() => setOpened(false)}>
+              <Text size="xs" fw={600}>{t('attributeFilter.title')}</Text>
+              <ActionIcon variant="subtle" color="gray" size="sm" aria-label={t('common.close')} onClick={() => setOpened(false)}>
                 <IconX size={14} />
               </ActionIcon>
             </Group>
 
             <Switch
               size="xs"
-              label="SQL-Modus"
+              label={t('attributeFilter.sqlMode')}
               checked={sqlModalOpen}
               onChange={(e) => {
                 if (e.currentTarget.checked) {
@@ -233,7 +236,7 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
             />
 
             {error && <Text size="xs" c={isFreshLayerWait(error) ? 'yellow' : 'red'}>{error}</Text>}
-            {!error && columns.length === 0 && <Text size="xs" c="dimmed">lade Spalten…</Text>}
+            {!error && columns.length === 0 && <Text size="xs" c="dimmed">{t('attributeFilter.loadingColumns')}</Text>}
 
             {/* One control, because there is one `logic` for the whole filter.
                 It used to be rendered between every pair of conditions, which
@@ -245,15 +248,15 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
             {draft.length > 1 && (
               <Group gap={8} align="center" justify="center" my={2} wrap="nowrap">
                 <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
-                  Bedingungen verknüpfen:
+                  {t('attributeFilter.combineConditions')}
                 </Text>
                 <SegmentedControl
                   size="xs"
                   value={logic}
                   onChange={(v) => setLogic(v as FilterLogic)}
                   data={[
-                    { label: 'UND', value: 'and' },
-                    { label: 'ODER', value: 'or' },
+                    { label: t('attributeFilter.and'), value: 'and' },
+                    { label: t('attributeFilter.or'), value: 'or' },
                   ]}
                 />
               </Group>
@@ -275,22 +278,20 @@ export default function AttributeFilterButton({ layerName, collection }: { layer
             {contradictory && (
               <Alert color="yellow" variant="light" p="xs">
                 <Text size="xs">
-                  Mit UND können diese Bedingungen nie gleichzeitig zutreffen — eine Spalte
-                  kann nur einen Wert haben. Der Layer bleibt leer. Für „einer der Werte"
-                  ODER wählen.
+                  {t('attributeFilter.contradictory')}
                 </Text>
               </Alert>
             )}
 
             <Button size="xs" variant="subtle" disabled={columns.length === 0} onClick={addCondition}>
-              + Bedingung
+              {t('attributeFilter.addCondition')}
             </Button>
 
             <Group justify="space-between" mt={4}>
-              <Button size="xs" variant="default" onClick={clear}>Zurücksetzen</Button>
+              <Button size="xs" variant="default" onClick={clear}>{t('attributeFilter.reset')}</Button>
               <Group gap={6}>
-                <Button size="xs" variant="light" loading={selecting} disabled={!draftUsable} onClick={selectMatches}>Auswählen</Button>
-                <Button size="xs" onClick={apply}>Anwenden</Button>
+                <Button size="xs" variant="light" loading={selecting} disabled={!draftUsable} onClick={selectMatches}>{t('attributeFilter.selectMatches')}</Button>
+                <Button size="xs" onClick={apply}>{t('attributeFilter.apply')}</Button>
               </Group>
             </Group>
           </Stack>

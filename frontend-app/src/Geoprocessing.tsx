@@ -10,18 +10,12 @@ import {
   Alert, Button, Group, Modal, MultiSelect, NumberInput, SegmentedControl, Select, Stack, Text, TextInput,
 } from '@mantine/core'
 import { IconAlertCircle, IconCheck, IconWand } from '@tabler/icons-react'
+import { useTranslation } from 'react-i18next'
 
 import { fetchColumns } from './columns'
 import { collectionFor, GEOPROCESS_URL, useApp } from './wms'
 
 type Operation = 'buffer' | 'dissolve' | 'intersect' | 'join'
-
-const OPERATIONS: { label: string; value: Operation }[] = [
-  { label: 'Puffer', value: 'buffer' },
-  { label: 'Auflösen', value: 'dissolve' },
-  { label: 'Verschneiden', value: 'intersect' },
-  { label: 'Verknüpfen', value: 'join' },
-]
 
 function splitSource(source: string): [string, string] {
   const [schema, table] = source.split(/\.(.+)/)
@@ -29,6 +23,13 @@ function splitSource(source: string): [string, string] {
 }
 
 export default function Geoprocessing({ opened, onClose }: { opened: boolean; onClose: () => void }) {
+  const { t } = useTranslation()
+  const OPERATIONS: { label: string; value: Operation }[] = [
+    { label: t('geoprocessing.opBuffer'), value: 'buffer' },
+    { label: t('geoprocessing.opDissolve'), value: 'dissolve' },
+    { label: t('geoprocessing.opIntersect'), value: 'intersect' },
+    { label: t('geoprocessing.opJoin'), value: 'join' },
+  ]
   const layers = useApp((s) => s.layers)
   const dynamicCollections = useApp((s) => s.dynamicCollections)
   const load = useApp((s) => s.load)
@@ -123,9 +124,9 @@ export default function Geoprocessing({ opened, onClose }: { opened: boolean; on
         body: JSON.stringify(body),
       })
       const resBody = await res.json().catch(() => null)
-      if (!res.ok) throw new Error(resBody?.detail ?? `Geoprocessing fehlgeschlagen: HTTP ${res.status}`)
+      if (!res.ok) throw new Error(resBody?.detail ?? t('geoprocessing.failed', { status: res.status }))
 
-      setSuccess(`"${resBody.title}" als neuer Layer angelegt (${resBody.geometry_type.toLowerCase()})`)
+      setSuccess(t('geoprocessing.success', { title: resBody.title, geometryType: resBody.geometry_type.toLowerCase() }))
       reset()
       await load()
     } catch (e) {
@@ -136,11 +137,10 @@ export default function Geoprocessing({ opened, onClose }: { opened: boolean; on
   }
 
   return (
-    <Modal opened={opened} onClose={close} title="Geoverarbeitung" centered>
+    <Modal opened={opened} onClose={close} title={t('geoprocessing.title')} centered>
       <Stack gap="sm">
         <Text size="xs" c="dimmed">
-          Rechnet direkt in PostGIS und veröffentlicht das Ergebnis als neuen Layer —
-          der Ausgangslayer bleibt unverändert.
+          {t('geoprocessing.intro')}
         </Text>
 
         <SegmentedControl
@@ -151,8 +151,8 @@ export default function Geoprocessing({ opened, onClose }: { opened: boolean; on
         />
 
         <Select
-          label={needsB ? 'Layer A' : 'Layer'}
-          placeholder="Layer auswählen"
+          label={needsB ? t('geoprocessing.layerA') : t('geoprocessing.layer')}
+          placeholder={t('geoprocessing.layerPlaceholder')}
           data={layerOptions}
           value={layerA}
           onChange={setLayerA}
@@ -162,8 +162,8 @@ export default function Geoprocessing({ opened, onClose }: { opened: boolean; on
 
         {needsB && (
           <Select
-            label="Layer B"
-            placeholder="Layer auswählen"
+            label={t('geoprocessing.layerB')}
+            placeholder={t('geoprocessing.layerPlaceholder')}
             data={layerOptions.filter((o) => o.value !== layerA)}
             value={layerB}
             onChange={setLayerB}
@@ -174,8 +174,8 @@ export default function Geoprocessing({ opened, onClose }: { opened: boolean; on
 
         {operation === 'buffer' && (
           <NumberInput
-            label="Pufferabstand (Meter)"
-            placeholder="z. B. 500"
+            label={t('geoprocessing.bufferDistance')}
+            placeholder={t('geoprocessing.bufferDistancePlaceholder')}
             value={distance}
             onChange={(v) => setDistance(typeof v === 'number' ? v : '')}
             min={0}
@@ -184,9 +184,9 @@ export default function Geoprocessing({ opened, onClose }: { opened: boolean; on
 
         {operation === 'dissolve' && (
           <Select
-            label="Gruppieren nach (optional)"
-            description="Ohne Auswahl wird der gesamte Layer zu einer Fläche aufgelöst"
-            placeholder="keine — alles zu einer Fläche"
+            label={t('geoprocessing.groupBy')}
+            description={t('geoprocessing.groupByHint')}
+            placeholder={t('geoprocessing.groupByPlaceholder')}
             data={columnsA.map((c) => c.key)}
             value={groupColumn}
             onChange={setGroupColumn}
@@ -197,8 +197,8 @@ export default function Geoprocessing({ opened, onClose }: { opened: boolean; on
 
         {operation === 'join' && (
           <MultiSelect
-            label="Spalten aus Layer B übernehmen"
-            placeholder="Spalten auswählen"
+            label={t('geoprocessing.joinColumns')}
+            placeholder={t('geoprocessing.joinColumnsPlaceholder')}
             data={columnsB.map((c) => c.key)}
             value={joinColumns}
             onChange={setJoinColumns}
@@ -207,8 +207,8 @@ export default function Geoprocessing({ opened, onClose }: { opened: boolean; on
         )}
 
         <TextInput
-          label="Titel (optional)"
-          placeholder="wird automatisch vergeben"
+          label={t('geoprocessing.titleLabel')}
+          placeholder={t('geoprocessing.titlePlaceholder')}
           value={title}
           onChange={(e) => setTitle(e.currentTarget.value)}
         />
@@ -221,9 +221,9 @@ export default function Geoprocessing({ opened, onClose }: { opened: boolean; on
         )}
 
         <Group justify="flex-end">
-          <Button variant="subtle" color="gray" onClick={close}>Schliessen</Button>
+          <Button variant="subtle" color="gray" onClick={close}>{t('common.close')}</Button>
           <Button leftSection={<IconWand size={16} />} loading={loading} disabled={!canSubmit} onClick={submit}>
-            Ausführen
+            {t('geoprocessing.run')}
           </Button>
         </Group>
       </Stack>

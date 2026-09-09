@@ -24,6 +24,11 @@ services:
     cpus: "2.0"
     environment:
       <<: *postgres-env
+      # Read by postgis/initdb/08-superset.sql, which creates Superset's
+      # metadata database and the read-only superset_reader role. initdb only
+      # ever runs on a fresh volume; an existing database gets the same thing
+      # from bin/migrate-superset.sql.
+      SUPERSET_PG_PASSWORD: ${SUPERSET_PG_PASSWORD}
       # Tuning; raise shared_buffers if you give Docker more RAM
       POSTGRES_INITDB_ARGS: "--data-checksums"
     command:
@@ -229,6 +234,10 @@ services:
       <<: *postgres-env
       POSTGRES_HOST: postgis
       DAGSTER_HOME: /opt/dagster/home
+      # For the nightly superset_datasets asset, which calls upload-api's
+      # reconcile route. Unset means "no Superset here" and the asset skips.
+      UPLOAD_API_URL: http://upload-api:8000
+      SUPERSET_INTERNAL_TOKEN: ${SUPERSET_INTERNAL_TOKEN}
     volumes:
       - ./dagster:/opt/dagster/app
       - dagster-home:/opt/dagster/home
@@ -282,6 +291,17 @@ services:
       AI_KEY_ENCRYPTION_SECRET: ${AI_KEY_ENCRYPTION_SECRET}
       AI_READONLY_PG_PASSWORD: ${AI_READONLY_PG_PASSWORD}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      # Superset integration (superset_client.py): registers each published
+      # layer as a Superset dataset and serves the ACL Superset asks for at
+      # login. All of it degrades to a no-op when unset, so an install that
+      # does not run Superset is unaffected.
+      SUPERSET_URL: http://superset:8088
+      SUPERSET_INTERNAL_TOKEN: ${SUPERSET_INTERNAL_TOKEN}
+      SUPERSET_SERVICE_USER: ${SUPERSET_SERVICE_USER:-vibegis_service}
+      SUPERSET_SERVICE_PASSWORD: ${SUPERSET_SERVICE_PASSWORD}
+      # The read-only role Superset's own database connection uses. upload-api
+      # holds it only to create that connection once, never to query with it.
+      SUPERSET_PG_PASSWORD: ${SUPERSET_PG_PASSWORD}
     volumes:
       - ./mapserver/mapfiles:/mapfiles
       # Read-write, unlike mapserver's own :ro mount of the same host path —
@@ -665,6 +685,81 @@ services:
       - --storage.tsdb.retention.time=15d
     ports:
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    networks: [vibegis]
+
+  # --------------------------------------------------------- reporting & BI
+  # Apache Superset: saved dashboards, ad-hoc charts, and scheduled report
+  # email. It sits *alongside* the app's own selection dashboard, never in
+  # place of it — SelectionDashboard.tsx computes its numbers from the live
+  # Cesium selection and camera extent and highlights features back on the
+  # globe, none of which Superset can see.
+  #
+  # Reached at /analytics through the gateway, not on a host port: nginx
+  # authenticates every request against upload-api first (auth_request
+  # /auth/superset) and passes the username on, so there is no second login.
+  # See superset/vibegis_security.py for the role mapping.
+  superset:
+    build:
+      context: ./superset
+      args:
+        SUPERSET_IMAGE: ${SUPERSET_IMAGE}
+    container_name: vibegis-superset
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    # Ceiling, not a reservation. Nothing had one before, so a single
+    # oversized upload or a runaway query could take the whole host with it.
+    mem_limit: 2g
+    cpus: "2.0"
+    healthcheck:
+      # python, not curl: this image is not guaranteed to carry curl, and it
+      # certainly carries python. Same shape as upload-api's healthcheck.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8088/health', timeout=5).status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # First boot runs `superset db upgrade` against an empty metadata
+      # database, which is slow; this is not a hung container.
+      start_period: 180s
+    depends_on:
+      postgis:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      # Superset's own bookkeeping — a separate database in the same cluster,
+      # owned by superset_meta, with no access to the geodata.
+      SUPERSET_METADATA_URI: postgresql+psycopg2://superset_meta:${SUPERSET_PG_PASSWORD}@postgis:5432/superset
+      SUPERSET_REDIS_URL: redis://redis:6379/0
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      # Where the per-layer ACL comes from. upload-api's visible_layers_for()
+      # is the single source of truth; Superset asks rather than re-deriving
+      # it from layer_grants, because a second implementation of an ACL is a
+      # second implementation that can drift.
+      VIBEGIS_API_URL: http://upload-api:8000
+      SUPERSET_INTERNAL_TOKEN: ${SUPERSET_INTERNAL_TOKEN}
+      SUPERSET_SERVICE_USER: ${SUPERSET_SERVICE_USER:-vibegis_service}
+      SUPERSET_SERVICE_PASSWORD: ${SUPERSET_SERVICE_PASSWORD}
+    expose:
+      - "8088"
+    networks: [vibegis]
+
+  # Superset's cache and (with the reporting work) its Celery broker. No host
+  # port and no persistence: everything in here is derived and rebuildable.
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.4-alpine}
+    container_name: vibegis-redis
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    expose:
+      - "6379"
     networks: [vibegis]
 
   # ------------------------------------------------------ pgadmin (optional)

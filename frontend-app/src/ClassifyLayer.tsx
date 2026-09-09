@@ -25,6 +25,7 @@ import {
   ScrollArea, SegmentedControl, Select, Stack, Text, TextInput, Tooltip,
 } from '@mantine/core'
 import { IconAlertCircle, IconTags, IconTrash, IconX } from '@tabler/icons-react'
+import { useTranslation } from 'react-i18next'
 
 import { columnLabel, fetchColumns, fetchColumnStats, fetchDistinctValues, type Column } from './columns'
 import { FRESH_LAYER_WAIT_MESSAGE, isFreshLayerWait } from './freshLayerRetry'
@@ -80,17 +81,18 @@ function equalIntervalBounds(min: number, max: number, n: number): [number, numb
 }
 
 function Swatch({ color, onChange }: { color: string; onChange: (hex: string) => void }) {
+  const { t } = useTranslation()
   const [opened, setOpened] = useState(false)
   return (
     <Popover opened={opened} onChange={setOpened} position="right-start" withArrow shadow="md">
       <Popover.Target>
-        <ActionIcon variant="subtle" size="sm" aria-label="Farbe aendern" onClick={() => setOpened((o) => !o)}>
+        <ActionIcon variant="subtle" size="sm" aria-label={t('classifyLayer.changeColorAriaLabel')} onClick={() => setOpened((o) => !o)}>
           <div style={{ width: 16, height: 16, borderRadius: 4, background: color, border: '1px solid rgba(255,255,255,.35)' }} />
         </ActionIcon>
       </Popover.Target>
       <Popover.Dropdown>
         <Group justify="flex-end" mb={4}>
-          <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Schliessen" onClick={() => setOpened(false)}>
+          <ActionIcon variant="subtle" color="gray" size="sm" aria-label={t('common.close')} onClick={() => setOpened(false)}>
             <IconX size={14} />
           </ActionIcon>
         </Group>
@@ -143,6 +145,7 @@ export default function ClassifyLayer({
   layerName: string
   collection: string
 }) {
+  const { t } = useTranslation()
   const [schema, table] = collection.split(/\.(.+)/)
   const existing = useApp((s) => s.layerConfigs[layerName]?.classification)
   const aliases = useApp((s) => s.layerConfigs[layerName]?.columnAliases)
@@ -299,9 +302,9 @@ export default function ClassifyLayer({
   }
 
   const modeOptions = [
-    { label: 'Einzelsymbol', value: 'single' },
-    { label: 'Kategorisiert', value: 'categorized' },
-    ...(numeric ? [{ label: 'Graduiert', value: 'graduated' }] : []),
+    { label: t('classifyLayer.modeSingle'), value: 'single' },
+    { label: t('classifyLayer.modeCategorized'), value: 'categorized' },
+    ...(numeric ? [{ label: t('classifyLayer.modeGraduated'), value: 'graduated' }] : []),
   ]
 
   // closeOnClickOutside=false: the color swatches below open their own
@@ -309,17 +312,16 @@ export default function ClassifyLayer({
   // — without this, clicking to pick a color would register as a click
   // outside this Modal and dismiss the whole editor mid-edit.
   return (
-    <Modal opened={opened} onClose={onClose} title="Klassifizierung" centered size="sm" closeOnClickOutside={false}>
+    <Modal opened={opened} onClose={onClose} title={t('classifyLayer.title')} centered size="sm" closeOnClickOutside={false}>
       <Stack gap="sm">
         <Text size="xs" c="dimmed">
-          Legt fest, wie dieser Layer dargestellt wird — für alle gespeichert, ersetzt
-          die Standard-Legende.
+          {t('classifyLayer.intro')}
         </Text>
 
         {mode !== 'single' && (
           <Select
-            label="Spalte"
-            placeholder="Spalte auswählen"
+            label={t('classifyLayer.columnLabel')}
+            placeholder={t('classifyLayer.columnPlaceholder')}
             data={columns.map((c) => ({ value: c.key, label: columnLabel(aliases, c.key) }))}
             value={column}
             onChange={setColumn}
@@ -339,7 +341,7 @@ export default function ClassifyLayer({
         {(geomType === 'point' || geomType === 'line') && (
           <NumberInput
             size="xs"
-            label={geomType === 'point' ? 'Punktgröße' : 'Linienbreite'}
+            label={geomType === 'point' ? t('classifyLayer.pointSizeLabel') : t('classifyLayer.lineWidthLabel')}
             placeholder={geomType === 'point' ? '10' : '2.2'}
             min={0.5}
             step={geomType === 'point' ? 1 : 0.5}
@@ -356,8 +358,8 @@ export default function ClassifyLayer({
             value={categorizedStyle}
             onChange={(v) => setCategorizedStyle(v as CategorizedStyle)}
             data={[
-              { label: 'Eindeutige Werte', value: 'values' },
-              { label: 'Nummerische Bereiche', value: 'ranges' },
+              { label: t('classifyLayer.styleValues'), value: 'values' },
+              { label: t('classifyLayer.styleRanges'), value: 'ranges' },
             ]}
           />
         )}
@@ -368,24 +370,23 @@ export default function ClassifyLayer({
           </Alert>
         )}
 
-        {loading && <Text size="xs" c="dimmed">lade…</Text>}
+        {loading && <Text size="xs" c="dimmed">{t('common.loading')}</Text>}
 
         {mode === 'single' && (
           <Group gap={6}>
             <Swatch color={isValidHex(singleColor) ? singleColor : '#888888'} onChange={setSingleColor} />
-            <Text size="xs" c="dimmed">Farbe für alle Objekte</Text>
+            <Text size="xs" c="dimmed">{t('classifyLayer.colorForAll')}</Text>
           </Group>
         )}
 
         {mode === 'categorized' && categorizedStyle === 'values' && (
           <>
             {truncated && (
-              <Text size="xs" c="dimmed">Nur die ersten {classes.length} Werte werden angezeigt.</Text>
+              <Text size="xs" c="dimmed">{t('classifyLayer.truncatedValues', { count: classes.length })}</Text>
             )}
             {classes.length > SAFE_CLASS_LIMIT && (
               <Alert color="yellow" variant="light" icon={<IconAlertCircle size={16} />}>
-                {classes.length} Klassen — MapServer kann bei so vielen Klassen die Anfrage ablehnen.
-                Einen Filter auf diese Spalte zu setzen reduziert das Risiko.
+                {t('classifyLayer.tooManyClasses', { count: classes.length })}
               </Alert>
             )}
             {classes.length > 0 && (
@@ -418,7 +419,7 @@ export default function ClassifyLayer({
             <Group grow>
               <NumberInput
                 size="xs"
-                label="Anzahl Klassen"
+                label={t('classifyLayer.numClasses')}
                 min={2}
                 max={12}
                 value={numClasses}
@@ -426,7 +427,7 @@ export default function ClassifyLayer({
               />
               {mode === 'graduated' && (
                 <Stack gap={2}>
-                  <Text size="xs" c="dimmed">Farbverlauf</Text>
+                  <Text size="xs" c="dimmed">{t('classifyLayer.colorRamp')}</Text>
                   <Swatch color={rampColor} onChange={recolorRamp} />
                 </Stack>
               )}
@@ -438,13 +439,13 @@ export default function ClassifyLayer({
         <Group justify="space-between" mt={4}>
           {existing ? (
             <Button size="xs" color="red" variant="subtle" leftSection={<IconTrash size={14} />} loading={saving} onClick={remove}>
-              Entfernen
+              {t('classifyLayer.remove')}
             </Button>
           ) : <div />}
           <Group gap={6}>
-            <Button size="xs" variant="subtle" color="gray" onClick={onClose}>Schliessen</Button>
+            <Button size="xs" variant="subtle" color="gray" onClick={onClose}>{t('common.close')}</Button>
             <Button size="xs" leftSection={<IconTags size={14} />} loading={saving} disabled={!draft} onClick={save}>
-              Speichern
+              {t('common.save')}
             </Button>
           </Group>
         </Group>
