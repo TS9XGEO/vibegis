@@ -1,0 +1,32 @@
+# Ships every container's logs to Loki by talking to the Docker Engine API
+# over the (read-only) socket mount — not by reading json-file logs off disk,
+# which would depend on exactly where Docker Desktop's VM keeps them. This
+# way it works the same regardless of host/driver.
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      # The docker-socket-proxy service, not the raw socket — see the
+      # docker-socket-proxy block in docker-compose.yml for why.
+      - host: tcp://docker-socket-proxy:2375
+        refresh_interval: 5s
+    relabel_configs:
+      # Container name (strip the leading "/" Docker's API always includes).
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: 'container'
+      # docker-compose sets this label on every service's container — gives
+      # each log line a clean "service" label (upload-api, mapserver, ...)
+      # instead of the container name, matching how the stack is usually
+      # talked about.
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: 'service'
