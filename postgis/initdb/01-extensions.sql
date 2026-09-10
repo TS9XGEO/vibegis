@@ -2,8 +2,12 @@
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS postgis_raster;
 CREATE EXTENSION IF NOT EXISTS postgis_topology;
+-- fuzzystrmatch was only ever here as a prerequisite of
+-- postgis_tiger_geocoder, which is no longer created (US Census address
+-- geocoding, 34 tables in schema `tiger`, never used by this app — see
+-- bin/migrate-drop-tiger.sql for the removal on an existing volume). Kept
+-- because it is harmless and something may yet want levenshtein().
 CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
-CREATE EXTENSION IF NOT EXISTS postgis_tiger_geocoder;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- Schemas: dwh = all geodata (uploaded, registered, ETL/geoprocess output),
