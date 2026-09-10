@@ -119,11 +119,8 @@ for a plain-HTTP development stack, never for an install.
 puts it back. Put `bin/backup.sh` in the host's cron, and **test the restore once
 on the install** — an untested backup is not a backup.
 
-**What is deliberately not covered:** compliance. The hardening in this repo is
-technical only. GDPR/DSGVO posture, a DPA with each subprocessor, retention and
-deletion policy, personal data in the container logs, account export and deletion,
-and ISO 27001 / TISAX readiness are all unstarted and must not be claimed. See
-`CLAUDE.md`'s "Still open before a real install".
+**What is deliberately not covered:** compliance — see section 8 below, which also
+lists the known-deferred technical items.
 
 ## 2. Loading data
 
@@ -237,3 +234,51 @@ docker compose exec frontend npm run typecheck
 docker compose down                   # stop, keep data
 docker compose down -v                # stop and DELETE the database volume
 ```
+
+## 8. Still open before a real install
+
+**CSP is `Content-Security-Policy-Report-Only`, on purpose.** Cesium needs
+workers and blob URLs and the policy has not been validated against a real
+session yet. Watch the browser console on the production overlay, then flip it
+to enforcing.
+
+**Compliance is not started, deliberately.** The hardening in this repo is technical
+only. Once it is complete, the compliance track is next: GDPR/DSGVO
+posture, a DPA with every subprocessor, retention and deletion policy, personal
+data in the container logs, account export and deletion, and ISO 27001 / TISAX
+readiness if a customer asks. None of it is built and none of it should be
+claimed.
+
+**Known-deferred technical items**, judged not to block a first install:
+
+- The 2 GB upload cap lives as five separate literals (four in
+  `nginx/locations.conf`, `MAX_BYTES` in `app.py`). Make it one env var, then
+  lower it.
+- Zip bombs: `read_vector()` and `extract_raster_zip()` reject zip-slip paths but
+  cap no *uncompressed* total. Needs a cumulative-bytes ceiling and a ratio check
+  before `extractall()`.
+- No statement timeouts on the query endpoints (`ai_agent.py` already sets one
+  for the agent and is the model).
+- No semaphore around the four upload handlers, each of which reads the whole
+  file into memory.
+- Raw driver exception strings still reach the client from two paths, leaking
+  internal schema and table names.
+- No session revocation: JWT-in-a-cookie with no server-side invalidation, so a
+  demotion or deletion takes up to 10h. A `token_version` column on
+  `userdb.users` checked in `require_login` is the cheap version.
+- `cqlCondition()` (`filter.ts`) interpolates a column name into CQL unquoted.
+  The XML path escapes it; only CQL is affected, and it is reachable in practice
+  only through the AI agent's `filter_layer` tool, whose `column` is not
+  validated against the layer's real columns the way the human UI is.
+- Dagster's GraphQL API has no authentication of its own and is reachable from
+  every container on the `vibegis` network. `/etl/run` itself is well-gated; the
+  exposure is lateral movement only.
+- pgAdmin runs with `PGADMIN_CONFIG_SERVER_MODE: "False"`, which disables its
+  login. It is loopback-bound behind the `tools` profile — never run that profile
+  on a shared host.
+- One uvicorn worker, with in-memory job state (`_watch_qgis_job`, ETL polling)
+  as the reason it cannot simply be scaled out. Moving that state to Postgres is
+  the prerequisite.
+- No CI, no tests, no linter. `npm run typecheck` is still the only check and it
+  is run by hand.
+- Single host, no HA — every deploy and every crash is downtime.

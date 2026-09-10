@@ -6,535 +6,113 @@ linter — `npm run typecheck` is the whole safety net.
 ## Modules
 
 ```
-main.tsx        25   Mantine provider, teal/amber theme, mounts <Notifications/>
-App.tsx        229   composes Scene + Sideband + LayerPanel + AiAgentPanel + DataViewBand;
-                     gates on auth. The top-level flex row runs map, sideband, layer
-                     panel, agent — the last two are docked columns, not overlays
-Scene.tsx      385   the globe: imagery layers, terrain, 3D tiles; a clustered point layer
-                     renders through PointCluster.tsx and a point cloud through
-                     PointCloudLayer.tsx, both instead of an ImageryLayer
-wms.ts         839   ★ zustand store `useApp`, GetCapabilities parsing, all endpoint URLs.
-                     `setLayerVisible()`/`zoomToLayer()` are explicit (non-toggle) setters
-                     added for aiAgent.ts, which decides show/hide/zoom from a chat
-                     message rather than flipping current state
-legend.ts      451   ★ legend types and `buildSld()` — SLD generation lives here
-selection.ts   189   ★ zustand store `useSelection` — open data-view tabs, select scope,
-                     layer-tagged selection, and localStorage-persisted named bookmarks
-                     (full-selection snapshots, restore replaces `selected` outright)
+main.tsx        42   Mantine provider, teal/amber theme, <Notifications/>
+App.tsx        237   composes Scene + Sideband + LayerPanel + AiAgentPanel + DataViewBand,
+                     gated on auth. The top-level flex row is map, sideband, layer panel,
+                     agent — the last two are docked columns, not overlays
+Scene.tsx      484   the globe: imagery, terrain, 3D tiles. A clustered point layer renders
+                     through PointCluster.tsx and a point cloud through PointCloudLayer.tsx,
+                     each instead of an ImageryLayer
+wms.ts        1039   ★ zustand store `useApp` — GetCapabilities parsing, every endpoint URL,
+                     layer state and draw order. Also stashes `camera` and `scene` for the
+                     components that live outside the Resium <Viewer> tree
+legend.ts      500   ★ legend types, resolveLegend(), buildSld(), reachableClasses()
+selection.ts   260   ★ zustand `useSelection` — open data-view tabs, select scope, the
+                     layer-tagged selection map, and localStorage-persisted bookmarks
 
-LayerPanel.tsx 958  layer tree, opacity, dnd-kit reordering, terrain/3D toggles, point-layer
-                     clustering toggle, RGB composite builder (`RasterCompositeButton`) for
-                     combining published single-band raster layers via /raster-composite;
-                     `BatchGroupRow` collapses one zip upload's bands into one named group
-                     (LayerState.batch/.batchTitle) with an inline per-band Rot/Grün/Blau
-                     picker (a `channel` prop on `LayerRow`) feeding the same endpoint
-PointCluster.tsx 132  `ClusteredPointLayer` — renders one point layer as real Cesium
-                     entities with EntityCluster grouping, fed from /features, when its
-                     LayerState.clustered flag is on
-PointCloudLayer.tsx 97  renders one LiDAR point cloud as a Cesium3DTileset, when its
-                     LayerState.pointCloud is non-null. Point size and colour mode
-                     (Originalfarben / Einfarbig / Klassifikation) come from that same
-                     object, driven by LayerPanel.tsx's controls
-ClassifyLayer.tsx 554  categorized + graduated classification editor. Any range-based
-                     classification (graduated, and categorized-by-range — same shape
-                     server-side) picks its breaks with a "Klassifizierungsmethode"
-                     select: Gleiche Intervalle (local, from the already-fetched
-                     min/max — no round trip, so the class-count spinner stays
-                     instant), Perzentil and Jenks (upload-api's /column-breaks), or
-                     Manuell. The min/max boxes stay editable under every method;
-                     typing in one flips the method to Manuell, which is why
-                     BreaksEditor separates `onEditBounds` from `onChange` (a color
-                     edit says nothing about where the ranges fall). The chosen
-                     method is saved on the classification (legend.ts's
-                     `GraduatedClassification.method`) purely so reopening shows it —
-                     nothing renders from it
-UploadLayer.tsx 406  file upload (incl. drag-and-drop from App.tsx), register a table,
-                     the multi-layer picker, and a raster mode for GeoTIFFs or a zip of
-                     single-band rasters (e.g. a Sentinel-2 product) — every band in a
-                     zip publishes immediately as its own layer, no picker here; see
-                     LayerPanel.tsx's RasterCompositeButton for combining them into RGB
-uploadState.ts  25  zustand store `useUpload` — the upload modal's open/pending-file state
-Legend.tsx     206  per-class swatches + color picker. Only shown while its layer is
-                     visible (else "Layer ausgeblendet"); of what's left, a class is
-                     dropped when the active filter rules it out (reachableClasses()),
-                     when its value never occurs anywhere in the table
-                     (fetchDistinctValues, exact/uncapped), or when it has no feature
-                     within the current map extent (fetchFeaturesInBbox, capped —
-                     legend.ts's classSatisfiedBy() runs the same value-in-set test for
-                     both checks). The two data-driven checks only run while the legend
-                     is open (`active` prop, set by LayerPanel.tsx's legendOpen) — this
-                     component stays mounted inside its Collapse even when collapsed, so
-                     `active` is what stops every layer's legend from polling the camera
-                     forever in the background
+LayerPanel.tsx      1202  layer tree, opacity, dnd-kit reordering, terrain/3D toggles, point
+                          clustering, per-polygon outline width, RGB composite builder,
+                          BatchGroupRow for a zip upload's bands
+Legend.tsx           218  per-class swatches + colour picker; prunes classes the filter,
+                          the data or the current extent rule out (only while `active`)
+ClassifyLayer.tsx    554  single / categorized / graduated classification editor, incl. the
+                          break-method picker (equal / percentile / Jenks / manual)
+UploadLayer.tsx      521  file upload, register-a-table, multi-layer picker, raster + raster-zip
+uploadState.ts        31  zustand `useUpload` — the upload modal's open/pending-file state,
+                          plus ACCEPT (here, not in UploadLayer, so App.tsx's drop zone can
+                          read it without pinning that module into the entry chunk)
+PointCluster.tsx     132  one point layer as real Cesium entities with EntityCluster grouping
+PointCloudLayer.tsx  132  one LiDAR cloud as a Cesium3DTileset; size + colour mode from
+                          LayerState.pointCloud
 
-AttributeTable.tsx 366  one data-view tab's content (`AttributeTablePanel`) — paging,
-                        sort-by-selection, column rename
-DataViewBand.tsx   231  the tab strip + resizable panel hosting every open AttributeTablePanel,
-                     plus one pinned "Dashboard" tab for SelectionDashboard.tsx's docked
-                     `SelectionDashboardPanel` (selection.ts's `dashboardTabOpen`/
-                     `dashboardTabActive`, toggled from Sideband.tsx — not a `panels.ts`
-                     boolean, since it needed a real slot in this tab system, not an
-                     independent open/closed flag). The band itself now stays mounted
-                     whenever either any layer tab OR the dashboard tab is open.
-                     While the dashboard tab is focused, the individual layer tabs collapse
-                     into a single "Datenansicht (N)" pill instead — showing every layer
-                     tab alongside the full dashboard felt cluttered; clicking the pill
-                     (`focusDataView()`) or opening/focusing any layer tab from
-                     LayerPanel.tsx switches straight back. `SelectToolsRow` (exported from
-                     SelectionDashboard.tsx — point/circle/polygon select + count + clear)
-                     shows in the header next to the maximize button always, regardless of
-                     which tab is focused — selecting features works the same from a plain
-                     attribute-table tab as from the dashboard, so there was no reason to
-                     gate it on `dashboardTabActive`. The header's X used to be "close all layer
-                     tabs" only, hidden while the dashboard was focused since it had
-                     nothing to do with the dashboard tab; it now calls both
-                     `closeAllLayerTabs()` and `closeDashboardTab()` at once and is always
-                     shown, since the band itself only renders when at least one of the
-                     two is actually open. A
-                     maximize/restore button (`useResizeHeight`'s `maximized`/
-                     `toggleMaximize`, new on that hook) sits next to `SelectToolsRow`/the
-                     close X — it
-                     swaps the band's `flex` to a very high grow factor (`10000 1 0px`)
-                     against the map viewport's own `flex: 1` in App.tsx, so the band
-                     absorbs essentially all available height and the map shrinks to its
-                     `minHeight: 0` floor, rather than computing an exact pixel value.
-                     Dragging the resize handle exits maximized mode automatically.
-AttributeFilter.tsx 284 / filter.ts 112   OGC Filter XML + CQL builder; "Auswählen" selects
-                     matches instead of restyling the map
-columns.ts 158  features.ts 129  spatial.ts 376   shared column/feature-fetch/geometry helpers.
-                     Both columns.ts's fetchColumns() and features.ts's fetchOnePage()
-                     (backing every exported fetch in that file — the attribute table,
-                     the attribute filter's apply/select action, and the map's select
-                     tools) route a 404 through freshLayerRetry.ts's retryFreshLayer()
-                     — pg_featureserv's own source (internal/data/catalog_db.go) shows
-                     its per-collection lookup (GET /collections/{name}) never
-                     refreshes its in-memory table catalog after the service's own
-                     first-ever request, full stop, no timer, no schedule; only the
-                     bare listing endpoint (GET /collections) forces a reload. Nothing
-                     else in this app ever called that endpoint, so a freshly
-                     published table could sit invisible to pg_featureserv
-                     indefinitely, not just briefly — retryFreshLayer() now calls it
-                     (warmPgFeatureservCatalog()) on every 404 before its next retry,
-                     which resolves the common case almost immediately; the
-                     backoff-and-retry loop (~2.5 min budget) around it remains only as
-                     a safety net for the rarer case where the underlying Postgres
-                     table itself isn't ready yet. Both fetchColumns() and fetchFeaturePage()/
-                     fetchFeaturePageInBbox() take an optional `onRetry` callback, fired
-                     on the first 404 so a caller can swap its plain loading spinner for
-                     a reassuring notice instead of silently spinning for however long
-                     the backoff takes (see AttributeTable.tsx/AttributeFilter.tsx/
-                     ClassifyLayer.tsx). columns.ts also has fetchColumnGroupBy()/
-                     fetchTableCount() (upload-api's `/column-groupby`/`/table-count`,
-                     plus new sum/avg/count fields on fetchColumnStats()'s
-                     `/column-stats`) and fetchColumnBreaks() (`/column-breaks` —
-                     ClassifyLayer.tsx's percentile/Jenks class edges); features.ts has
-                     fetchAllFeatures() (every row
-                     in a layer, no bbox/filter scope, same SELECTION_FETCH_CAP as
-                     every other bulk fetch here) — all three exist for
-                     SelectionDashboard.tsx's "everything selected" overview, which has
-                     no in-memory features to aggregate over client-side the way a real
-                     selection does
-freshLayerRetry.ts 44  retryFreshLayer() (see columns.ts/features.ts's entry above) plus
-                     FRESH_LAYER_WAIT_MESSAGE — the "grab a coffee ☕😊" copy shown both
-                     live (via `onRetry`) and as the final error if every retry still
-                     404s, and isFreshLayerWait(), which callers use to render that case
-                     as a yellow "still settling in" Alert instead of a red hard error
-mapHighlight.ts 88   addHighlightEntities() — per-geometry-type Cesium entity drawing (a
-                     crisp shape + a wider translucent glow, since Cesium has no built-in
-                     entity glow/bloom), parameterized by color so SelectionHighlight.tsx
-                     (the real selection, always SELECTION_COLOR) and
-                     DashboardHighlight.tsx (SelectionDashboard.tsx's own, separate
-                     "preview" highlight, DASHBOARD_HIGHLIGHT_COLOR — see
-                     dashboardHighlight.ts) share the same drawing code instead of
-                     duplicating it. Both are mounted in Scene.tsx, next to each other.
-                     dashboardHighlight.ts (29 lines) is the tiny zustand store
-                     (`useDashboardHighlight`) SelectionDashboard.tsx/DashboardHighlight.tsx
-                     (38 lines) share — ephemeral, session-only, same category as panels.ts
+AttributeTable.tsx   507  one data-view tab: paging, Kartenansicht/Alle Zeilen, sort-by-
+                          selection, column rename, CSV export
+DataViewBand.tsx     293  the tab strip + resizable band hosting every open table plus the
+                          pinned Dashboard tab; owns maximize/restore and lazy-loads the
+                          dashboard panel
+SelectionDashboard.tsx 1452  the Dashboard tab's content. Two modes: a real selection, or —
+                          with nothing selected — a per-visible-layer "everything selected"
+                          overview (Kartenansicht = live bbox fetch, Alle Zeilen = SQL
+                          aggregates, so a millions-of-rows layer is never pulled into the
+                          browser). Aggregates, group-by breakdown with an unfoldable
+                          "Andere" bucket, swappable bar/pie/donut chart, drill-through,
+                          CSV export, bookmarks. Clicking a row or chart segment sets the
+                          separate amber preview highlight; only drill-through touches the
+                          real selection
+dashboardTools.tsx   117  SelectToolsRow + useDashboardLayerNames, split out of the above so
+                          DataViewBand can import them without the charts — read its header
+                          before merging them back
+AttributeFilter.tsx  324 / filter.ts 112   OGC Filter XML + CQL builder; "Auswählen" selects
+                          matches instead of restyling
+sqlFilter.ts 195 / SqlFilterModal.tsx 194  raw-SQL filter mode
 
-MapTools.tsx   515  the floating toolbox panel: owns the actual Cesium click handlers for
-                     search-flyTo, identify, measure, select (point/circle/polygon;
-                     scoped to the active tab's layer or every visible layer, see
-                     selection.ts) — its own JSX is now just the Paper/drag-handle
-                     chrome around ToolboxControls.tsx
-ToolboxControls.tsx 296  the search box + identify/measure/select buttons. Rendered
-                     inside MapTools.tsx's floating panel — SelectionDashboard.tsx no
-                     longer embeds this component itself, but its own `SelectToolsRow`
-                     (see SelectionDashboard.tsx's entry below) re-implements just the
-                     select-tool row against the same state, since it needs only three of
-                     this file's buttons. Also exports `useSelectCandidates()`, the layer-
-                     candidate derivation this file's own select buttons,
-                     SelectionDashboard.tsx's `SelectToolsRow`, and MapTools.tsx's select
-                     click handlers all need, kept in one place so none of them can drift
-                     apart
-tools.ts       168  `useTools` store: search hits, identify, measure modes
+columns.ts 158  features.ts 144  spatial.ts 376  shared column / feature-fetch / geometry
+                          helpers. columns.ts: fetchColumns, fetchDistinctValues,
+                          fetchColumnStats, fetchColumnGroupBy, fetchTableCount,
+                          fetchColumnBreaks. features.ts: paged / bbox / filtered / all-rows
+                          fetches, all under SELECTION_FETCH_CAP. spatial.ts: turf predicates
+                          for the select tools, plus visibleGroundBbox() — see the rules below
+freshLayerRetry.ts    70  retryFreshLayer() + FRESH_LAYER_WAIT_MESSAGE. pg_featureserv's
+                          per-collection catalog lookup never refreshes on its own (only
+                          GET /collections forces it), so a freshly published table can 404
+                          indefinitely; this warms the catalog on every 404 before retrying
+mapHighlight.ts 88 / SelectionHighlight.tsx 39 / DashboardHighlight.tsx 38 / dashboardHighlight.ts 29
+                          per-geometry-type entity drawing, parameterized by colour so the
+                          real selection (blue) and the dashboard's preview (amber) share it
 
-auth.ts         72  zustand store `useAuth` — session state, login/logout
-LoginScreen.tsx 119  AuthSplash.tsx 88  ConnectedGlobe.tsx 30   login + welcome/goodbye splash
-UserAdmin.tsx  166  admin-only account management (role + premium)
+MapTools.tsx   530  the floating toolbox: Cesium click handlers for search-flyTo, identify,
+                     measure and select (point/circle/polygon)
+ToolboxControls.tsx 296  its contents, plus useSelectCandidates() — the one layer-candidate
+                     derivation every select entry point shares
+tools.ts       168  zustand `useTools` — search hits, identify, measure modes
 
-Sideband.tsx   436  the docked icon band: panel toggles, reset-to-north, ETL trigger +
-                     progress ring, geoprocessing (admin-only), AI agent toggle
-                     (admin/premium), handbook, logout. Most toggles are a generic `RAIL`
-                     array driving `panels.ts`'s open/closed booleans, but a few things
-                     don't fit that simple shape and get their own bespoke button below
-                     the RAIL loop instead — CompassButton (a live action, not a toggle —
-                     see its own entry below), EtlButton (its own polling state),
-                     AiAgentButton (same visible-but-disabled + upsell-tooltip shape as
-                     EtlButton, toggles aiAgent.ts's `open` instead of polling),
-                     Geoprocessing/Pages (modal opens), and the Auswahl-Dashboard
-                     toggle (selection.ts's `dashboardTabOpen`/`toggleDashboardTab()`,
-                     since it's a tab-strip slot now, not a `panels.ts` boolean) — kept in
-                     the RAIL's old visual position even though it's no longer a RAIL entry.
-                     The RAIL loop itself now holds only `layerPanel` — map tools, the
-                     status HUD toggle, the tour menu, language, display size, color
-                     scheme and the tips toggle (tips/tipsSettings.ts) all moved into
-                     ExtraMenu.tsx's grid, popped out of the "extra-menu-btn" Popover
-                     at the end of the band
-ExtraMenu.tsx  ~    7x5 grid (extraMenu.ts's `useExtraMenu` — GRID_COLS/GRID_ROWS) of the
-                     six relocated controls above, freely draggable into any cell
-                     (@dnd-kit/core's plain useDraggable/useDroppable per cell, not the
-                     sortable-list preset LayerPanel.tsx uses for its linear layer order —
-                     this needs free 2D placement with gaps). Content only, no position of
-                     its own: Sideband.tsx wraps it in a Mantine `Popover` anchored to its
-                     own button, so it always pops out from there rather than floating
-                     free. Each tile's drag handle is a small corner grip, never the tile's
-                     own clickable area — several tiles open a Menu on click (tour/display
-                     size/color scheme), and dnd-kit's pointer listeners on the whole tile
-                     would fight that click, same reason LayerPanel.tsx's row drag handle
-                     is its own element. `open` and each icon's grid cell persist to
-                     localStorage, the same standing-preference treatment as the language
-                     toggle and UI size — unlike MapTools/StatusHud's own panels.ts state,
-                     deliberately never persisted
-Analytics.tsx  ~150  Superset dashboards inside the app — master-detail modal
-                     (list left, embedded dashboard right), same shape as
-                     Pages.tsx, opened from Sideband. Both requests go straight
-                     to Superset through the gateway on the same origin with the
-                     user's own Superset session: the list from its REST API (so
-                     it already shows exactly what that user's roles allow — no
-                     permission logic here that could disagree with Superset's),
-                     the dashboard as an iframe at `?standalone=3`, Superset's
-                     chrome-less view. Building a chart opens the full Superset
-                     UI in a tab instead; it does not fit usefully in a modal.
-                     The gateway's auth_request proves the VibeGIS session but
-                     does NOT create a Superset one — only Superset's own login
-                     redirect does, and an XHR never follows it — so the first
-                     API call from a fresh browser 401s. warmUpSession() walks
-                     that chain once on a 401 and retries; don't remove it.
-                     Not a replacement for SelectionDashboard.tsx — see the root
-                     CLAUDE.md's Superset section for why it cannot be one
-Geoprocessing.tsx 232  buffer/dissolve/intersect/join modal, admin-only, publishes
-                     the result as a new layer via /geoprocess (mirrors UploadLayer.tsx)
-QgisProcessing.tsx 213  QGIS algorithm modal (Premium). Holds no algorithm knowledge
-                     of its own — the list and every parameter come from upload-api's
-                     /qgis-process/algorithms, so adding an algorithm is a backend-only
-                     change. A "Erweitert" switch swaps the curated catalog for the full
-                     introspected QGIS one. Submitting closes the dialog and hands off to
-                     qgis.ts's notification-driven poll loop, so a long run survives the
-                     user closing the modal (same reason EtlButton polls the way it does)
-qgisParams.tsx 150  ★ the ONE generic renderer for a QGIS parameter (kind -> Mantine
-                     control). Both catalogs arrive in the same QgisParam shape —
-                     upload-api's qgis_catalog.py translates QGIS's own descriptors into
-                     it — so this component never learns which catalog a parameter came
-                     from. A mode-specific branch here is exactly how that would rot
-qgis.ts        208  types, fetches, runQgisJob() (the poll driver) and exportPrintPdf().
-                     runQgisJob() calls useApp.getState().load() on success — re-reading
-                     GetCapabilities is still the only way a new layer ever appears
-PrintExportButton.tsx 105  one-click PDF export (Premium), in LayerPanel's header next to
-                     the upload button. No dialog on purpose: it prints exactly what is
-                     on screen — every visible layer, at visibleGroundBbox()'s current
-                     extent. The generated QGIS project references layers as WMS against
-                     MapServer, so a saved classification prints exactly as it renders.
-                     Point clouds are dropped server-side (no MapServer layer at all)
-aiAgent.ts     124  zustand store `useAiAgent` — the AI agent chat panel's session-only
-                     state (messages, pending confirmation, open/closed). `sendMessage()`
-                     posts to upload-api's `/ai/chat` (see upload-api/CLAUDE.md) and
-                     applies any returned map-control `actions[]` straight into wms.ts's
-                     `useApp` store (`setLayerVisible`/`zoomToLayer`/`setAttributeFilter`)
-                     — never touches Cesium/DOM directly, same "draw order is state"
-                     convention as everything else here. `confirmPendingAction()` posts
-                     to `/ai/execute-action` and reloads layers afterwards, same pattern
-                     Geoprocessing.tsx uses post-mutation
-AiAgentPanel.tsx 165  the chat window itself — a docked flex column mounted by App.tsx as
-                     the last sibling in the row (map, sideband, layer panel, agent), not
-                     a Modal/Drawer and no longer a fixed overlay against the right edge,
-                     which used to cover both the sideband and the layer panel. Opening it
-                     shrinks the map, and it borrows LayerPanel.tsx's width/opacity
-                     transition so the two docked columns behave alike. Styled with
-                     colorScheme.ts's panelBg/panelBorder. Renders the message list, an inline proposal card
-                     (Ausführen/Abbrechen) when aiAgent.ts's `pendingAction` is set, and a
-                     settings gear opening AiSettings.tsx
-AiSettings.tsx 142  bring-your-own-key form (provider + API key) for `/ai/settings/key`.
-                     The key is write-only end to end — this component drops its own
-                     local copy of the plaintext immediately after a successful save;
-                     upload-api never echoes it back, only `{provider, last4}`
-Pages.tsx      ~260  general-purpose CMS content browser (upload-api's /cms,
-                     configdb.pages) — master-detail modal, page list left,
-                     content + admin edit right, opened from Sideband. The
-                     in-app Handbook is just the one page ("handbook") a fresh
-                     install seeds, not special beyond that
-i18n/          ~     react-i18next. translations.ts is the single source of
-                     every UI string, DE+EN side by side, namespaced by
-                     component/area — no per-locale file split, no
-                     per-component fragments. index.ts reshapes it into
-                     i18next's resources at startup and exposes setLocale()
-                     (persisted to localStorage — a deliberate, called-out
-                     exception to the "ephemeral session state" rule below).
-                     Most of the app is converted, including the deep
-                     per-feature panels (SelectionDashboard, ClassifyLayer,
-                     AttributeTable/Filter, Geoprocessing, the AI agent panel,
-                     AiSettings, UploadLayer, QgisProcessing), login flow,
-                     Sideband, LayerPanel's docked chrome, UserAdmin and
-                     Pages. Still hardcoded German: LayerPanel's per-row
-                     buttons/tooltips (delete, rename, legend, cluster
-                     toggle, RGB-composite dialog — the docked chrome around
-                     the layer list is converted, the row-level controls
-                     inside it aren't), DataViewBand, MapTools/
-                     ToolboxControls, Legend.tsx, PointCluster.tsx,
-                     SqlFilterModal and a handful of stray strings in App.tsx
-                     and UserAdmin
-tour/          ~     Guided product tour (react-joyride), two tours: "upload"
-                     (admin-only — walks through publishing a first layer,
-                     using the real UploadLayer modal, not a mock) and
-                     "features" (role-aware — skips ETL/AI/geoprocessing steps
-                     a viewer can't reach). Tour.tsx owns the one useJoyride()
-                     call and publishes its `controls` into useTour.ts so any
-                     button (Sideband's tour menu, the one-time first-login
-                     offer) can start/stop a tour without prop-drilling.
-                     Each step's `before` hook drives the real UI into the
-                     right state via the existing zustand stores (opens
-                     panels.ts's layerPanel/mapTools, uploadState.ts's modal)
-                     — same "draw order is state" convention as everywhere
-                     else, never a DOM hack. TourTarget.tsx wraps one real
-                     control with a `data-tour` id (matching a step's
-                     `target`) and, while that step is active, a pulsing
-                     `.tour-highlight` class (index.html) — the actual button
-                     glows/grows, not just a tooltip floating nearby.
-                     The one auto-advance beyond click-Next: the upload
-                     tour's submit step watches wms.ts's `layers.length` and
-                     moves on the instant a real upload actually publishes —
-                     the user already did the real thing, no reason to also
-                     make them click a tour button. useTour.ts's `lastTourId`
-                     (localStorage) is what a plain "restart" (Sideband's
-                     menu, and the "Nochmal ansehen" button steps.tsx puts on
-                     each tour's own final step) replays — separate from
-                     `activeTourId`, which resets to null once a tour ends,
-                     so there's always something sensible to restart even
-                     after the tour that ran is long finished
-tips/          ~     Opportunistic "did you know" notifications — distinct
-                     from tour/: a tip is unprompted, shown once ever per
-                     browser (showTip.tsx, localStorage-tracked, own id per
-                     tip, one shared cooldown so two conditions becoming true
-                     together don't stack two notifications) the moment a
-                     specific condition first becomes true, not a
-                     scheduled/random popup and not a guided walkthrough
-                     someone chose to start. Every trigger condition lives in
-                     one place, Tips.tsx, watching the relevant zustand
-                     stores (layers.length, selection.ts's openLayers/
-                     selected) — adding one is a translations.ts entry under
-                     `tips.*` plus a showTip() call there, guarded by
-                     whatever makes it relevant. Suppressed entirely while a
-                     tour is running (tour/useTour.ts's `activeTourId`), so a
-                     tip notification never pops up over a tour tooltip.
-                     tipsSettings.ts's `useTipsSettings` is a separate on/off
-                     gate (Sideband.tsx's `TipsToggle`, localStorage-persisted
-                     like the language toggle) checked first in showTip() —
-                     it doesn't touch the per-tip "seen" flags, so re-enabling
-                     resumes rather than replays
-uiScale.ts      88  zustand store `useUiScale` — the global UI size (Klein 1 / Standard 1.25
-                     / Groß 1.5), picked from Sideband.tsx's `UiScaleMenu`. Feeds
-                     main.tsx's Mantine theme `scale` and a `--ui-scale` custom property
-                     for index.html's icon rule; localStorage-persisted, like the
-                     language toggle and for the same reason. See the "real CSS lengths"
-                     note below
-panels.ts       28  zustand store `usePanels` — open/closed state for the floating boxes
-                     (`mapTools` | `hud` | `layerPanel`). The Auswahl-Dashboard used to be
-                     a fourth entry here but is no longer a floating box at all — see
-                     DataViewBand.tsx/SelectionDashboard.tsx
-useDraggable.ts 51  useResizeHeight.ts 68   drag-to-move / drag-to-resize hooks. useResizeHeight
-                     takes an `edge` ('top', the default, or 'bottom') for which side of the
-                     panel the handle sits on and grows it — 'top' for a panel fixed at its
-                     bottom edge (the attribute table, DataViewBand.tsx), 'bottom' for one
-                     fixed at its top edge instead (nothing currently uses 'bottom' — kept
-                     as an option since SelectionDashboard.tsx used it before going docked).
-                     Also returns a `maximized`/`toggleMaximize` pair independent of the
-                     drag-resized `height` — the hook only tracks the boolean; the caller
-                     decides what CSS "maximized" means for its own layout (DataViewBand.tsx
-                     is the one consumer so far)
-StatusHud.tsx   65  ZoomBar.tsx 76   the bottom-left HUD stack (inside <Scene>, useCesium()).
-                     CompassButton.tsx 64 used to live here too but is docked in
-                     Sideband.tsx's icon band instead now — a sibling of <Scene>, not a
-                     descendant, so it reads `camera` from wms.ts's useApp store the same
-                     way LayerPanel.tsx does, rather than useCesium()
-SelectionDashboard.tsx 1449  docked into DataViewBand.tsx's tab strip as a pinned
-                     "Dashboard" tab, not a floating popup any more — its default export is
-                     `SelectionDashboardPanel({ isActive })`, a plain content component
-                     with `display: isActive ? 'flex' : 'none'` on its root (same
-                     convention AttributeTable.tsx uses for its own tabs), so switching
-                     away and back never loses a layer's `groupBy` choice or chart-type
-                     pick. Sizing now comes entirely
-                     from DataViewBand's own resizable band (up to 800px, shared with
-                     every other tab) and its full column width — no more own
-                     Transition/Paper/useDraggable/useResizeHeight. The old glowing
-                     total-count block and the collapsed "Werkzeuge" section are gone,
-                     replaced by `SelectToolsRow` (holding just the point/circle/polygon
-                     select buttons, the "N ausgewählt" badge, and the clear button, on
-                     the same useSelection()/useTools()/useSelectCandidates() state
-                     ToolboxControls.tsx's buttons use) — exported from this file but
-                     rendered in DataViewBand.tsx's own tab-strip header now (v10), not
-                     inside this panel's body. This panel's own header keeps just a close
-                     `ActionIcon` calling selection.ts's `closeDashboardTab()` — the same
-                     action the tab strip's own small X on the "Dashboard" pill already
-                     triggers (DataViewBand.tsx), just easier to find from inside the
-                     panel itself once that pill is one among others in the strip.
-                     Below that, a master-detail layout (v9) — `LayerNavRow` renders one
-                     row per involved layer (color bar, title, count) in a fixed-width,
-                     independently-scrollable left list; clicking one shows its full
-                     breakdown in the detail pane on the right, read straight from
-                     selection.ts's flat, layer-tagged `selected` map. Replaced a
-                     responsive `SimpleGrid` of per-layer cards each collapsed/expanded by
-                     clicking its own header — Thomas didn't like that with several layers
-                     involved. `LayerSummary`/`LayerOverviewCard` lost their own `expanded`/
-                     `Collapse` and gained an `isActive` prop instead (every layer's detail
-                     component stays mounted, `display: none` when not the selected one,
-                     same convention as the tabs elsewhere in this app) — so a layer's own
-                     `groupBy`/`chartType` choice and already-fetched columns survive
-                     switching to another layer in the list and back.
-                     Which row is active lives in `selection.ts` as `dashboardLayer`,
-                     **not** as local state here — that is what lets DataViewBand.tsx's
-                     "Im Dashboard auswerten" button open the dashboard already showing a
-                     chosen layer instead of merely requesting one and losing the race
-                     with this panel's own auto-select. The policy still lives here: the
-                     effect falls back to the first available layer whenever
-                     `dashboardLayer` names one the dashboard cannot currently show
-                     (including right after a mode switch between a real selection and the
-                     "everything selected" overview). `useDashboardLayerNames()`, exported
-                     from this file, is the single derivation of *which* layers those are
-                     (the layers a selection spans, else every visible layer with a
-                     resolvable collection) — DataViewBand imports it to decide whether
-                     its button can do anything, so the button can never offer a layer
-                     this panel would then silently refuse. Becoming the active layer lazily
-                     fetches columns.ts's fetchColumns() (same call
-                     AttributeFilter.tsx/ClassifyLayer.tsx/Geoprocessing.tsx already make)
-                     to show numeric sum/avg/min/max and a categorical group-by
-                     breakdown, capped to the top 8 values with the rest folded into one
-                     clickable "Andere" bucket — its own individual (excluded-from-top-N)
-                     values are kept as `hidden` on the bucket object rather than
-                     discarded, so a `IconChevronRight` next to "Andere" can unfold them
-                     back into the row list on demand (`BreakdownColumns`'s `andereOpen`
-                     state) instead of only ever showing the summed total. Every row also
-                     shows its share of the layer's total as a percentage next to its
-                     count (`BreakdownColumns`'s own `pct()`, denominator = the sum of
-                     every bucket's count, Andere included, so it needs nothing extra from
-                     either caller). The sum/avg/min/max numbers render as
-                     `AggregatesTable` — a CSS grid (one row per numeric column, one
-                     rounded `StatBox` per stat, sharing four stat columns so every row's
-                     boxes line up like a real table without a literal `<table>`) — each
-                     number formatted through `fmt()`'s `Intl.NumberFormat('de-DE', ...)`
-                     (thousand separators, max 2 decimals) rather than a bare
-                     `toFixed`/`String`. Once there's a breakdown, the detail pane splits
-                     into two columns (wrapping to one when the pane itself gets narrow) —
-                     the row list with data-bar formatting on the left, and on the right a
-                     per-layer, swappable @mantine/charts chart (`LayerSummary`'s own
-                     local `chartType` state, a `SegmentedControl` — 'Balken'/'Kreis'/
-                     'Ring' — right above it) — BarChart (`h={220}`, x/y axes with
-                     `gridAxis="y"`) and PieChart/DonutChart (`size={180}`) all color by
-                     bucket now, cycling the same LAYER_PALETTE by index rather than one
-                     flat color for the bars: BarChart picks this up from each data row's
-                     own `color` field (the installed version's `<Cell>`-per-bar logic
-                     prefers `entry.color` over the flat `series` color, which stays only
-                     as a fallback), the same mechanism `pieData` already relied on.
-                     PieChart/DonutChart have no native legend (unlike BarChart, whose
-                     bars are already self-labeled by the x-axis) — a small hand-built one
-                     (color swatch + label per segment, from `pieData`'s own colors) sits
-                     beside the chart in a `Group`, not stacked under it. Hovering a pie/
-                     donut segment shows just that segment's own tooltip
-                     (`tooltipDataSource="segment"` — the default, `"all"`, showed every
-                     segment's value in one combined tooltip on any hover, unlike BarChart).
-                     DonutChart's `chartLabel` shows the layer's total selected count
-                     centered in the ring. A `showLabels` toggle (a `Switch` next
-                     to the chart-type control, another piece of `LayerSummary`'s own
-                     per-layer state) drives `withBarValueLabel`/`withLabels` on whichever
-                     chart is showing — on by default. Clicking a row **or** a
-                     bar/slice/segment (`barProps.onClick`/`pieProps.onClick` — this
-                     version of @mantine/charts passes a real recharts `onClick` through,
-                     see the version note below) toggles dashboardHighlight.ts's own,
-                     separate map highlight for that bucket (amber, via
-                     DashboardHighlight.tsx) — deliberately non-destructive, it does NOT
-                     touch selection.ts's `selected`/replaceSelectionForLayers(), unlike
-                     a row's own drill-through icon, which does still call
-                     replaceSelectionForLayers() (on purpose — its whole point is "jump
-                     to a detail view of exactly this") and also opens/focuses that
-                     layer's attribute table tab via selection.ts's openLayerTab() (which
-                     also clears `dashboardTabActive`, so the dashboard tab visually
-                     deactivates when a drill-through focuses a layer tab). A per-layer
-                     CSV export button builds the file client-side from the same
-                     properties. A bookmark bar at the bottom saves/restores/deletes
-                     named full-selection snapshots (selection.ts).
-                     The row-list-plus-chart block itself is `BreakdownColumns`, factored
-                     out to a plain `{label, count}[]` shape so a second mode can reuse it
-                     without duplicating that JSX: with an empty real selection, the panel
-                     shows `LayerOverviewCard` instead — one per currently *visible* layer,
-                     as if everything in it were selected. It has its own
-                     "Kartenansicht"/"Alle Zeilen" `SegmentedControl`, same labels as
-                     AttributeTable.tsx's — Kartenansicht (the default) fetches real
-                     features within the current map view via features.ts's
-                     fetchFeaturesInBbox() (same bounded/capped contract and
-                     camera.changed-driven refetch AttributeTable.tsx's own Kartenansicht
-                     mode already uses), then computes count/aggregates/breakdown
-                     client-side with the exact same `computeAggregates()`/
-                     `computeEntryBreakdown()` LayerSummary itself calls (extracted out of
-                     it for this reuse) — real entries in memory means highlight-on-click,
-                     drill-through and CSV export are all synchronous here, no fetch-on-
-                     click needed. Alle Zeilen is the original SQL-aggregate
-                     implementation, unchanged: every number comes from upload-api
-                     (columns.ts's fetchTableCount()/fetchColumnGroupBy(), and
-                     fetchColumnStats()'s sum/avg/count fields) rather than a client-side
-                     reduce — since some real layers here run into the millions of rows,
-                     this mode never fetches whole layers into the browser. Its headline
-                     count is already pre-fetched by the panel for every visible overview
-                     layer the moment overview mode is shown (not just the active one), so
-                     switching to it is never a cold wait; only its per-column stats/
-                     breakdown are still fetched lazily. There, a bucket only becomes real
-                     features on demand — clicking a row/chart segment or drill-through
-                     fetches just that value's matching rows via
-                     fetchFeaturesWithFilter(), then hands the result to the same
-                     dashboardHighlight/replaceSelectionForLayers() primitives a real
-                     selection's row click already uses. Either mode's synthetic "Andere"
-                     bucket is shown but not clickable (no single CQL condition means
-                     "everything outside the top N" without deeper filter.ts changes).
-                     `LayerOverviewCard` also respects that layer's active
-                     `attributeFilters` entry now (wms.ts) — "everything selected" means
-                     "everything matching the filter" when one is set, in both modes and
-                     in CSV export. Kartenansicht passes the filter's CQL
-                     (filter.ts's buildCql()) into fetchFeaturesInBbox()'s new `cql` param;
-                     Alle Zeilen passes the raw filter object to fetchTableCount()/
-                     fetchColumnGroupBy()/fetchColumnStats(), which upload-api turns into a
-                     parameterized SQL WHERE (see upload-api/CLAUDE.md). A small
-                     `IconFilter` next to a card's title (and its `LayerNavRow`) shows when
-                     a filter is active. Scoped to this card only — a real selection
-                     (`LayerSummary`) and the select tools/attribute table are unaffected.
-                     This whole mode is otherwise display-only — only drill-through is
-                     allowed to turn it into a real selection, exactly like drill-through
-                     already does for a real one.
-                     Deliberate visual identity, not a copy of StatusHud's plain rows:
-                     colorScheme.ts's SELECTION_COLOR (the map's own selection-highlight
-                     blue) still marks the bookmark icon and the highlight color story
-                     described above; each
-                     layer gets a deterministic accent hue (`layerColor()`, hashed from
-                     its name, module-local — no other component needs per-layer color
-                     yet) carried through its identity bar, its RingProgress
-                     share-of-selection ring, and its own chart/data-bars, so color alone
-                     identifies which layer a number belongs to.
-                     @mantine/charts is actually pinned to `^7.17.8` (checked
-                     package.json and the installed .d.ts directly — an earlier version
-                     of this note wrongly said 7.13.x with no click support). BarChart/
-                     PieChart/DonutChart's `barProps`/`pieProps` do pass a real recharts
-                     `onClick` through in this version, which is what makes the chart
-                     itself a click target too, not just the row list below it.
+auth.ts        105  zustand `useAuth`; isPrivileged()/hasFullAccess() are the feature gates
+LoginScreen.tsx 115  AuthSplash.tsx 81  ConnectedGlobe.tsx 30   login + welcome/goodbye
+UserAdmin.tsx  178  AccessAdmin.tsx 305   admin-only: accounts (role × tier), groups + grants
 
-colorScheme.ts  96  panel/accent colors — the teal+amber palette shared by the app and
-                     the login screen
-webgl.ts        64  WebGL2/1 capability probe, feeds Viewer's contextOptions
+Sideband.tsx   870  the docked icon band. A generic RAIL array drives panels.ts booleans;
+                     things that don't fit that shape get their own button (CompassButton,
+                     EtlButton, AiAgentButton, the modals, the Auswahl-Dashboard toggle)
+ExtraMenu.tsx  353  7x5 grid of relocated controls, freely draggable, localStorage-persisted
+Analytics.tsx  171  Superset dashboards in a modal — list from its REST API, dashboard as a
+                     `?standalone=3` iframe, same origin, same session. warmUpSession()
+                     walks Superset's login redirect once on a 401; don't remove it
+Pages.tsx      348  CMS content browser (/cms, configdb.pages); the Handbook is just one page
+Geoprocessing.tsx 232  buffer/dissolve/intersect/join modal (Pro), publishes a new layer
+QgisProcessing.tsx 213 / qgisParams.tsx 150 / qgis.ts 208 / PrintExportButton.tsx 101
+                     QGIS algorithms (Premium) and one-click PDF export. qgisParams.tsx is
+                     the ONE generic parameter renderer for both catalogs — see the rules
+aiAgent.ts 124 / AiAgentPanel.tsx 179 / AiSettings.tsx 142   the chat panel; applies returned
+                     map-control actions into useApp, never touches Cesium directly. The
+                     BYO API key is write-only end to end
+
+i18n/          798  react-i18next. translations.ts is the single source of every UI string,
+                     DE+EN side by side, namespaced. index.ts reshapes it at startup and
+                     exposes setLocale(). Still hardcoded German: LayerPanel's row-level
+                     controls, DataViewBand, MapTools/ToolboxControls, Legend, PointCluster,
+                     SqlFilterModal, strays in App/UserAdmin
+tour/          419  guided tour (react-joyride), two tours, role-aware. Each step's `before`
+                     hook drives the real UI through the existing stores, never the DOM
+tips/          141  one-shot "did you know" notifications, localStorage-tracked per tip,
+                     suppressed entirely while a tour runs
+
+uiScale.ts      89  global UI size (Klein/Standard/Groß) — see the rules on real CSS lengths
+panels.ts       28  zustand `usePanels` — open/closed for the floating boxes
+useDraggable.ts 51  useResizeHeight.ts 72  useOnceOpened.ts 23   drag / resize / lazy-modal gate
+StatusHud.tsx 65  ZoomBar.tsx 76  CompassButton.tsx 80   HUD stack and compass
+colorScheme.ts 105  the shared teal+amber palette, app and login screen alike
+webgl.ts        64  WebGL2/1 capability probe — feeds Viewer's contextOptions
+csv.ts          26  downloadCsv()
 ```
 
 ★ = start here. `wms.ts`, `legend.ts` and `selection.ts` hold the contracts everything
@@ -729,8 +307,10 @@ else consumes.
   class survives if it matches any, decidable only when every condition is an `eq` on
   the class column. Getting this wrong is expensive rather than merely untidy — two
   values over a 45-class legend emitted 45 rules and ~33KB of SLD per tile, now 2 rules
-  and 1.2KB. Pruning must never drop a class that could still draw; the tests cover a
-  filter on a different column and a non-`eq` operator for exactly that reason.
+  and 1.2KB. Pruning must never drop a class that could still draw. **There is no test
+  covering this** — an earlier version of this note claimed there was; the repo has no
+  test files at all. The two cases to check by hand after touching it are a filter on a
+  column other than the class column, and a non-`eq` operator.
   `reachableClasses()` is also reused directly by `Legend.tsx` to hide a filtered-out
   class from the legend list itself, not just from the SLD sent to the map.
 - **The layer list comes from GetCapabilities**, never a hardcoded list. Add a `LAYER`

@@ -182,58 +182,36 @@ anyone else must both meet the route's tier gate *and* own the specific layer
 
 ## Superset (reporting & BI)
 
-Added **alongside** `SelectionDashboard.tsx`, never in place of it: that panel's
-numbers come from the live Cesium selection and camera extent, and clicking a
-chart segment highlights features back on the globe. Superset can see neither,
-so it covers the other half — saved dashboards, ad-hoc charts and (later)
-scheduled report email over the `dwh` tables.
+**Alongside** `SelectionDashboard.tsx`, never in place of it — that panel reads the
+live Cesium selection and camera extent and highlights back onto the globe, none of
+which Superset can see. Superset covers the other half: saved dashboards, ad-hoc
+charts, SQL Lab over the `dwh` tables.
 
-**No second login.** `/analytics` is gated by `auth_request /auth/superset`
-(a separate target from `/auth/verify`, which parses layer names out of the URI
-and would fail closed on every Superset URL). upload-api answers with
-`X-Vibegis-User`, nginx forwards it as `X-Remote-User`, and
-`superset/vibegis_security.py` turns that into a Superset account.
-
-**The ACL is not reimplemented.** At login the security manager calls
-`GET /internal/superset/acl`, which runs the same `visible_layers_for()` every
-tile and feature request already obeys, and rebuilds a per-user Superset role
-(`vg_user_<name>`) holding exactly those datasets. Role mapping: admin →
-`Admin`, editor → `Alpha` + `sql_lab`, everyone else → `Gamma` + that per-user
-role. **SQL Lab is admin/editor only on purpose** — no dataset permission can
-restrict arbitrary SQL, and those two already see every layer by design.
-The outer wall is Postgres: Superset connects as `superset_reader`, which has
-SELECT on `dwh`/`public`/`reporting` and no grant at all on `configdb` or
-`userdb` (`postgis/initdb/08-superset.sql`, `bin/migrate-superset.sql`).
-
-**Datasets follow layers.** Every publish path registers one via
-`upload-api/superset_client.py`, deliberately best-effort so a Superset outage
-can never fail an upload — with Dagster's nightly `superset_sync` job
-(`POST /internal/superset/reconcile`) as the backstop that makes that safe.
-**Demo dashboards are seeded on request, never automatically.**
-`bash bin/seed-superset-demo.sh` builds two presentable dashboards
-(`vibegis-demo-demographics`, `vibegis-demo-transport`) over whatever of
-`upload_admin_units` / `upload_bahntrassen` /
-`upload_ffentliche_verkehrsmittel` is published, and skips a dashboard whose
-datasets are missing. Idempotent by chart/dashboard name, so re-running updates
-in place. It is not in the entrypoint on purpose: a customer install with its
-own layers should not acquire demo content silently. The seeded charts get the
-dataset's own `perm`/`schema_perm`, so they obey the same per-layer ACL as
-everything else — verified: a Gamma user granted only `upload_admin_units` sees
-the demographics dashboard and is denied the transport one.
-
-**It wears the app's palette.** `superset/superset_config.py`'s
-`THEME_OVERRIDES` carries the teal primary and amber secondary from
-`frontend-app/src/colorScheme.ts`, plus the app's font stack and Mantine's
-`md` radius, and `EXTRA_CATEGORICAL_COLOR_SCHEMES` adds a default `vibegis`
-chart palette built from the same two accents (the theme does not reach series
-colours; those come from a named scheme). Status colours are left at
-Superset's defaults on purpose — a warning that matches the brand stops
-reading as a warning. **Dark mode is the limit**: 4.1.3 ships one light theme
-and no dark counterpart, so the app in its default dark scheme still opens a
-light Superset. Closing that would mean injecting CSS, which is not done here.
-
-Superset's own metadata lives in a separate `superset` database in the same
-cluster; `bin/backup.sh` dumps it separately, since the main dump misses it.
+- **No second login.** `/analytics` is gated by `auth_request /auth/superset` — a
+  separate target from `/auth/verify`, which parses layer names out of the URI and
+  would fail closed on every Superset URL. upload-api answers `X-Vibegis-User`, nginx
+  forwards it as `X-Remote-User`, `superset/vibegis_security.py` maps it to an account.
+- **The ACL is not reimplemented.** At login the security manager calls
+  `GET /internal/superset/acl` — the same `visible_layers_for()` every tile obeys — and
+  rebuilds a per-user role (`vg_user_<name>`) holding exactly those datasets. admin →
+  `Admin`, editor → `Alpha` + `sql_lab`, everyone else → `Gamma` + that role. **SQL Lab
+  is admin/editor only on purpose**: no dataset permission can restrict arbitrary SQL,
+  and those two already see every layer. The outer wall is Postgres — Superset connects
+  as `superset_reader`, SELECT on `dwh`/`public`/`reporting`, no grant on `configdb` or
+  `userdb` (`postgis/initdb/08-superset.sql`, `bin/migrate-superset.sql`).
+- **Datasets follow layers**, registered best-effort by `upload-api/superset_client.py`
+  so a Superset outage can never fail an upload; Dagster's nightly `superset_sync`
+  (`POST /internal/superset/reconcile`) is the backstop that makes that safe.
+- **Demo dashboards are seeded on request only** — `bash bin/seed-superset-demo.sh`,
+  idempotent by name, deliberately not in the entrypoint so a customer install doesn't
+  acquire demo content silently. Seeded charts inherit the dataset's `perm`, so they
+  obey the same per-layer ACL.
+- **Theme:** `superset_config.py`'s `THEME_OVERRIDES` + `EXTRA_CATEGORICAL_COLOR_SCHEMES`
+  carry the app's teal/amber. Status colours stay Superset's own — a warning that
+  matches the brand stops reading as a warning. 4.1.3 ships no dark theme, so a dark
+  app still opens a light Superset; closing that would mean injecting CSS.
+- Metadata lives in a separate `superset` database in the same cluster; `bin/backup.sh`
+  dumps it separately, since the main dump misses it.
 
 ## Localization (DE/EN)
 
@@ -557,121 +535,40 @@ that both `include /etc/nginx/vibegis/server-settings.conf` and
 `/etc/nginx/vibegis/`, not `conf.d/`** — the nginx image includes `conf.d/*.conf`
 at http level, where a bare `location` is a syntax error.
 
-## Production hardening — what is done
+## Security posture
 
-Every item here was verified against a running stack, not assumed.
+Verified against a running stack, not assumed. The load-bearing details are in
+"Roles and tiers" and "Things that will bite you" above; this is the index.
 
-**Authorization.** `/distinct-values`, `/column-stats`, `/column-groupby`,
-`/table-count`, `/register-table` and both `/geoprocess` inputs used to take a
-raw `schema`/`table` from the query string, check it against a bare identifier
-regex, and never consult the ACL —
-`?schema=userdb&table=users&column=password_hash` returned bcrypt hashes to any
-logged-in viewer. They all go through `authorize_table()` now: `dwh` only
-(`QUERYABLE_SCHEMAS`), and a `visible_layers_for()` match unless the caller is
-privileged. `/tables` and `/layer-config`'s GETs are ACL-filtered the same way,
-and the tile/feature gap is closed as described under "Roles and tiers".
+- **Authorization.** Every table-taking route (`/distinct-values`, `/column-stats`,
+  `/column-breaks`, `/column-groupby`, `/table-count`, `/register-table`, both
+  `/geoprocess` inputs) goes through `authorize_table()` — `dwh` only, ACL-checked. The
+  raw OGC routes are gated by `authorize_gateway_request()` on the original URI, not
+  just "is there a session".
+- **QGIS processing.** A parameter's kind comes from the algorithm catalog, never from
+  the shape it arrived in; `reject_datasource_scalar()` in both `app.py` and the worker
+  blocks `PG:`, `/vsi`, `http(s)://` and leading `/`; `OUTPUT` stays server-owned.
+- **Least privilege in Postgres.** mapserver/qgis-server/qgis-processing/featureserv
+  connect as `vibegis_render` (SELECT on `dwh`, nothing else); the AI agent's
+  `ai_readonly` never gets `configdb`; Superset uses `superset_reader`.
+- **Non-root containers** (`APP_UID`:`APP_GID`), `no-new-privileges` everywhere,
+  `mem_limit`/`cpus` on everything that can consume real resources. The nginx
+  containers are the deliberate exception. Switching an existing install needs
+  `bash bin/fix-ownership.sh` once.
+- **Secrets.** `check_secrets()` refuses to boot on an empty, placeholder or too-short
+  `AUTH_JWT_SECRET` / `AI_KEY_ENCRYPTION_SECRET` / `AI_READONLY_PG_PASSWORD` /
+  `PGPASSWORD`, naming the `.env` key. No `user=`/`password=` in any mapfile or QGIS
+  `CONNECTION`.
+- **The gateway.** TLS + HSTS under the overlay; `X-Content-Type-Options`,
+  `X-Frame-Options: DENY`, `Referrer-Policy`, `server_tokens off`; `limit_req` on
+  `/login` and `/ai/`, `limit_conn` on the upload routes; `MS_MAP_NO_PATH=1` plus a
+  `MAP=` pattern check so neither renderer takes a client-controlled path.
+- **Backups.** `bin/backup.sh` / `bin/restore.sh` cover `pg_dump -Fc` (main + the
+  separate `superset` DB) plus the file-backed state.
 
-**QGIS processing.** A parameter's kind now comes from the algorithm catalog,
-not from the shape it arrived in. Before, anything that was not
-`{"layer": "<name>"}` fell through to a scalar and was appended verbatim to the
-`qgis_process` argv, so `{"OVERLAY": "PG:host=postgis … tables=layer_grants|…"}`
-gave arbitrary GDAL datasource control with the worker's own database
-credential — and the same slot took `/vsicurl/http://…`, i.e. local file read
-and SSRF. `reject_datasource_scalar()` in *both* `app.py` and
-`qgis-processing/worker.py` rejects `PG:`, `/vsi`, `http://`, `https://` and
-leading `/` as a second line, and every parameter key is validated against the
-algorithm's own descriptor, advanced algorithms included, with `OUTPUT` kept
-server-owned throughout.
-
-**Least privilege in Postgres.** `mapserver`, `qgis-server`, `qgis-processing`
-and `featureserv` connect as `vibegis_render`, which has SELECT on `dwh` and
-nothing else — no DDL, no `configdb`, no `userdb`. Created by
-`postgis/initdb/07-roles.sql` on a fresh volume, `bin/migrate-roles.sql` on an
-existing one. The AI agent's `ai_readonly` role no longer gets `configdb` at
-all, and `run_select_query()` checks the relations the planner actually reads
-(`EXPLAIN (FORMAT JSON, VERBOSE true)` — `VERBOSE` is required or every relation
-comes back attributed to `public`) against the caller's visible layers.
-
-**Non-root containers.** `upload-api`, `qgis-processing`, `dagster`, `mapproxy`
-run as uid `APP_UID`:`APP_GID` (default 1001, the
-checkout's owner), set both as a build arg and as compose's `user:` so a
-different host uid can be fixed without a rebuild. Every service has
-`security_opt: [no-new-privileges:true]`, and the eleven that can consume real
-resources have `mem_limit`/`cpus`. Switching an existing install over needs
-`bash bin/fix-ownership.sh` once — the named volumes were created while those
-services still ran as root, and Docker only applies image ownership the first
-time a volume is created. The nginx containers (`gateway`, and the frontend
-under the production overlay) are the deliberate exception: nginx's master
-process is root by design and forks unprivileged workers itself.
-
-**Secrets.** `check_secrets()` runs at import time in `app.py` and refuses to
-boot if `AUTH_JWT_SECRET`, `AI_KEY_ENCRYPTION_SECRET`, `AI_READONLY_PG_PASSWORD`
-or `PGPASSWORD` is empty, still a `change_me` placeholder, or too short — naming
-the `.env` key in the error. Mapfile and QGIS `CONNECTION` strings carry neither `user=` nor
-`password=`; both come from the reading container's `PGUSER`/`PGPASSWORD`.
-
-**The gateway.** TLS overlay with HSTS; `X-Content-Type-Options`,
-`X-Frame-Options: DENY`, `Referrer-Policy` and `server_tokens off` on every
-response; `limit_req` on `/login` (10r/m) and `/ai/` (30r/m) and `limit_conn` on
-the four upload routes; `MS_MAP_NO_PATH=1` plus an nginx `map=` rejection on
-`/mapserver` and a `MAP=` pattern check on `/qgis`, so neither renderer takes a
-client-controlled path (`/proc/self/environ` in those containers holds
-`PGPASSWORD`). The wildcard `Access-Control-Allow-Origin: *` is gone from the
-four static routes — they sit behind session auth and are same-origin.
-
-**Operations.** Every image is pinned in `.env.example` (by digest where there
-is no version tag), `dagster/requirements.txt` is fully pinned, seven services
-have healthchecks, and `bin/backup.sh` / `bin/restore.sh` cover `pg_dump -Fc`
-plus the file-backed state (`pointclouds/`, `mapserver/rasters/`, the
-machine-written `uploads.map` and `mapproxy.yaml`).
-
-## Still open before a real install
-
-**CSP is `Content-Security-Policy-Report-Only`, on purpose.** Cesium needs
-workers and blob URLs and the policy has not been validated against a real
-session yet. Watch the browser console on the production overlay, then flip it
-to enforcing.
-
-**Compliance is not started, deliberately.** The scope above is technical only.
-Once it is complete, the compliance track is the next piece of work: GDPR/DSGVO
-posture, a DPA with every subprocessor, retention and deletion policy, personal
-data in the container logs, account export and deletion, and ISO 27001 / TISAX
-readiness if a customer asks. None of it is built and none of it should be
-claimed.
-
-**Known-deferred technical items**, judged not to block a first install:
-
-- The 2 GB upload cap lives as five separate literals (four in
-  `nginx/locations.conf`, `MAX_BYTES` in `app.py`). Make it one env var, then
-  lower it.
-- Zip bombs: `read_vector()` and `extract_raster_zip()` reject zip-slip paths but
-  cap no *uncompressed* total. Needs a cumulative-bytes ceiling and a ratio check
-  before `extractall()`.
-- No statement timeouts on the query endpoints (`ai_agent.py` already sets one
-  for the agent and is the model).
-- No semaphore around the four upload handlers, each of which reads the whole
-  file into memory.
-- Raw driver exception strings still reach the client from two paths, leaking
-  internal schema and table names.
-- No session revocation: JWT-in-a-cookie with no server-side invalidation, so a
-  demotion or deletion takes up to 10h. A `token_version` column on
-  `userdb.users` checked in `require_login` is the cheap version.
-- `cqlCondition()` (`filter.ts`) interpolates a column name into CQL unquoted.
-  The XML path escapes it; only CQL is affected, and it is reachable in practice
-  only through the AI agent's `filter_layer` tool, whose `column` is not
-  validated against the layer's real columns the way the human UI is.
-- Dagster's GraphQL API has no authentication of its own and is reachable from
-  every container on the `vibegis` network. `/etl/run` itself is well-gated; the
-  exposure is lateral movement only.
-- pgAdmin runs with `PGADMIN_CONFIG_SERVER_MODE: "False"`, which disables its
-  login. It is loopback-bound behind the `tools` profile — never run that profile
-  on a shared host.
-- One uvicorn worker, with in-memory job state (`_watch_qgis_job`, ETL polling)
-  as the reason it cannot simply be scaled out. Moving that state to Postgres is
-  the prerequisite.
-- No CI, no tests, no linter. `npm run typecheck` is still the only check and it
-  is run by hand.
-- Single host, no HA — every deploy and every crash is downtime.
+**What is still open is in `README.md`** — CSP is still report-only, compliance is
+unstarted, and there is a list of known-deferred technical items there. That list is a
+TODO, not guidance, which is why it does not live in this file.
 
 ## Ideas not yet built
 
