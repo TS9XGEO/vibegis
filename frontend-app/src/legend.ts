@@ -89,6 +89,13 @@ export interface GraduatedClassification {
   column: string
   breaks: GraduatedBreak[]
   size?: number
+  /**
+   * Which method produced `breaks` (ClassifyLayer.tsx's
+   * "Klassifizierungsmethode" picker). Nothing renders from it — it exists
+   * so reopening the editor can show the method that was used rather than
+   * defaulting every saved classification to "manual".
+   */
+  method?: 'equal' | 'quantile' | 'jenks' | 'manual'
 }
 
 export type Classification = SingleSymbol | CategorizedClassification | GraduatedClassification

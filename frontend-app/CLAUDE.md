@@ -35,7 +35,19 @@ PointCloudLayer.tsx 97  renders one LiDAR point cloud as a Cesium3DTileset, when
                      LayerState.pointCloud is non-null. Point size and colour mode
                      (Originalfarben / Einfarbig / Klassifikation) come from that same
                      object, driven by LayerPanel.tsx's controls
-ClassifyLayer.tsx 445  categorized + graduated classification editor
+ClassifyLayer.tsx 554  categorized + graduated classification editor. Any range-based
+                     classification (graduated, and categorized-by-range — same shape
+                     server-side) picks its breaks with a "Klassifizierungsmethode"
+                     select: Gleiche Intervalle (local, from the already-fetched
+                     min/max — no round trip, so the class-count spinner stays
+                     instant), Perzentil and Jenks (upload-api's /column-breaks), or
+                     Manuell. The min/max boxes stay editable under every method;
+                     typing in one flips the method to Manuell, which is why
+                     BreaksEditor separates `onEditBounds` from `onChange` (a color
+                     edit says nothing about where the ranges fall). The chosen
+                     method is saved on the classification (legend.ts's
+                     `GraduatedClassification.method`) purely so reopening shows it —
+                     nothing renders from it
 UploadLayer.tsx 406  file upload (incl. drag-and-drop from App.tsx), register a table,
                      the multi-layer picker, and a raster mode for GeoTIFFs or a zip of
                      single-band rasters (e.g. a Sentinel-2 product) — every band in a
@@ -89,7 +101,7 @@ DataViewBand.tsx   231  the tab strip + resizable panel hosting every open Attri
                      Dragging the resize handle exits maximized mode automatically.
 AttributeFilter.tsx 284 / filter.ts 112   OGC Filter XML + CQL builder; "Auswählen" selects
                      matches instead of restyling the map
-columns.ts 101  features.ts 129  spatial.ts 171   shared column/feature-fetch/geometry helpers.
+columns.ts 158  features.ts 129  spatial.ts 376   shared column/feature-fetch/geometry helpers.
                      Both columns.ts's fetchColumns() and features.ts's fetchOnePage()
                      (backing every exported fetch in that file — the attribute table,
                      the attribute filter's apply/select action, and the map's select
@@ -114,7 +126,9 @@ columns.ts 101  features.ts 129  spatial.ts 171   shared column/feature-fetch/ge
                      ClassifyLayer.tsx). columns.ts also has fetchColumnGroupBy()/
                      fetchTableCount() (upload-api's `/column-groupby`/`/table-count`,
                      plus new sum/avg/count fields on fetchColumnStats()'s
-                     `/column-stats`) and features.ts has fetchAllFeatures() (every row
+                     `/column-stats`) and fetchColumnBreaks() (`/column-breaks` —
+                     ClassifyLayer.tsx's percentile/Jenks class edges); features.ts has
+                     fetchAllFeatures() (every row
                      in a layer, no bbox/filter scope, same SELECTION_FETCH_CAP as
                      every other bulk fetch here) — all three exist for
                      SelectionDashboard.tsx's "everything selected" overview, which has
@@ -539,6 +553,31 @@ else consumes.
   `SelectionDashboard.tsx`'s chart-type switch leaves 'bar'. Fixed by adding
   the import; if a future `@mantine/charts` component looks blank while
   everything else about it is correct, check this first.
+- **"What's on screen" is `spatial.ts`'s `visibleGroundBbox()`, never
+  `camera.computeViewRectangle()`.** This is a 3D globe, and Cesium's method
+  answers with a lon/lat rectangle that has to contain everything the camera
+  could see — at any real tilt it reaches to the horizon, and zoomed out it
+  simply returns the whole world. Every "Kartenansicht" mode that used it was
+  therefore showing essentially every row while claiming to be scoped to the
+  view (AttributeTable.tsx, SelectionDashboard.tsx's `LayerOverviewCard`), and
+  the symptom reads as a broken filter rather than a wrong extent.
+  `visibleGroundBbox()` ray-casts a 7x7 grid of screen points against the
+  ellipsoid instead and, for each sample that missed while a neighbour hit,
+  bisects between them to land on the globe's silhouette — without that limb
+  step a globe that doesn't fill the screen has only its centre sample hitting
+  and the box collapses to a point (which is what made Legend.tsx's class list
+  go empty and flicker in a zoomed-out view). Two cases deliberately widen to
+  the whole world, because a `bbox=` query cannot express either: a view
+  spanning 180°+ of longitude, and one crossing the antimeridian — **a bbox
+  with west > east is not an option**, since pg_featureserv does not implement
+  that part of OGC API Features and returns the complement instead (verified
+  live: `170,-20,-170,20` gives the same rows as `-170,-20,170,20`).
+  `bboxWorldFraction()` / `WIDE_VIEW_FRACTION` exist so those callers can say
+  "this view covers nearly everything" out loud rather than leaving a
+  full-looking result unexplained. **`PointCluster.tsx` is the one deliberate
+  holdout** — it over-fetches on purpose so cluster markers are already loaded
+  just beyond the screen edge instead of popping in; a tighter box would be a
+  regression there, not a fix.
 - **Draw order is array order.** The store keeps `layers[]` top-first; `Scene` renders
   it reversed because Cesium draws the last-added imagery layer on top. Reordering a
   row reorders the array, and React does the rest. Never reach for `raiseToTop`.

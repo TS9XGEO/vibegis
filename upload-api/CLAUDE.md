@@ -49,6 +49,7 @@ entirely by `is_privileged_role()`.
 | `GET /layers`, `DELETE /layers/{name}?drop_table=` | GET `require_login`, DELETE `require_tier("pro")` + `require_owner_or_admin()` | list / unpublish — for a raster layer, `drop_table=true` deletes the underlying `.tif` instead of dropping a table |
 | `GET /distinct-values` | `require_login` | value list for the filter and categorized editor (caps at 500) |
 | `GET /column-stats` | `require_login` | min/max/sum/avg/count of a numeric column — min/max seed the graduated editor, the rest back the dashboard's "everything selected" overview |
+| `GET /column-breaks` | `require_login` | k+1 class edges for a graduated classification — `method=equal\|quantile\|jenks`, `classes=2..12`. Quantile is Postgres's own `percentile_cont` (exact, every row); Jenks is the exact Fisher-Jenks DP, vectorised over the split point, on a deterministic even-stride sample (`JENKS_SAMPLE_CAP` 1200 — ~90 ms end to end at 12 classes over 98k rows). Server-side because both describe the *distribution*, so a client-side sample would answer differently on a big layer than a small one |
 | `GET /column-groupby` | `require_tier("pro")` | value+count per distinct value, capped like `/distinct-values` plus an exact `totalCount` — the dashboard overview's server-side group-by, no in-memory features to aggregate over client-side there |
 | `GET /table-count` | `require_tier("pro")` | plain row count for a schema.table — the overview's headline number per layer |
 | `GET|PATCH|DELETE /layer-config[/{name}]` | GET `require_login`, writes `require_tier("pro")` + `require_owner_or_admin()` | per-layer classification state — now backed by `configdb.layer_config` (see below), not a JSON file, but the external contract is unchanged |
@@ -91,7 +92,8 @@ entirely by `is_privileged_role()`.
   the schema rejected unless it is in `QUERYABLE_SCHEMAS` (`{"dwh"}`), and then —
   unless `is_privileged_role(user)` — a match required in
   `visible_layers_for(user, all_layers())`. `/distinct-values`, `/column-stats`,
-  `/column-groupby`, `/table-count`, `/register-table` and *both* `/geoprocess`
+  `/column-breaks`, `/column-groupby`, `/table-count`, `/register-table` and *both*
+  `/geoprocess`
   input pairs go through it.
 
   It exists because they used to take the pair straight from the query string
@@ -171,8 +173,8 @@ entirely by `is_privileged_role()`.
   answering 200 with an empty list. Now every such path 503s with the fix
   (`docker compose up -d --force-recreate upload-api`) and `/health` reports
   `mapfile_volume`.
-- **`/table-count`, `/column-groupby` and `/column-stats` all take an optional
-  `filter` query param** — the frontend's `LayerFilter` shape ({logic, conditions}
+- **`/table-count`, `/column-groupby`, `/column-stats` and `/column-breaks` all take
+  an optional `filter` query param** — the frontend's `LayerFilter` shape ({logic, conditions}
   from wms.ts), JSON-encoded into one string (simplest way through a `GET` query
   string without switching these to `POST`). `parse_layer_filter()` decodes it;
   `build_filter_where()` (both next to `check_identifier`) turns it into a

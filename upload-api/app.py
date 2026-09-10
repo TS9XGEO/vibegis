@@ -3102,6 +3102,145 @@ def column_stats(
     }
 
 
+BREAK_METHODS = {"equal", "quantile", "jenks"}
+MAX_BREAK_CLASSES = 12
+# Jenks is an O(k·n²) dynamic program. It runs on a deterministic even-stride
+# sample rather than the whole column so a million-row table costs the same as
+# a thousand-row one; at this cap the cost matrix is ~11 MB and the whole solve
+# well under a second. A class *boundary* only ever needs to land in about the
+# right place, so a 1200-point picture of the distribution is plenty — the two
+# outer edges are replaced with the table's true MIN/MAX afterwards either way.
+JENKS_SAMPLE_CAP = 1200
+
+
+def jenks_edges(sample: "np.ndarray", k: int) -> list[float]:
+    """
+    Fisher-Jenks natural breaks: the partition of `sample` into k contiguous
+    classes minimising the total within-class sum of squared deviations.
+
+    Exact (the classic DP, not a k-means approximation), vectorised over the
+    split point so each of the k passes is one numpy reduction over an n×n
+    cost matrix instead of a Python loop. Returns k+1 edges, lowest first.
+    """
+    v = np.sort(sample)
+    n = v.size
+    if n <= k:
+        # Fewer sample points than classes — nothing to optimise; hand back
+        # the points themselves so the caller still gets k+1 monotonic edges.
+        edges = list(np.linspace(v[0], v[-1], k + 1))
+        return [float(e) for e in edges]
+
+    s1 = np.concatenate(([0.0], np.cumsum(v)))
+    s2 = np.concatenate(([0.0], np.cumsum(v * v)))
+    idx = np.arange(n)
+    # cost[a, b] = within-class SSE of v[a..b] (inclusive), +inf where b < a.
+    count = (idx[None, :] - idx[:, None] + 1).astype(float)
+    sum1 = s1[1:][None, :] - s1[:n][:, None]
+    sum2 = s2[1:][None, :] - s2[:n][:, None]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cost = sum2 - sum1 * sum1 / count
+    cost[count <= 0] = np.inf
+    np.clip(cost, 0.0, None, out=cost)
+
+    best = cost[0].copy()               # one class covering v[0..b]
+    splits = np.zeros((k + 1, n), dtype=np.int64)
+    for c in range(2, k + 1):
+        # cand[m - 1, b] = best-with-(c-1)-classes up to m-1, plus v[m..b].
+        cand = best[: n - 1][:, None] + cost[1:]
+        take = np.argmin(cand, axis=0)
+        splits[c] = take + 1
+        best = cand[take, idx]
+
+    edges = [float(v[-1])]
+    b = n - 1
+    for c in range(k, 1, -1):
+        m = int(splits[c][b])
+        edges.append(float(v[m - 1]))   # top of the class below the split
+        b = m - 1
+    edges.append(float(v[0]))
+    return list(reversed(edges))
+
+
+@app.get("/column-breaks")
+def column_breaks(
+    schema: str, table: str, column: str, method: str = "equal", classes: int = 5,
+    filter: str | None = None, user: dict = Depends(require_login),
+):
+    """
+    The class boundaries behind ClassifyLayer.tsx's "Klassifizierungsmethode"
+    picker: k+1 edges, lowest first, for a numeric column split `classes`
+    ways. Same `filter` scoping and same ACL as /column-stats, which this
+    sits next to and shares its MIN/MAX with.
+
+    Server-side for the same reason /distinct-values is: quantiles and Jenks
+    both describe the *distribution*, so computing them from whatever subset
+    of rows a browser happened to fetch would quietly give a different answer
+    on a large layer than on a small one. `quantile` is Postgres's own
+    percentile_cont, exact over every row; `jenks` samples (see
+    JENKS_SAMPLE_CAP). `equal` needs nothing but MIN/MAX and the frontend
+    computes it locally to keep the class-count spinner instant — it is
+    served here too so all three methods have one definition to check
+    against.
+    """
+    schema, table = authorize_table(schema, table, user)
+    column = check_identifier(column, "column name")
+    if method not in BREAK_METHODS:
+        raise HTTPException(400, f"method must be one of {sorted(BREAK_METHODS)}")
+    if not 2 <= classes <= MAX_BREAK_CLASSES:
+        raise HTTPException(400, f"classes must be between 2 and {MAX_BREAK_CLASSES}")
+
+    params: dict = {}
+    extra_where = build_filter_where(parse_layer_filter(filter), params)
+    if extra_where:
+        extra_where = f"AND {extra_where}"
+    where = f'WHERE "{column}" IS NOT NULL {extra_where}'
+
+    with engine().begin() as conn:
+        row = conn.execute(
+            text(f'SELECT MIN("{column}"), MAX("{column}"), COUNT("{column}") FROM "{schema}"."{table}" {where}'),
+            params,
+        ).first()
+        if row is None or row[0] is None:
+            raise HTTPException(404, f"No values found for {schema}.{table}.{column}")
+        lo, hi, total = float(row[0]), float(row[1]), int(row[2])
+
+        if method == "quantile":
+            fractions = [i / classes for i in range(1, classes)]
+            inner = conn.execute(
+                text(
+                    f'SELECT percentile_cont(CAST(:fracs AS double precision[])) WITHIN GROUP (ORDER BY "{column}"::double precision) '
+                    f'FROM "{schema}"."{table}" {where}'
+                ),
+                {**params, "fracs": fractions},
+            ).scalar()
+            edges = [lo, *[float(x) for x in (inner or [])], hi]
+        elif method == "jenks":
+            # Even-stride sample via row_number(), not TABLESAMPLE/random():
+            # the same table and filter must give the same breaks every time,
+            # or re-opening the editor would silently redraw the map.
+            stride = max(1, math.ceil(total / JENKS_SAMPLE_CAP))
+            rows = conn.execute(
+                text(
+                    f'SELECT v FROM (SELECT "{column}"::double precision AS v, '
+                    f'row_number() OVER (ORDER BY "{column}") AS rn '
+                    f'FROM "{schema}"."{table}" {where}) s WHERE mod(rn - 1, :stride) = 0'
+                ),
+                {**params, "stride": stride},
+            ).scalars().all()
+            edges = jenks_edges(np.asarray(rows, dtype=float), classes)
+            edges[0], edges[-1] = lo, hi
+        else:
+            step = (hi - lo) / classes
+            edges = [lo + step * i for i in range(classes)] + [hi]
+
+    # Ties (a heavily repeated value, or a constant column) can make two edges
+    # equal — an empty class, not an error. What must never happen is an edge
+    # going *backwards*, which would render as a range with min > max.
+    for i in range(1, len(edges)):
+        edges[i] = max(edges[i], edges[i - 1])
+    return {"edges": edges, "min": lo, "max": hi, "count": total}
+
+
 GROUPBY_LABEL_SEP = " / "
 GROUPBY_AGGS = {"count", "sum", "avg", "min", "max"}
 
@@ -3531,6 +3670,11 @@ class GraduatedClassification(BaseModel):
     column: str
     breaks: list[GraduatedBreak]
     size: float | None = None
+    # Which /column-breaks method produced `breaks`. Purely a note to the
+    # editor — MapServer only ever sees the numbers — so that reopening
+    # ClassifyLayer.tsx shows the method that was actually used instead of
+    # falling back to "manual" for every saved classification.
+    method: Literal["equal", "quantile", "jenks", "manual"] | None = None
 
 
 Classification = Annotated[

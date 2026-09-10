@@ -23,7 +23,7 @@ import { IconRefresh, IconX } from '@tabler/icons-react'
 import { fetchDistinctValues } from './columns'
 import { fetchFeaturesInBbox } from './features'
 import { classSatisfiedBy, reachableClasses, resolveLegend, rgbToHex, type LegendClass, type GeometryKind } from './legend'
-import { visibleGroundBbox } from './spatial'
+import { bboxWorldFraction, visibleGroundBbox, WIDE_VIEW_FRACTION } from './spatial'
 import { collectionFor, useApp } from './wms'
 
 function Swatch({ geometry, color }: { geometry: GeometryKind; color: string }) {
@@ -115,6 +115,10 @@ export default function LegendSymbols({ layerName, active }: { layerName: string
   const [tableValues, setTableValues] = useState<Set<string> | null>(null)
   const [viewValues, setViewValues] = useState<Set<string> | null>(null)
   const [viewTruncated, setViewTruncated] = useState(false)
+  // The view is wide enough that the extent check below barely narrows the
+  // class list — said out loud, since a legend showing every class looks
+  // identical to one whose viewport check has stopped working.
+  const [wideView, setWideView] = useState(false)
 
   // Exact, whole-table check — a class whose value never occurs anywhere in
   // the data is dead regardless of the current view, and this is cheap and
@@ -143,6 +147,7 @@ export default function LegendSymbols({ layerName, active }: { layerName: string
     const update = () => {
       const bbox = visibleGroundBbox(camera, scene)
       if (!bbox) return
+      setWideView(bboxWorldFraction(bbox) > WIDE_VIEW_FRACTION)
       fetchFeaturesInBbox(collection, bbox).then((r) => {
         if (cancelled) return
         const values = new Set<string>()
@@ -197,6 +202,11 @@ export default function LegendSymbols({ layerName, active }: { layerName: string
         classes.map((cls) => (
           <ClassRow key={cls.name} layerName={layerName} geometry={legend.geometry} cls={cls} />
         ))
+      )}
+      {wideView && (
+        <Text size="xs" c="dimmed">
+          Ansicht umfasst fast die ganze Welt – die Liste ist kaum eingeschränkt.
+        </Text>
       )}
       {viewTruncated && (
         <Text size="xs" c="dimmed">

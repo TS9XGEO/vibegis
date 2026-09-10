@@ -17,9 +17,11 @@
  * server-side (mode "graduated": column + breaks) — the only difference is
  * which colors the editor seeds new breaks with (freely-chosen palette vs a
  * generated monochrome ramp); once created, every break's color is editable
- * either way.
+ * either way. Both therefore also share the "Klassifizierungsmethode" picker
+ * (equal interval / percentile / natural breaks / manual) that decides where
+ * those ranges fall — see regenerate() below.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ActionIcon, Alert, Button, ColorPicker, Group, Modal, NumberInput, Popover,
   ScrollArea, SegmentedControl, Select, Stack, Text, TextInput, Tooltip,
@@ -27,7 +29,10 @@ import {
 import { IconAlertCircle, IconTags, IconTrash, IconX } from '@tabler/icons-react'
 import { useTranslation } from 'react-i18next'
 
-import { columnLabel, fetchColumns, fetchColumnStats, fetchDistinctValues, type Column } from './columns'
+import {
+  columnLabel, fetchColumnBreaks, fetchColumns, fetchColumnStats, fetchDistinctValues,
+  type BreakMethod, type Column,
+} from './columns'
 import { FRESH_LAYER_WAIT_MESSAGE, isFreshLayerWait } from './freshLayerRetry'
 import {
   hexToRgb, isValidHex, rgbToHex, type ClassDef, type Classification,
@@ -80,6 +85,16 @@ function equalIntervalBounds(min: number, max: number, n: number): [number, numb
   ])
 }
 
+/**
+ * The k+1 edges /column-breaks returns, paired up into the k [min, max]
+ * ranges the breaks editor works in. Rounded exactly the way
+ * equalIntervalBounds() rounds its own, so a percentile or Jenks break is
+ * not shown to more decimal places than an equal-interval one.
+ */
+function edgesToBounds(edges: number[]): [number, number][] {
+  return edges.slice(0, -1).map((lo, i) => [round2(lo), round2(edges[i + 1])])
+}
+
 function Swatch({ color, onChange }: { color: string; onChange: (hex: string) => void }) {
   const { t } = useTranslation()
   const [opened, setOpened] = useState(false)
@@ -102,11 +117,18 @@ function Swatch({ color, onChange }: { color: string; onChange: (hex: string) =>
   )
 }
 
+/**
+ * `onChange` is a color edit, `onEditBounds` a change to one of the numbers —
+ * kept apart so that typing a bound can flip the method picker to "manual"
+ * (the numbers are the user's now) while recoloring a class, which says
+ * nothing about where the ranges fall, leaves the method alone.
+ */
 function BreaksEditor({
-  breaks, onChange,
+  breaks, onChange, onEditBounds,
 }: {
   breaks: GraduatedBreak[]
   onChange: (breaks: GraduatedBreak[]) => void
+  onEditBounds: (breaks: GraduatedBreak[]) => void
 }) {
   return (
     <ScrollArea.Autosize mah={280}>
@@ -120,14 +142,14 @@ function BreaksEditor({
             <NumberInput
               size="xs"
               value={b.min}
-              onChange={(v) => onChange(breaks.map((x, j) => (j === i ? { ...x, min: Number(v) } : x)))}
+              onChange={(v) => onEditBounds(breaks.map((x, j) => (j === i ? { ...x, min: Number(v) } : x)))}
               style={{ flex: 1, minWidth: 0 }}
             />
             <Text size="xs" c="dimmed">–</Text>
             <NumberInput
               size="xs"
               value={b.max}
-              onChange={(v) => onChange(breaks.map((x, j) => (j === i ? { ...x, max: Number(v) } : x)))}
+              onChange={(v) => onEditBounds(breaks.map((x, j) => (j === i ? { ...x, max: Number(v) } : x)))}
               style={{ flex: 1, minWidth: 0 }}
             />
           </Group>
@@ -176,6 +198,16 @@ export default function ClassifyLayer({
   const [numClasses, setNumClasses] = useState(existing?.mode === 'graduated' ? existing.breaks.length : 5)
   const [rampColor, setRampColor] = useState(DEFAULT_RAMP_COLOR)
   const [stats, setStats] = useState<{ min: number; max: number } | null>(null)
+  // A saved classification from before this picker existed carries no
+  // `method`, and its numbers are whatever someone left there — "manual" is
+  // the honest reading of that, not a guess at how they were produced.
+  const [method, setMethod] = useState<BreakMethod>(
+    existing?.mode === 'graduated' ? existing.method ?? 'manual' : 'equal',
+  )
+  // Percentile/Jenks each cost a round trip, and the class-count spinner can
+  // fire several in a row. Only the newest one is allowed to write breaks —
+  // otherwise a slow 5-class answer lands after a fast 7-class one.
+  const breakRequest = useRef(0)
 
   const [truncated, setTruncated] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -184,6 +216,22 @@ export default function ClassifyLayer({
 
   const numeric = columns.find((c) => c.key === column)?.numeric ?? false
   const usesRanges = mode === 'graduated' || (mode === 'categorized' && categorizedStyle === 'ranges')
+
+  /**
+   * Graduated seeds a monochrome ramp so the shades themselves read as
+   * magnitude; categorized-by-range seeds the qualitative palette instead.
+   * Either way every color stays individually editable afterwards.
+   */
+  function seedColors(n: number): string[] {
+    return mode === 'graduated'
+      ? monochromeRamp(hexToRgb(rampColor), n).map(rgbToHex)
+      : Array.from({ length: n }, (_, i) => PALETTE[i % PALETTE.length])
+  }
+
+  function breaksFrom(bounds: [number, number][]): GraduatedBreak[] {
+    const colors = seedColors(bounds.length)
+    return bounds.map(([lo, hi], i) => ({ min: lo, max: hi, color: colors[i] }))
+  }
 
   useEffect(() => {
     if (!opened) return
@@ -225,37 +273,67 @@ export default function ClassifyLayer({
   // already has breaks for this exact column, which are kept as-is.
   useEffect(() => {
     if (!opened || !column || !usesRanges) return
-    if (existing?.mode === 'graduated' && existing.column === column && breaks.length > 0) {
-      setStats(null) // unknown until the user changes the class count
-      return
-    }
+    // min/max is fetched even when the saved breaks are kept, so that
+    // switching to "Gleiche Intervalle" or changing the class count works
+    // straight away on an already-classified layer instead of silently
+    // doing nothing for want of a range to divide.
+    const keepSaved = existing?.mode === 'graduated' && existing.column === column && breaks.length > 0
     setLoading(true)
     setError(null)
     fetchColumnStats(schema, table, column, activeFilter)
       .then(({ min, max }) => {
         setStats({ min, max })
-        const bounds = equalIntervalBounds(min, max, numClasses)
-        const colors = mode === 'graduated'
-          ? monochromeRamp(hexToRgb(rampColor), numClasses).map(rgbToHex)
-          : Array.from({ length: numClasses }, (_, i) => PALETTE[i % PALETTE.length])
-        setBreaks(bounds.map(([lo, hi], i) => ({ min: lo, max: hi, color: colors[i] })))
+        if (keepSaved) return
+        setBreaks(breaksFrom(equalIntervalBounds(min, max, numClasses)))
+        setMethod('equal')
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false))
     // numClasses/mode/rampColor deliberately excluded — this only re-seeds
     // when the column, table, or active filter changes, not on every knob
-    // tweak (those go through regenerateWithCount()/recolorRamp() instead,
-    // which reuse the already-fetched `stats` rather than re-fetching).
+    // tweak (those go through regenerate()/recolorRamp() instead, which
+    // reuse the already-fetched `stats` or ask /column-breaks directly).
   }, [opened, column, schema, table, usesRanges, activeFilter])
 
-  function regenerateWithCount(n: number) {
+  /**
+   * Recomputes every break for `nextMethod` at `n` classes and writes the
+   * numbers straight into the (still editable) boxes.
+   *
+   * "Manuell" is the one method that computes nothing — except when the
+   * class count changes, where there is no way to produce n boxes out of
+   * thin air; equal intervals fill them in and the method stays manual,
+   * since those numbers are still the user's to overwrite.
+   */
+  async function regenerate(nextMethod: BreakMethod, n: number, countChanged = false) {
+    if (nextMethod === 'equal' || (nextMethod === 'manual' && countChanged)) {
+      if (!stats) return
+      setBreaks(breaksFrom(equalIntervalBounds(stats.min, stats.max, n)))
+      return
+    }
+    if (nextMethod === 'manual' || !column) return
+
+    const request = ++breakRequest.current
+    setLoading(true)
+    setError(null)
+    try {
+      const edges = await fetchColumnBreaks(schema, table, column, nextMethod, n, activeFilter)
+      if (request !== breakRequest.current) return
+      setBreaks(breaksFrom(edgesToBounds(edges)))
+    } catch (e) {
+      if (request === breakRequest.current) setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      if (request === breakRequest.current) setLoading(false)
+    }
+  }
+
+  function chooseMethod(next: BreakMethod) {
+    setMethod(next)
+    void regenerate(next, numClasses)
+  }
+
+  function chooseCount(n: number) {
     setNumClasses(n)
-    if (!stats) return
-    const bounds = equalIntervalBounds(stats.min, stats.max, n)
-    const colors = mode === 'graduated'
-      ? monochromeRamp(hexToRgb(rampColor), n).map(rgbToHex)
-      : Array.from({ length: n }, (_, i) => PALETTE[i % PALETTE.length])
-    setBreaks(bounds.map(([lo, hi], i) => ({ min: lo, max: hi, color: colors[i] })))
+    void regenerate(method, n, true)
   }
 
   function recolorRamp(hex: string) {
@@ -272,7 +350,7 @@ export default function ClassifyLayer({
     if (mode === 'categorized' && categorizedStyle === 'values') {
       return classes.length ? { mode: 'categorized', column, classes, ...sizeField } : null
     }
-    return breaks.length ? { mode: 'graduated', column, breaks, ...sizeField } : null
+    return breaks.length ? { mode: 'graduated', column, breaks, method, ...sizeField } : null
   }
 
   const draft = buildClassification()
@@ -416,6 +494,21 @@ export default function ClassifyLayer({
 
         {usesRanges && (
           <>
+            <Select
+              size="xs"
+              label={t('classifyLayer.methodLabel')}
+              data={[
+                { value: 'equal', label: t('classifyLayer.methodEqual') },
+                { value: 'quantile', label: t('classifyLayer.methodQuantile') },
+                { value: 'jenks', label: t('classifyLayer.methodJenks') },
+                { value: 'manual', label: t('classifyLayer.methodManual') },
+              ]}
+              value={method}
+              onChange={(v) => { if (v) chooseMethod(v as BreakMethod) }}
+              allowDeselect={false}
+              comboboxProps={{ withinPortal: false }}
+            />
+            <Text size="xs" c="dimmed">{t(`classifyLayer.methodHint.${method}`)}</Text>
             <Group grow>
               <NumberInput
                 size="xs"
@@ -423,7 +516,7 @@ export default function ClassifyLayer({
                 min={2}
                 max={12}
                 value={numClasses}
-                onChange={(v) => { if (typeof v === 'number') regenerateWithCount(v) }}
+                onChange={(v) => { if (typeof v === 'number') chooseCount(v) }}
               />
               {mode === 'graduated' && (
                 <Stack gap={2}>
@@ -432,7 +525,13 @@ export default function ClassifyLayer({
                 </Stack>
               )}
             </Group>
-            {breaks.length > 0 && <BreaksEditor breaks={breaks} onChange={setBreaks} />}
+            {breaks.length > 0 && (
+              <BreaksEditor
+                breaks={breaks}
+                onChange={setBreaks}
+                onEditBounds={(bs) => { setBreaks(bs); setMethod('manual') }}
+              />
+            )}
           </>
         )}
 

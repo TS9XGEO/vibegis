@@ -17,7 +17,7 @@ import {
 } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import { IconArrowDown, IconArrowUp, IconCurrentLocation, IconDownload } from '@tabler/icons-react'
-import { Math as CesiumMath, Rectangle } from 'cesium'
+import { Rectangle } from 'cesium'
 import { useTranslation } from 'react-i18next'
 
 import { columnLabel } from './columns'
@@ -27,7 +27,7 @@ import { fetchAllFeatures, fetchFeaturePage, fetchFeaturePageInBbox, fetchFeatur
 import { buildCql } from './filter'
 import { FRESH_LAYER_WAIT_MESSAGE, isFreshLayerWait } from './freshLayerRetry'
 import { useSelection } from './selection'
-import { boundsOfFeatures } from './spatial'
+import { bboxWorldFraction, boundsOfFeatures, visibleGroundBbox, WIDE_VIEW_FRACTION } from './spatial'
 import { useApp, type LayerState } from './wms'
 
 const DEFAULT_PAGE_SIZE = 100
@@ -48,6 +48,9 @@ export default function AttributeTablePanel({
   const saveColumnAliases = useApp((s) => s.saveColumnAliases)
   const savedAliases = layerConfigs[layer.name]?.columnAliases || {}
   const camera = useApp((s) => s.camera)
+  // Needed alongside `camera` for visibleGroundBbox()'s ray-casts — see the
+  // store's own note on why both are stashed there.
+  const scene = useApp((s) => s.scene)
 
   // Kartenansicht scopes to the layer's active attribute filter, same as
   // SelectionDashboard.tsx's LayerOverviewCard already does for its own
@@ -63,6 +66,10 @@ export default function AttributeTablePanel({
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const [viewMode, setViewMode] = useState<'viewport' | 'all'>('viewport')
   const [viewVersion, setViewVersion] = useState(0)
+  // True while the current view is so wide that scoping to it barely narrows
+  // anything — surfaced as a note next to the mode switch, since otherwise
+  // Kartenansicht showing essentially every row reads as a broken filter.
+  const [wideView, setWideView] = useState(false)
   const [rows, setRows] = useState<Feature[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -123,6 +130,21 @@ export default function AttributeTablePanel({
     setOffset(0)
   }, [isActive, viewMode, cql])
 
+  /**
+   * The ground actually on screen. This used to be
+   * `camera.computeViewRectangle()`, which is why Kartenansicht could show
+   * every row: on a tilted or zoomed-out 3D globe that method returns a
+   * rectangle far larger than the visible ground, up to the whole world.
+   * spatial.ts's visibleGroundBbox() ray-casts against the globe instead,
+   * and Legend.tsx has always used it — the two are on the same extent now.
+   */
+  function viewportBbox() {
+    if (!camera || !scene) return null
+    const bbox = visibleGroundBbox(camera, scene)
+    setWideView(bbox !== null && bboxWorldFraction(bbox) > WIDE_VIEW_FRACTION)
+    return bbox
+  }
+
   function toggleRenaming(next: boolean) {
     if (next) {
       setAliases(savedAliases)
@@ -168,14 +190,8 @@ export default function AttributeTablePanel({
     try {
       let result: { features: Feature[]; truncated: boolean }
       if (viewMode === 'viewport') {
-        const rect = camera?.computeViewRectangle()
-        if (!rect) return
-        const bbox = {
-          west: CesiumMath.toDegrees(rect.west),
-          south: CesiumMath.toDegrees(rect.south),
-          east: CesiumMath.toDegrees(rect.east),
-          north: CesiumMath.toDegrees(rect.north),
-        }
+        const bbox = viewportBbox()
+        if (!bbox) return
         result = await fetchFeaturesInBbox(collection, bbox, undefined, cql ?? undefined)
       } else {
         result = await fetchAllFeatures(collection)
@@ -209,20 +225,14 @@ export default function AttributeTablePanel({
 
     let request: Promise<Feature[]>
     if (viewMode === 'viewport') {
-      // Camera not looking at the globe at all (e.g. mid-rotation) — an
-      // empty page rather than an error, self-corrects on the next
-      // camera.changed tick once it's looking at the map again.
-      const rect = camera?.computeViewRectangle()
-      if (!rect) {
+      // Nothing on screen hits the globe at all (e.g. mid-rotation, camera
+      // pointed at open sky) — an empty page rather than an error,
+      // self-corrects on the next camera.changed tick.
+      const bbox = viewportBbox()
+      if (!bbox) {
         setRows([])
         setLoading(false)
         return
-      }
-      const bbox = {
-        west: CesiumMath.toDegrees(rect.west),
-        south: CesiumMath.toDegrees(rect.south),
-        east: CesiumMath.toDegrees(rect.east),
-        north: CesiumMath.toDegrees(rect.north),
       }
       request = fetchFeaturePageInBbox(collection, bbox, offset, pageSize, controller.signal, onRetry, cql ?? undefined)
     } else {
@@ -242,7 +252,7 @@ export default function AttributeTablePanel({
         setRetrying(false)
       })
     return () => controller.abort()
-  }, [isActive, collection, offset, pageSize, viewMode, viewVersion, camera, cql])
+  }, [isActive, collection, offset, pageSize, viewMode, viewVersion, camera, scene, cql])
 
   // pg_featureserv doesn't report a total count, so columns come from
   // whatever the current page actually returned.
@@ -341,6 +351,11 @@ export default function AttributeTablePanel({
                     { label: t('attributeTable.allRows'), value: 'all' },
                   ]}
                 />
+                {viewMode === 'viewport' && wideView && (
+                  <Text size="xs" c="dimmed" style={{ flex: 1, minWidth: 0 }}>
+                    {t('attributeTable.viewportTooWide')}
+                  </Text>
+                )}
                 <Button
                   size="xs"
                   variant="light"

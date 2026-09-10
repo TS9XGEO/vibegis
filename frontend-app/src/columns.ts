@@ -5,7 +5,10 @@
  */
 import { retryFreshLayer } from './freshLayerRetry'
 import { FEATURES_URL } from './tools'
-import { COLUMN_GROUPBY_URL, COLUMN_STATS_URL, DISTINCT_VALUES_URL, TABLE_COUNT_URL, type LayerFilter } from './wms'
+import {
+  COLUMN_BREAKS_URL, COLUMN_GROUPBY_URL, COLUMN_STATS_URL, DISTINCT_VALUES_URL, TABLE_COUNT_URL,
+  type LayerFilter,
+} from './wms'
 
 /**
  * Appends `&filter=<json>` for the SQL aggregate endpoints below, mirroring
@@ -78,6 +81,38 @@ export async function fetchColumnStats(
   const res = await fetch(url, { cache: 'no-store' })
   if (!res.ok) throw new Error(`Statistik: HTTP ${res.status}`)
   return res.json()
+}
+
+/**
+ * How ClassifyLayer.tsx's "Klassifizierungsmethode" picker splits a numeric
+ * column. `manual` never reaches the server — it means "leave the numbers
+ * where they are, I'll type them myself", and is also what editing any
+ * bound in the breaks editor switches to.
+ */
+export type BreakMethod = 'equal' | 'quantile' | 'jenks' | 'manual'
+
+/**
+ * The k+1 class edges for a graduated classification, lowest first, from
+ * upload-api's /column-breaks. Server-side because quantiles and Jenks both
+ * describe the whole distribution — computing them from whatever rows the
+ * browser happened to fetch would give a different answer on a big layer
+ * than on a small one. `equal` needs only min/max, so ClassifyLayer.tsx
+ * computes that one locally and never calls this.
+ */
+export async function fetchColumnBreaks(
+  schema: string,
+  table: string,
+  column: string,
+  method: Exclude<BreakMethod, 'manual' | 'equal'>,
+  classes: number,
+  filter?: LayerFilter | null,
+): Promise<number[]> {
+  const url = `${COLUMN_BREAKS_URL}?schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}`
+    + `&column=${encodeURIComponent(column)}&method=${method}&classes=${classes}${filterQueryParam(filter)}`
+  const res = await fetch(url, { cache: 'no-store' })
+  if (!res.ok) throw new Error(`Klassengrenzen: HTTP ${res.status}`)
+  const body = await res.json()
+  return body.edges ?? []
 }
 
 export interface GroupByBucket {

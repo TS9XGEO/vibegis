@@ -170,7 +170,6 @@ import {
   IconBookmark, IconChevronRight, IconCircle, IconClick, IconDownload, IconExternalLink, IconFilter, IconLasso,
   IconLock, IconTrash, IconX,
 } from '@tabler/icons-react'
-import { Math as CesiumMath } from 'cesium'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -183,6 +182,7 @@ import { buildCql } from './filter'
 import {
   fetchAllFeatures, fetchFeaturesInBbox, fetchFeaturesWithFilter, SELECTION_FETCH_CAP,
 } from './features'
+import { bboxWorldFraction, visibleGroundBbox, WIDE_VIEW_FRACTION } from './spatial'
 import { useTools } from './tools'
 import { useSelectCandidates } from './ToolboxControls'
 import { collectionFor, useApp, type LayerFilter } from './wms'
@@ -860,6 +860,9 @@ function LayerOverviewCard({
   const openLayerTab = useSelection((s) => s.openLayerTab)
   const highlight = useDashboardHighlight()
   const camera = useApp((s) => s.camera)
+  // visibleGroundBbox() ray-casts, so it needs the canvas too — see the
+  // store's note on why both camera and scene are stashed there.
+  const scene = useApp((s) => s.scene)
   const aliases = layerConfigs[layerName]?.columnAliases || {}
   const color = layerColor(layerName)
   const [schema, table] = collection.split(/\.(.+)/)
@@ -904,6 +907,9 @@ function LayerOverviewCard({
   const [viewVersion, setViewVersion] = useState(0)
   const [viewportEntries, setViewportEntries] = useState<SelectedEntry[]>([])
   const [viewportTruncated, setViewportTruncated] = useState(false)
+  // See AttributeTable.tsx's own `wideView` — same note, same threshold, so
+  // the dashboard's Kartenansicht and the attribute table's never disagree.
+  const [viewportWide, setViewportWide] = useState(false)
   const [viewportLoading, setViewportLoading] = useState(false)
   const [viewportError, setViewportError] = useState<string | null>(null)
 
@@ -920,21 +926,22 @@ function LayerOverviewCard({
     const controller = new AbortController()
     setViewportLoading(true)
     setViewportError(null)
-    // Camera not looking at the globe at all — an empty result rather than
+    // Nothing on screen hits the globe at all — an empty result rather than
     // an error, self-corrects on the next camera.changed tick.
-    const rect = camera?.computeViewRectangle()
-    if (!rect) {
+    //
+    // spatial.ts's visibleGroundBbox(), not camera.computeViewRectangle():
+    // on a tilted or zoomed-out 3D globe the latter returns a rectangle far
+    // larger than the visible ground (up to the whole world), which is what
+    // made this mode show essentially every feature. AttributeTable.tsx and
+    // Legend.tsx are on the same function.
+    const bbox = camera && scene ? visibleGroundBbox(camera, scene) : null
+    if (!bbox) {
       setViewportEntries([])
       setViewportTruncated(false)
       setViewportLoading(false)
       return
     }
-    const bbox = {
-      west: CesiumMath.toDegrees(rect.west),
-      south: CesiumMath.toDegrees(rect.south),
-      east: CesiumMath.toDegrees(rect.east),
-      north: CesiumMath.toDegrees(rect.north),
-    }
+    setViewportWide(bboxWorldFraction(bbox) > WIDE_VIEW_FRACTION)
     fetchFeaturesInBbox(collection, bbox, controller.signal, filterCql ?? undefined)
       .then(({ features, truncated }) => {
         setViewportEntries(features.map((feature) => ({ layer: layerName, feature })))
@@ -947,7 +954,7 @@ function LayerOverviewCard({
         setViewportLoading(false)
       })
     return () => controller.abort()
-  }, [isActive, viewMode, collection, layerName, viewVersion, camera, filterCql])
+  }, [isActive, viewMode, collection, layerName, viewVersion, camera, scene, filterCql])
 
   useEffect(() => {
     if (!isActive || columns) return
@@ -1108,6 +1115,9 @@ function LayerOverviewCard({
           { label: t('attributeTable.allRows'), value: 'all' },
         ]}
       />
+      {viewMode === 'viewport' && viewportWide && (
+        <Text size="9px" c="dimmed" mt={2}>{t('attributeTable.viewportTooWide')}</Text>
+      )}
       {viewMode === 'viewport' && viewportTruncated && (
         <Text size="9px" c="dimmed" mt={2}>{t('selectionDashboard.viewportTruncated')}</Text>
       )}

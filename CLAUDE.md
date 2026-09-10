@@ -36,7 +36,8 @@ Everything reaches the browser through nginx on `:8080`, one origin, no CORS.
      /pointclouds/→ static        published point-cloud tilesets from pointclouds/
      /upload /upload-raster /upload-raster-zip /upload-pointcloud
      /raster-composite /tables /layers
-     /layer-config /distinct-values /column-stats /register-table /geoprocess
+     /layer-config /distinct-values /column-stats /column-breaks /register-table
+     /geoprocess
      /login /logout /auth/me /users /etl/ /cms /groups /layer-grants
                   → upload-api    file → PostGIS table → LAYER block (see upload-api/);
                                   /upload-raster instead publishes a GeoTIFF as a
@@ -209,6 +210,29 @@ SELECT on `dwh`/`public`/`reporting` and no grant at all on `configdb` or
 `upload-api/superset_client.py`, deliberately best-effort so a Superset outage
 can never fail an upload — with Dagster's nightly `superset_sync` job
 (`POST /internal/superset/reconcile`) as the backstop that makes that safe.
+**Demo dashboards are seeded on request, never automatically.**
+`bash bin/seed-superset-demo.sh` builds two presentable dashboards
+(`vibegis-demo-demographics`, `vibegis-demo-transport`) over whatever of
+`upload_admin_units` / `upload_bahntrassen` /
+`upload_ffentliche_verkehrsmittel` is published, and skips a dashboard whose
+datasets are missing. Idempotent by chart/dashboard name, so re-running updates
+in place. It is not in the entrypoint on purpose: a customer install with its
+own layers should not acquire demo content silently. The seeded charts get the
+dataset's own `perm`/`schema_perm`, so they obey the same per-layer ACL as
+everything else — verified: a Gamma user granted only `upload_admin_units` sees
+the demographics dashboard and is denied the transport one.
+
+**It wears the app's palette.** `superset/superset_config.py`'s
+`THEME_OVERRIDES` carries the teal primary and amber secondary from
+`frontend-app/src/colorScheme.ts`, plus the app's font stack and Mantine's
+`md` radius, and `EXTRA_CATEGORICAL_COLOR_SCHEMES` adds a default `vibegis`
+chart palette built from the same two accents (the theme does not reach series
+colours; those come from a named scheme). Status colours are left at
+Superset's defaults on purpose — a warning that matches the brand stops
+reading as a warning. **Dark mode is the limit**: 4.1.3 ships one light theme
+and no dark counterpart, so the app in its default dark scheme still opens a
+light Superset. Closing that would mean injecting CSS, which is not done here.
+
 Superset's own metadata lives in a separate `superset` database in the same
 cluster; `bin/backup.sh` dumps it separately, since the main dump misses it.
 
@@ -287,6 +311,7 @@ share the one label name across Prometheus and Loki.
 | `qgis-processing/worker.py`, `qgis-processing/Dockerfile` | `up -d --build qgis-processing` — `build:`-based like upload-api, so a plain `restart` silently runs the old image |
 | `upload-api/qgis_catalog.py`, `upload-api/superset_client.py` | `up -d --build upload-api` (both are COPYed into that image) |
 | `superset/superset_config.py`, `superset/vibegis_security.py` | `up -d --build superset` — COPYed into the image, so a plain `restart` silently runs the old copy |
+| `superset/demo_dashboards.py` | `bash bin/seed-superset-demo.sh` — piped into the container over stdin, so no rebuild, unlike the two files above |
 
 A layer created through upload-api (`uploads.map`) is cached automatically — its
 `generate_mapproxy_config()` gives every such layer its own entry in
@@ -307,6 +332,7 @@ docker compose --profile tiles3d run --rm pg2b3dm
 docker compose down        # keep data   |   down -v = DELETE the database
 
 bash bin/add-user.sh <user> <pass> admin         # the only way an account is created
+bash bin/seed-superset-demo.sh                   # two demo dashboards into Superset (idempotent)
 bash bin/backup.sh                               # pg_dump -Fc + a tar of the file state
 bash bin/restore.sh backups/<stamp>              # and back again
 bash bin/fix-ownership.sh                        # once, when moving to non-root containers
@@ -393,7 +419,7 @@ docker compose -f docker-compose.yml -f docker-compose.tls.yml \
   `<name>_attachments.zip` sidecar whether or not the project has attachments, so
   deleting only the `.qgs` slowly fills the volume with orphaned zips.
 - **Superset 4.1 has no app-root setting, so serving it at `/analytics` takes
-  four separate things and each covers URLs the others miss.** There is no
+  five separate things and each covers URLs the others miss.** There is no
   `SUPERSET_APP_ROOT` or `APPLICATION_ROOT` in its `config.py` — checked in the
   running image, not assumed. ProxyFix (`ENABLE_PROXY_FIX` + `x_prefix`, fed by
   nginx's `X-Forwarded-Prefix`) covers everything built with `url_for()`;
@@ -407,6 +433,25 @@ docker compose -f docker-compose.yml -f docker-compose.tls.yml \
   missing pieces are answered by the SPA catch-all with `index.html` at HTTP
   200. `LOGO_TARGET_PATH` is hardcoded the same way and is set for the same
   reason.
+- **The fifth piece is the one that only shows up once there is a dashboard to
+  open: Superset's React bundle calls the origin root.** Its XHRs and in-app
+  links are built as `/api/v1/...`, `/superset/log/`, `/explore/`, with no idea
+  the app is served under `/analytics` — 4.1.3 has no `APPLICATION_ROOT`, and the
+  bundle carries neither an `appRoot` client setting nor a react-router
+  `basename` (grepped in the running image). The four fixes above all correct
+  URLs the *server* builds, so none of them touch these. The symptom is a
+  dashboard that renders empty while toasts stack up with **"An error occurred
+  while fetching dashboard info: Not found"**, which reads like a missing
+  dashboard rather than a missing route: the request falls through to the
+  catch-all, and Vite's history fallback only rewrites to `index.html` for a
+  client that asked for `text/html`, so an XHR sending
+  `Accept: application/json` gets a bare 404 instead of the usual misleading
+  200. The regex `location` after `/static/` in `nginx/locations.conf` routes
+  Superset's root prefixes to it. It is an allowlist on purpose — `/login`,
+  `/logout`, `/users` and `/health` exist in both applications and stay
+  VibeGIS's — and it is only safe because the frontend has no client-side
+  router; check that again before adding a VibeGIS route named `/chart`,
+  `/dashboard`, `/dataset`, `/report` or `/alert`.
 - **`absolute_redirect off` in the `/analytics/` block is load-bearing, and the
   failure looks nothing like the cause.** Superset's own redirects are all
   relative — verified by asking it directly, bypassing nginx. But nginx expands

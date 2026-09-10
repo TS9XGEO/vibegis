@@ -76,12 +76,37 @@ const ETL_CASCADE_WIDTH = 300
 // Mantine Loader used to give "still working"), while the percentage text
 // sits in a separate, non-rotating layer on top so it stays upright and
 // readable instead of spinning along with the ring.
+const PROGRESS_RING_SIZE = 34
+
 function ProgressIcon({ percent }: { percent: number }) {
   return (
-    <div style={{ position: 'relative', width: 34, height: 34 }}>
-      <div style={{ animation: 'etlRingSpin 1.4s linear infinite' }}>
+    // rem(), not a bare 34: RingProgress puts its own `size` through Mantine's
+    // rem() and so rides on --mantine-scale, while a plain px box does not.
+    // At any display size but Klein the two then disagree, and because the
+    // spinning layer rotates about the *box* center rather than the ring's,
+    // the ring orbits that offset point instead of turning on the spot.
+    <div
+      style={{
+        position: 'relative',
+        width: rem(PROGRESS_RING_SIZE),
+        height: rem(PROGRESS_RING_SIZE),
+      }}
+    >
+      {/* Centered inside the box rather than laid out in flow, so the
+          rotation origin is the ring's own center whatever the two sizes
+          round to. */}
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          animation: 'etlRingSpin 1.4s linear infinite',
+        }}
+      >
         <RingProgress
-          size={34}
+          size={PROGRESS_RING_SIZE}
           thickness={3}
           roundCaps
           transitionDuration={900}

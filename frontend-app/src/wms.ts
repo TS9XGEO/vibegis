@@ -50,6 +50,7 @@ export const DISTINCT_VALUES_URL = '/distinct-values'  // upload-api: filter bui
 export const LAYER_CONFIG_URL = '/layer-config'  // upload-api: per-layer classification/etc, GET all or PATCH one
 export const COLUMN_STATS_URL = '/column-stats'  // upload-api: min/max/sum/avg/count for a numeric column
 export const COLUMN_GROUPBY_URL = '/column-groupby'  // upload-api: value+count per distinct value, capped
+export const COLUMN_BREAKS_URL = '/column-breaks'  // upload-api: class edges for a graduated classification
 export const TABLE_COUNT_URL = '/table-count'  // upload-api: plain row count for a schema.table
 export const QGIS_ALGORITHMS_URL = '/qgis-process/algorithms'  // upload-api: QGIS algorithm catalog (curated + advanced)
 export const QGIS_RUN_URL = '/qgis-process/run'  // upload-api: start a QGIS algorithm, poll GET /qgis-process/run/<id>
