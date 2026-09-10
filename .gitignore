@@ -39,3 +39,6 @@ nginx/tls/*
 
 # Local backups taken by bin/backup.sh — never in git.
 backups/
+
+# knowledge-graph output from the graphify skill — 13 MB of generated JSON
+graphify-out/

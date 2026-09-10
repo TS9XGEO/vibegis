@@ -6,6 +6,12 @@
  */
 import { create } from 'zustand'
 
+/** File extensions the upload modal accepts. Lives here rather than in
+ * UploadLayer.tsx so App.tsx's drag-and-drop zone can read it without
+ * statically importing that whole module — which would pin it into the
+ * initial bundle and undo LayerPanel.tsx's lazy import of it. */
+export const ACCEPT = '.zip,.gpkg,.geojson,.json,.kml,.gml,.tif,.tiff,.las,.laz'
+
 interface UploadState {
   opened: boolean
   /** Set when the modal was opened by dropping a file onto the map, so

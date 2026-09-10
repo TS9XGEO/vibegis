@@ -5,7 +5,7 @@
  * swaps the array, and the Scene re-renders in the new order. Nothing touches
  * Cesium directly.
  */
-import { useMemo, useState } from 'react'
+import { lazy, Suspense, useMemo, useState } from 'react'
 import {
   ActionIcon,
   Alert,
@@ -78,13 +78,19 @@ import AttributeFilterButton from './AttributeFilter'
 import { TourTarget } from './tour/TourTarget'
 import ClassifyLayer from './ClassifyLayer'
 import LegendSymbols from './Legend'
-import UploadLayer from './UploadLayer'
-import AccessAdmin from './AccessAdmin'
-import UserAdmin from './UserAdmin'
+// Lazy-loaded: each is a modal most sessions never open, and every one of
+// them used to sit in the initial bundle. React.lazy only defers while the
+// component is not rendered at all, so each render site below is gated on
+// useOnceOpened() rather than mounted with `opened={false}` — see that hook
+// for why it is "has it ever been open" and not simply "is it open".
+const UploadLayer = lazy(() => import('./UploadLayer'))
+const AccessAdmin = lazy(() => import('./AccessAdmin'))
+const UserAdmin = lazy(() => import('./UserAdmin'))
 import { hasFullAccess, useAuth } from './auth'
 import { accentEdge, panelBg, panelBorder } from './colorScheme'
 import { usePanels } from './panels'
 import { useSelection } from './selection'
+import { useOnceOpened } from './useOnceOpened'
 import { useUpload } from './uploadState'
 import { notifications } from '@mantine/notifications'
 import { DEFAULT_POLYGON_OUTLINE_WIDTH } from './legend'
@@ -873,6 +879,10 @@ export default function LayerPanel() {
   const openUpload = useUpload((s) => s.open)
   const [userAdminOpen, setUserAdminOpen] = useState(false)
   const [accessAdminOpen, setAccessAdminOpen] = useState(false)
+  // Gate the lazy chunks below — see useOnceOpened().
+  const uploadEverOpen = useOnceOpened(useUpload((s) => s.opened))
+  const userAdminEverOpen = useOnceOpened(userAdminOpen)
+  const accessAdminEverOpen = useOnceOpened(accessAdminOpen)
   const [search, setSearch] = useState('')
 
   const filteredLayers = search.trim()
@@ -1032,9 +1042,9 @@ export default function LayerPanel() {
       </Group>
       </TourTarget>
 
-      <UploadLayer />
-      {isAdmin && <UserAdmin opened={userAdminOpen} onClose={() => setUserAdminOpen(false)} />}
-      {isAdmin && <AccessAdmin opened={accessAdminOpen} onClose={() => setAccessAdminOpen(false)} />}
+      {uploadEverOpen && <Suspense fallback={null}><UploadLayer /></Suspense>}
+      {isAdmin && userAdminEverOpen && <Suspense fallback={null}><UserAdmin opened={userAdminOpen} onClose={() => setUserAdminOpen(false)} /></Suspense>}
+      {isAdmin && accessAdminEverOpen && <Suspense fallback={null}><AccessAdmin opened={accessAdminOpen} onClose={() => setAccessAdminOpen(false)} /></Suspense>}
 
       <Collapse in={opened} style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         <ScrollArea style={{ flex: 1 }}>

@@ -6,7 +6,7 @@
  * colorful while it's closed (this is how you get it back) — clicking
  * always toggles the box open/closed.
  */
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import {
   ActionIcon, Alert, Box, Button, Group, Loader, Modal, Paper, Popover, RingProgress, ScrollArea, Stack, Text,
   TextInput, Tooltip, UnstyledButton, rem, useComputedColorScheme,
@@ -33,17 +33,24 @@ import {
 
 import { useTranslation } from 'react-i18next'
 
+import { useOnceOpened } from './useOnceOpened'
+
 import { useAiAgent } from './aiAgent'
-import Analytics from './Analytics'
+// Lazy-loaded: each is a modal most sessions never open, and every one of
+// them used to sit in the initial bundle. React.lazy only defers while the
+// component is not rendered at all, so each render site below is gated on
+// useOnceOpened() rather than mounted with `opened={false}` — see that hook
+// for why it is "has it ever been open" and not simply "is it open".
+const Analytics = lazy(() => import('./Analytics'))
 import { ETL_JOBS_URL, ETL_URL, hasFullAccess, useAuth } from './auth'
 import { accentEdge, panelBg, panelBorder } from './colorScheme'
 import CompassButton from './CompassButton'
 import ExtraMenu from './ExtraMenu'
 import { useExtraMenu } from './extraMenu'
-import Geoprocessing from './Geoprocessing'
-import QgisProcessing from './QgisProcessing'
+const Geoprocessing = lazy(() => import('./Geoprocessing'))
+const QgisProcessing = lazy(() => import('./QgisProcessing'))
 import QgisIcon from './QgisIcon'
-import Pages from './Pages'
+const Pages = lazy(() => import('./Pages'))
 import { TourTarget } from './tour/TourTarget'
 import { usePanels, type PanelId } from './panels'
 import { useSelection } from './selection'
@@ -158,6 +165,7 @@ function QgisProcessingButton() {
   const { t } = useTranslation()
   const hasPremium = useAuth((s) => hasFullAccess(s.user, 'premium'))
   const [open, setOpen] = useState(false)
+  const qgisEverOpen = useOnceOpened(open)
   return (
     <>
       <Tooltip
@@ -191,7 +199,7 @@ function QgisProcessingButton() {
           </UnstyledButton>
         </TourTarget>
       </Tooltip>
-      <QgisProcessing opened={open} onClose={() => setOpen(false)} />
+      {qgisEverOpen && <Suspense fallback={null}><QgisProcessing opened={open} onClose={() => setOpen(false)} /></Suspense>}
     </>
   )
 }
@@ -598,6 +606,10 @@ export default function Sideband() {
   const [pagesOpen, setPagesOpen] = useState(false)
   const [analyticsOpen, setAnalyticsOpen] = useState(false)
   const [geoprocessOpen, setGeoprocessOpen] = useState(false)
+  // Gates the lazy chunks below — see useOnceOpened().
+  const pagesEverOpen = useOnceOpened(pagesOpen)
+  const analyticsEverOpen = useOnceOpened(analyticsOpen)
+  const geoEverOpen = useOnceOpened(geoprocessOpen)
   const logout = useAuth((s) => s.logout)
   const user = useAuth((s) => s.user)
   const username = user?.username
@@ -728,7 +740,7 @@ export default function Sideband() {
           </UnstyledButton>
         </TourTarget>
       </Tooltip>
-      <Geoprocessing opened={geoprocessOpen} onClose={() => setGeoprocessOpen(false)} />
+      {geoEverOpen && <Suspense fallback={null}><Geoprocessing opened={geoprocessOpen} onClose={() => setGeoprocessOpen(false)} /></Suspense>}
 
       {/* Saved BI dashboards from Superset (Analytics.tsx). Ungated: every
           logged-in user has a Superset account, and what they can see there
@@ -753,7 +765,7 @@ export default function Sideband() {
           </UnstyledButton>
         </TourTarget>
       </Tooltip>
-      <Analytics opened={analyticsOpen} onClose={() => setAnalyticsOpen(false)} />
+      {analyticsEverOpen && <Suspense fallback={null}><Analytics opened={analyticsOpen} onClose={() => setAnalyticsOpen(false)} /></Suspense>}
 
       <QgisProcessingButton />
       <EtlButton />
@@ -778,7 +790,7 @@ export default function Sideband() {
           </UnstyledButton>
         </TourTarget>
       </Tooltip>
-      <Pages opened={pagesOpen} onClose={() => setPagesOpen(false)} />
+      {pagesEverOpen && <Suspense fallback={null}><Pages opened={pagesOpen} onClose={() => setPagesOpen(false)} /></Suspense>}
 
       {/* Pops ExtraMenu.tsx's grid out of this button (a Popover anchored to
           it, not a freely-positioned floating box) — map tools/status HUD,

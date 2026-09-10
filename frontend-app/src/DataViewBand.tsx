@@ -31,15 +31,24 @@
  * `closeDashboardTab()`) — always shown, since the band itself only renders
  * when at least one of the two is actually open.
  */
-import { ActionIcon, Box, Group, Text, Tooltip, useComputedColorScheme } from '@mantine/core'
+import { lazy, Suspense } from 'react'
+import { ActionIcon, Box, Group, Loader, Text, Tooltip, useComputedColorScheme } from '@mantine/core'
 import { IconChartBar, IconChevronsDown, IconChevronsUp, IconX } from '@tabler/icons-react'
 
 import AttributeTablePanel from './AttributeTable'
 import { accentEdge, panelBg, panelBorder } from './colorScheme'
-import SelectionDashboardPanel, { SelectToolsRow, useDashboardLayerNames } from './SelectionDashboard'
+import { SelectToolsRow, useDashboardLayerNames } from './dashboardTools'
 import { useResizeHeight } from './useResizeHeight'
 import { useSelection } from './selection'
 import { useApp } from './wms'
+
+// Lazy: the dashboard is ~1.4k lines and pulls @mantine/charts (and recharts
+// under it), all of which used to ship in the initial bundle for every user
+// whether or not they ever opened the tab. Its render below is already
+// guarded by `dashboardTabOpen`, so the chunk is fetched the first time the
+// tab is actually opened. The two pieces DataViewBand needs *without* the
+// dashboard live in dashboardTools.tsx — see that file's note.
+const SelectionDashboardPanel = lazy(() => import('./SelectionDashboard'))
 
 const DEFAULT_HEIGHT = 380
 const MIN_HEIGHT = 160
@@ -261,7 +270,11 @@ export default function DataViewBand() {
       </Group>
 
       <Box p="xs" style={{ flex: 1, minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-        {dashboardTabOpen && <SelectionDashboardPanel isActive={dashboardTabActive} />}
+        {dashboardTabOpen && (
+          <Suspense fallback={<Group justify="center" p="md"><Loader size="sm" /></Group>}>
+            <SelectionDashboardPanel isActive={dashboardTabActive} />
+          </Suspense>
+        )}
         {openLayers.map((ol) => {
           const layer = layers.find((l) => l.name === ol.name)
           if (!layer) return null

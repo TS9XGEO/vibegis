@@ -162,12 +162,12 @@
  */
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ActionIcon, Badge, Box, Group, Loader, MultiSelect, RingProgress, SegmentedControl, Stack, Switch,
+  ActionIcon, Box, Group, Loader, MultiSelect, RingProgress, SegmentedControl, Stack, Switch,
   Text, TextInput, Tooltip, useComputedColorScheme,
 } from '@mantine/core'
 import { BarChart, DonutChart, PieChart } from '@mantine/charts'
 import {
-  IconBookmark, IconChevronRight, IconCircle, IconClick, IconDownload, IconExternalLink, IconFilter, IconLasso,
+  IconBookmark, IconChevronRight, IconDownload, IconExternalLink, IconFilter,
   IconLock, IconTrash, IconX,
 } from '@tabler/icons-react'
 import { useTranslation } from 'react-i18next'
@@ -183,8 +183,7 @@ import {
   fetchAllFeatures, fetchFeaturesInBbox, fetchFeaturesWithFilter, SELECTION_FETCH_CAP,
 } from './features'
 import { bboxWorldFraction, visibleGroundBbox, WIDE_VIEW_FRACTION } from './spatial'
-import { useTools } from './tools'
-import { useSelectCandidates } from './ToolboxControls'
+import { useDashboardLayerNames } from './dashboardTools'
 import { collectionFor, useApp, type LayerFilter } from './wms'
 import { useSelection, type SelectedEntry } from './selection'
 import { hasFullAccess, useAuth } from './auth'
@@ -562,33 +561,6 @@ function BreakdownColumns({
  * `count` is `null` while LayerOverviewCard's async row count hasn't
  * resolved yet (a real selection's `entries.length` is always known
  * synchronously, so this only ever shows "…" in overview mode). */
-/**
- * The layer names the dashboard is currently able to show, in the order it
- * lists them: the layers a real selection spans, or — with nothing selected —
- * every visible layer whose collection can be resolved ("everything selected"
- * overview mode).
- *
- * Exported because DataViewBand.tsx needs the same answer to decide whether
- * its "auswerten" button can actually do anything for a given layer. Keeping
- * that one derivation here means the button can never offer a layer the
- * dashboard would then silently refuse to select.
- */
-export function useDashboardLayerNames(): string[] {
-  const selected = useSelection((s) => s.selected)
-  const layers = useApp((s) => s.layers)
-  const dynamicCollections = useApp((s) => s.dynamicCollections)
-  return useMemo(() => {
-    const fromSelection: string[] = []
-    selected.forEach((entry) => {
-      if (!fromSelection.includes(entry.layer)) fromSelection.push(entry.layer)
-    })
-    if (fromSelection.length > 0) return fromSelection
-    return layers
-      .filter((l) => l.visible && !!(l.source ?? collectionFor(l.name, dynamicCollections)))
-      .map((l) => l.name)
-  }, [selected, layers, dynamicCollections])
-}
-
 function LayerNavRow({
   title, color, count, active, hasFilter, onClick,
 }: {
@@ -1197,67 +1169,6 @@ function LayerOverviewCard({
         )}
       </Box>
     </Box>
-  )
-}
-
-// Exported rather than kept local — DataViewBand.tsx renders this in its own
-// tab-strip header row (next to the maximize button), not this file, so it's
-// visible right in the band's header instead of taking up space inside the
-// dashboard's own scrollable body. Still lives here since it's dashboard-only
-// UI (only DataViewBand renders it, gated on `dashboardTabActive`) and shares
-// this file's other imports. Reuses ToolboxControls.tsx's exact button block
-// and shares its state, so this copy and the floating toolbox's copy can
-// never disagree.
-export function SelectToolsRow() {
-  const { t } = useTranslation()
-  const { setIdentify, setMeasure } = useTools()
-  const selectMode = useSelection((s) => s.mode)
-  const setSelectMode = useSelection((s) => s.setMode)
-  const selectScope = useSelection((s) => s.scope)
-  const selected = useSelection((s) => s.selected)
-  const clearSelection = useSelection((s) => s.clearSelection)
-  const selectCandidates = useSelectCandidates()
-
-  return (
-    <Group gap={6} wrap="nowrap">
-      {(['point', 'circle', 'polygon'] as const).map((m) => {
-        const icon = m === 'point' ? <IconClick size={15} /> : m === 'circle' ? <IconCircle size={15} /> : <IconLasso size={15} />
-        const label = m === 'point' ? t('selectionDashboard.selectPoint') : m === 'circle' ? t('selectionDashboard.selectCircle') : t('selectionDashboard.selectPolygon')
-        const disabledReason = selectScope === 'active'
-          ? t('selectionDashboard.selectFirstOpenTable')
-          : t('selectionDashboard.selectFirstVisibleLayer')
-        return (
-          <Tooltip key={m} label={selectCandidates.length > 0 ? t('selectionDashboard.selectThis', { label }) : disabledReason} withArrow>
-            <ActionIcon
-              variant={selectMode === m ? 'filled' : 'subtle'}
-              color={selectMode === m ? 'yellow' : 'gray'}
-              size="sm"
-              disabled={selectCandidates.length === 0}
-              onClick={() => {
-                setIdentify(false)
-                setMeasure('off')
-                setSelectMode(selectMode === m ? 'off' : m)
-              }}
-            >
-              {icon}
-            </ActionIcon>
-          </Tooltip>
-        )
-      })}
-
-      {selected.size > 0 && (
-        <>
-          <Badge size="sm" variant="light" color="yellow">
-            {t('selectionDashboard.selectedCount', { count: selected.size })}
-          </Badge>
-          <Tooltip label={t('selectionDashboard.clearSelection')} withArrow>
-            <ActionIcon variant="subtle" size="sm" color="gray" onClick={clearSelection}>
-              <IconX size={13} />
-            </ActionIcon>
-          </Tooltip>
-        </>
-      )}
-    </Group>
   )
 }
 

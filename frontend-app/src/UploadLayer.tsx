@@ -23,13 +23,12 @@ import {
 import { useTranslation } from 'react-i18next'
 
 import { TourTarget } from './tour/TourTarget'
-import { useUpload } from './uploadState'
+import { ACCEPT, useUpload } from './uploadState'
 import {
   REGISTER_TABLE_URL, TABLES_URL, UPLOAD_POINTCLOUD_URL, UPLOAD_RASTER_URL,
   UPLOAD_RASTER_ZIP_URL, UPLOAD_URL, useApp,
 } from './wms'
 
-export const ACCEPT = '.zip,.gpkg,.geojson,.json,.kml,.gml,.tif,.tiff,.las,.laz'
 const RASTER_ACCEPT = '.tif,.tiff,.zip'
 const RASTER_NAME_RE = /\.tiff?$/i
 const POINTCLOUD_ACCEPT = '.las,.laz'
