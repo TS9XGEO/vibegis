@@ -65,8 +65,7 @@ Everything reaches the browser through nginx on `:8080`, one origin, no CORS.
                                   billing endpoint: an admin creates every account.
 ```
 
-Dagster (`:3000`, ETL assets), PostGIS (`:5432`) and Grafana (`:3001`, log viewer —
-see "Logging" below) bind to `127.0.0.1` only.
+Dagster (`:3000`, ETL assets) and PostGIS (`:5432`) bind to `127.0.0.1` only.
 
 ## Three Postgres schemas
 
@@ -251,45 +250,19 @@ ClassifyLayer, AttributeTable/Filter, MapTools, Geoprocessing, the AI agent pane
 UploadLayer) is still hardcoded German text, not yet converted — the login flow,
 welcome/goodbye splash, Sideband, UserAdmin and Pages are.
 
-## Logging & Monitoring
+## Logging
 
 Structured JSON to stdout in `upload-api` (`app.py`'s `log`/`request_id_ctx`, near the
 top of the file) — every request gets an id, forwarded as `X-Request-Id` and attached
 to every log line from handling it. nginx generates that id first when one didn't
-already arrive (`nginx.conf`'s `log_format`), so a request traces gateway-to-backend.
-Shipped to Loki (`loki`/`promtail`/`grafana` services in `docker-compose.yml`) and
-viewable at `http://127.0.0.1:3001` (Grafana; Loki datasource auto-provisioned, see
-`grafana/provisioning/`). Promtail talks to the Docker Engine API over the socket
-mount to collect every container's logs — not the Loki Docker logging-driver plugin,
-which needs `docker plugin install` on the host and would break this repo's "nothing
-to install on the host" principle. Dagster/MapServer/MapProxy needed no logging
-changes — they already log to stdout/stderr, which Promtail already picks up.
+already arrive (`nginx.conf`'s `log_format`), so a request traces gateway-to-backend
+in `docker compose logs`.
 
-Per-container resource usage (CPU/memory/network/disk) is a separate pipeline:
-`docker-stats-exporter` (own small `build:`-based service, `docker-stats-exporter/
-exporter.py`) polls `/containers/{id}/stats` and exposes it as Prometheus metrics
-labeled `service` — the same Compose service name promtail already relabels its log
-streams with. **Neither collector mounts `/var/run/docker.sock` any more**: both
-talk to the `docker-socket-proxy` service (`tecnativa/docker-socket-proxy`) over
-TCP, which is an HAProxy ACL allowing only the endpoints they need. A `:ro` bind of
-the socket does not make the *API* read-only — anything holding it can read every
-other container's environment, which is where `PGPASSWORD`, `AUTH_JWT_SECRET` and
-`AI_KEY_ENCRYPTION_SECRET` live in plaintext. `DOCKER_HOST` points both at the
-proxy; promtail needs `NETWORKS: "1"` on it or it fails computing network labels.
-**Not cAdvisor**, deliberately: cAdvisor needs direct cgroup/overlay2 filesystem
-access to the daemon, and this stack runs on Docker Desktop, whose engine lives in
-its own isolated VM that a sibling container's bind mounts can't reach — confirmed
-live (cAdvisor only ever saw empty host cgroup slices, never the real containers).
-The Docker socket itself is the one channel proven to work across that boundary.
-The `prometheus` service scrapes and stores the exporter's metrics
-(`prometheus/prometheus.yml`), and Grafana gets a second auto-provisioned datasource
-for it (`grafana/provisioning/datasources/prometheus.yaml`), 127.0.0.1-only on
-`:9090` like every other admin UI here. Both pipelines converge in one
-pre-provisioned dashboard, **"VibeGIS — Services"**
-(`grafana/provisioning/dashboards/vibegis-overview.json` + its `dashboards.yaml`
-provider) — open Grafana and it's already there, no manual import. A `$service`
-picker filters both the resource graphs and the log panel together, since they
-share the one label name across Prometheus and Loki.
+There is no aggregation tier. A Loki/Promtail/Grafana + Prometheus/docker-stats-
+exporter stack existed and was removed — six always-on services and 409 MB to observe
+a single-host install that has no test suite. The tradeoff taken knowingly: no
+searchable history across container restarts. `git show eb2ae81` has the whole thing
+if a customer ever needs it back.
 
 ## Edit X → do Y
 
@@ -305,9 +278,6 @@ share the one label name across Prometheus and Loki.
 | `docker-compose.yml`, `.env` | `docker compose up -d` |
 | `postgis/initdb/*.sql` | only ever runs on a **fresh** volume, i.e. after `down -v` |
 | `.env` (`AUTH_JWT_SECRET`) | `docker compose up -d` (recreates upload-api) — invalidates every existing session immediately |
-| `prometheus/prometheus.yml` | `restart prometheus` — no live-reload endpoint enabled |
-| `grafana/provisioning/dashboards/*.json` | nothing — Grafana's file provider polls every 10s (`dashboards.yaml`'s `updateIntervalSeconds`) |
-| `docker-stats-exporter/exporter.py` | `up -d --build docker-stats-exporter` — `build:`-based like upload-api, not bind-mounted |
 | `qgis-processing/worker.py`, `qgis-processing/Dockerfile` | `up -d --build qgis-processing` — `build:`-based like upload-api, so a plain `restart` silently runs the old image |
 | `upload-api/qgis_catalog.py`, `upload-api/superset_client.py` | `up -d --build upload-api` (both are COPYed into that image) |
 | `superset/superset_config.py`, `superset/vibegis_security.py` | `up -d --build superset` — COPYed into the image, so a plain `restart` silently runs the old copy |
@@ -399,8 +369,8 @@ docker compose -f docker-compose.yml -f docker-compose.tls.yml \
 - **The QGIS DSN carries no password, for the same reason the mapfiles don't.**
   libpq reads `PGPASSWORD` from the worker's environment. This matters more here than
   in a mapfile: `qgis_process` echoes every INPUT parameter it was given straight to
-  stdout, which promtail ships to Loki, so an inline password would end up in the log
-  store. The worker — not upload-api — is what composes the DSN, so upload-api cannot
+  stdout, which lands in the container log, so an inline password would end up
+  there. The worker — not upload-api — is what composes the DSN, so upload-api cannot
   leak one even by mistake; it only ever sends `{"type": "pgtable", schema, table}`.
 - **The QGIS processing plugin needs two apt packages that the base image lacks.**
   `camptocamp/qgis-server:3.40` ships `qgis_process`, but importing the `processing`
@@ -623,7 +593,7 @@ all, and `run_select_query()` checks the relations the planner actually reads
 comes back attributed to `public`) against the caller's visible layers.
 
 **Non-root containers.** `upload-api`, `qgis-processing`, `dagster`, `mapproxy`
-and `docker-stats-exporter` run as uid `APP_UID`:`APP_GID` (default 1001, the
+run as uid `APP_UID`:`APP_GID` (default 1001, the
 checkout's owner), set both as a build arg and as compose's `user:` so a
 different host uid can be fixed without a rebuild. Every service has
 `security_opt: [no-new-privileges:true]`, and the eleven that can consume real
@@ -637,8 +607,7 @@ process is root by design and forks unprivileged workers itself.
 **Secrets.** `check_secrets()` runs at import time in `app.py` and refuses to
 boot if `AUTH_JWT_SECRET`, `AI_KEY_ENCRYPTION_SECRET`, `AI_READONLY_PG_PASSWORD`
 or `PGPASSWORD` is empty, still a `change_me` placeholder, or too short — naming
-the `.env` key in the error. Compose uses `${GRAFANA_ADMIN_PASSWORD:?…}` for the
-same reason. Mapfile and QGIS `CONNECTION` strings carry neither `user=` nor
+the `.env` key in the error. Mapfile and QGIS `CONNECTION` strings carry neither `user=` nor
 `password=`; both come from the reading container's `PGUSER`/`PGPASSWORD`.
 
 **The gateway.** TLS overlay with HSTS; `X-Content-Type-Options`,
@@ -666,7 +635,7 @@ to enforcing.
 **Compliance is not started, deliberately.** The scope above is technical only.
 Once it is complete, the compliance track is the next piece of work: GDPR/DSGVO
 posture, a DPA with every subprocessor, retention and deletion policy, personal
-data in the Loki log store, account export and deletion, and ISO 27001 / TISAX
+data in the container logs, account export and deletion, and ISO 27001 / TISAX
 readiness if a customer asks. None of it is built and none of it should be
 claimed.
 

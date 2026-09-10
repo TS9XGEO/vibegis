@@ -73,10 +73,12 @@ import qgis_catalog
 import superset_client
 
 # ---------------------------------------------------------------- logging
-# JSON to stdout (picked up by Promtail -> Loki, see docker-compose.yml's
-# loki/promtail/grafana services) with a request id on every line, so one
-# request's log lines can be grepped/filtered together in Grafana even
-# though uvicorn handles requests concurrently. The id is also echoed back
+# JSON to stdout — read with `docker compose logs upload-api` — with a
+# request id on every line, so one request's log lines can be grepped
+# together even though uvicorn handles requests concurrently. (There is no
+# log aggregator any more; a Loki/Promtail/Grafana tier existed and was
+# removed as not earning its keep at this scale. This format is aggregator-
+# ready if one ever comes back.) The id is also echoed back
 # as X-Request-Id and, on a request that arrived through the gateway,
 # matches the id nginx already generated for it (see nginx.conf's
 # log_format) — one id traces a request gateway-to-backend.
@@ -109,10 +111,9 @@ log = _configure_logging()
 # repo can forge an admin session cookie. Refusing to start is the only failure
 # mode that cannot be missed.
 #
-# Only the secrets this process actually sees are checked here. Grafana's and
-# pgAdmin's own admin passwords live in their containers' environments and are
-# unset-defaultable (docker-compose.yml falls back to admin/admin for Grafana);
-# they are loopback-bound, and .env.example calls them out.
+# Only the secrets this process actually sees are checked here. pgAdmin's own
+# admin password lives in its container's environment; it is loopback-bound
+# and behind the `tools` profile, and .env.example calls it out.
 _PLACEHOLDER_MARKERS = ("change_me", "change-me", "changeme", "please_use_a_long_random_string")
 
 # env var -> (the .env key an operator actually edits, minimum length).
@@ -165,14 +166,18 @@ async def request_id_middleware(request: Request, call_next):
     token = request_id_ctx.set(rid)
     try:
         response = await call_next(request)
+        response.headers["X-Request-Id"] = rid
+        # Must stay inside the try: the reset below clears the context var
+        # that _RequestIdFilter reads, so logging after it recorded
+        # "request_id": "-" on every single access line — the one line per
+        # request that exists to be correlated.
+        log.info(
+            "request",
+            extra={"http_method": request.method, "http_path": request.url.path, "http_status": response.status_code},
+        )
+        return response
     finally:
         request_id_ctx.reset(token)
-    response.headers["X-Request-Id"] = rid
-    log.info(
-        "request",
-        extra={"http_method": request.method, "http_path": request.url.path, "http_status": response.status_code},
-    )
-    return response
 
 ALLOWED_EXT = {".zip", ".gpkg", ".geojson", ".json", ".kml", ".gml"}
 MAX_BYTES = 2048 * 1024 * 1024  # 2 GB — matches nginx's client_max_body_size for /upload

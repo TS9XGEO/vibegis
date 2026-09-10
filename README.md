@@ -27,8 +27,7 @@ cd vibegis
 cp .env.example .env
 # generate every secret — the stack refuses to start on a placeholder (see below)
 for k in AUTH_JWT_SECRET AI_KEY_ENCRYPTION_SECRET AI_READONLY_PG_PASSWORD \
-         POSTGRES_PASSWORD RENDER_PG_PASSWORD GRAFANA_ADMIN_PASSWORD \
-         PGADMIN_DEFAULT_PASSWORD; do
+         POSTGRES_PASSWORD RENDER_PG_PASSWORD PGADMIN_DEFAULT_PASSWORD; do
   sed -i "s|^$k=.*|$k=$(openssl rand -hex 32)|" .env
 done
 sed -i "s|^APP_UID=.*|APP_UID=$(id -u)|; s|^APP_GID=.*|APP_GID=$(id -g)|" .env
@@ -48,7 +47,7 @@ bash bin/add-user.sh <user> <pass> admin   # every route needs a login — this 
 > otherwise come up looking healthy with every session forgeable.
 
 > **`APP_UID`/`APP_GID` must own the checkout.** `upload-api`, `qgis-processing`,
-> `dagster`, `mapproxy` and `docker-stats-exporter` run as that uid, and they
+> `dagster` and `mapproxy` run as that uid, and they
 > write to `mapserver/mapfiles`, `mapserver/rasters`, `pointclouds` and
 > `mapproxy`. On a *fresh* install the `sed` above is enough. On an install that
 > already ran as root, run `bash bin/fix-ownership.sh` once — Docker applies image
@@ -122,7 +121,7 @@ on the install** — an untested backup is not a backup.
 
 **What is deliberately not covered:** compliance. The hardening in this repo is
 technical only. GDPR/DSGVO posture, a DPA with each subprocessor, retention and
-deletion policy, personal data in the Loki log store, account export and deletion,
+deletion policy, personal data in the container logs, account export and deletion,
 and ISO 27001 / TISAX readiness are all unstarted and must not be claimed. See
 `CLAUDE.md`'s "Still open before a real install".
 

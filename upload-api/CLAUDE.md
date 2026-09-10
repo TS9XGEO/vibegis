@@ -20,9 +20,9 @@ endpoints below), `userdb` (just `users`). See the root CLAUDE.md and
 `bin/migrate-schemas.sql`. `ai_agent.py`'s `AI_READABLE_SCHEMAS` deliberately omits
 `userdb`.
 
-**Structured JSON logging to stdout**, shipped to Loki by the `promtail` service and
-viewable in Grafana (`http://127.0.0.1:3001`, 127.0.0.1-only like Dagster/PostGIS —
-see `docker-compose.yml`). Every request gets an id (`request_id_ctx`, near the top of
+**Structured JSON logging to stdout** — read with `docker compose logs upload-api`;
+there is no aggregation tier (see the root `CLAUDE.md`'s "Logging"). Every request
+gets an id (`request_id_ctx`, near the top of
 `app.py`) — read from an incoming `X-Request-Id` header if the gateway already set one
 (nginx generates one per request, see `nginx.conf`'s `log_format`), otherwise
 generated fresh — echoed back on the response and attached to every log line emitted
